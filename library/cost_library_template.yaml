@@ -1,0 +1,998 @@
+# TieBack Studio cost library — TEMPLATE
+#
+# Replace the numbers below with your own rates, then load it in the app:
+#   Equipment catalog tab → "Load cost library (.yaml)" → "Replace catalog with this library".
+# It is also saved inside every project file, so a project carries its rates with it.
+#
+# What to edit first (biggest effect on total CAPEX):
+#   spreads[].day_rate_usd      vessel day rates
+#   spreads[].mob_demob_usd     mobilisation per campaign
+#   items[].procurement_usd     per unit, per metre, or per inch-metre (see cost_basis)
+#   items[].fabrication_usd     yard fabrication/assembly/testing, same basis
+#   items[].install_days        per unit, or per km for linear items
+#   items[].lead_time_months    award → ready for load-out (drives the schedule)
+#   items[].uncertainty         [low, most likely, high] multipliers for the Monte Carlo
+#
+# Keep item_id values unchanged if you want existing projects to keep loading.
+schema: tieback_catalog/1
+disclaimer: Indicative rates unless replaced by a project cost library.
+spreads:
+- key: csv
+  name: Construction support vessel
+  day_rate_usd: 250000
+  mob_demob_usd: 1500000
+  uncertainty:
+  - 0.85
+  - 1.0
+  - 1.4
+  lift_capacity_te: 250
+- key: plv
+  name: Pipelay vessel (reel/S-lay)
+  day_rate_usd: 450000
+  mob_demob_usd: 4000000
+  uncertainty:
+  - 0.85
+  - 1.0
+  - 1.4
+  lift_capacity_te: 400
+- key: hlv
+  name: Heavy-lift vessel
+  day_rate_usd: 650000
+  mob_demob_usd: 5000000
+  uncertainty:
+  - 0.85
+  - 1.0
+  - 1.4
+  lift_capacity_te: 4000
+- key: rig
+  name: Semi-sub rig (XT/completion ops)
+  day_rate_usd: 450000
+  mob_demob_usd: 3000000
+  uncertainty:
+  - 0.85
+  - 1.0
+  - 1.4
+  lift_capacity_te: 300
+- key: ulv
+  name: Umbilical/cable lay vessel
+  day_rate_usd: 300000
+  mob_demob_usd: 2000000
+  uncertainty:
+  - 0.85
+  - 1.0
+  - 1.4
+  lift_capacity_te: 150
+- key: host
+  name: Host platform campaign (topsides)
+  day_rate_usd: 120000
+  mob_demob_usd: 0
+  uncertainty:
+  - 0.85
+  - 1.0
+  - 1.4
+  lift_capacity_te: 0
+items:
+- item_id: xt_vxt_10k
+  name: Vertical XT 10k
+  category: well
+  cost_basis: unit
+  procurement_usd: 5500000.0
+  fabrication_usd: 500000.0
+  engineering_frac: 0.08
+  install_spread: rig
+  install_days: 3
+  lead_time_months: 18
+  rating_psi: 10000
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 35
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: ''
+  symbol: xt
+  footprint_l_m: 5
+  footprint_w_m: 5
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: xt_hxt_10k
+  name: Horizontal XT 10k
+  category: well
+  cost_basis: unit
+  procurement_usd: 7000000.0
+  fabrication_usd: 600000.0
+  engineering_frac: 0.08
+  install_spread: rig
+  install_days: 3
+  lead_time_months: 20
+  rating_psi: 10000
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 45
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: ''
+  symbol: xt
+  footprint_l_m: 5
+  footprint_w_m: 5
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: xt_hxt_15k
+  name: Horizontal XT 15k HPHT
+  category: well
+  cost_basis: unit
+  procurement_usd: 10500000.0
+  fabrication_usd: 800000.0
+  engineering_frac: 0.08
+  install_spread: rig
+  install_days: 4
+  lead_time_months: 24
+  rating_psi: 15000
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 60
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.4
+  notes: ''
+  symbol: xt
+  footprint_l_m: 5
+  footprint_w_m: 5
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: tmpl_4slot
+  name: 4-slot template + protection
+  category: template
+  cost_basis: unit
+  procurement_usd: 12000000.0
+  fabrication_usd: 8000000.0
+  engineering_frac: 0.08
+  install_spread: hlv
+  install_days: 4
+  lead_time_months: 18
+  rating_psi: 10000.0
+  slots: 4
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 400
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: ''
+  symbol: template
+  footprint_l_m: 32
+  footprint_w_m: 22
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: tmpl_6slot
+  name: 6-slot template + protection
+  category: template
+  cost_basis: unit
+  procurement_usd: 16000000.0
+  fabrication_usd: 11000000.0
+  engineering_frac: 0.08
+  install_spread: hlv
+  install_days: 5
+  lead_time_months: 20
+  rating_psi: 10000.0
+  slots: 6
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 600
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: ''
+  symbol: template
+  footprint_l_m: 42
+  footprint_w_m: 24
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: mfld_4slot
+  name: 4-slot production manifold
+  category: manifold
+  cost_basis: unit
+  procurement_usd: 14000000.0
+  fabrication_usd: 5000000.0
+  engineering_frac: 0.08
+  install_spread: hlv
+  install_days: 3
+  lead_time_months: 18
+  rating_psi: 10000.0
+  slots: 4
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 250
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: ''
+  symbol: manifold
+  footprint_l_m: 20
+  footprint_w_m: 14
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: plet_std
+  name: PLET (single hub)
+  category: plet
+  cost_basis: unit
+  procurement_usd: 2000000.0
+  fabrication_usd: 1000000.0
+  engineering_frac: 0.08
+  install_spread: plv
+  install_days: 1
+  lead_time_months: 12
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 30
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: ''
+  symbol: plet
+  footprint_l_m: 12
+  footprint_w_m: 6
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: plem_std
+  name: PLEM (multi hub)
+  category: plem
+  cost_basis: unit
+  procurement_usd: 4000000.0
+  fabrication_usd: 2000000.0
+  engineering_frac: 0.08
+  install_spread: csv
+  install_days: 2
+  lead_time_months: 14
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 80
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: ''
+  symbol: plet
+  footprint_l_m: 16
+  footprint_w_m: 10
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: ilt_std
+  name: In-line tee
+  category: ilt
+  cost_basis: unit
+  procurement_usd: 2500000.0
+  fabrication_usd: 1000000.0
+  engineering_frac: 0.08
+  install_spread: plv
+  install_days: 1
+  lead_time_months: 12
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 25
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: ''
+  symbol: ilt
+  footprint_l_m: 0.0
+  footprint_w_m: 0.0
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: ssiv_std
+  name: Subsea isolation valve
+  category: ssiv
+  cost_basis: unit
+  procurement_usd: 6000000.0
+  fabrication_usd: 1500000.0
+  engineering_frac: 0.08
+  install_spread: csv
+  install_days: 2
+  lead_time_months: 16
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 60
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: ''
+  symbol: ssiv
+  footprint_l_m: 0.0
+  footprint_w_m: 0.0
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: mpp_2x
+  name: Multiphase boosting station (2 pumps)
+  category: boosting
+  cost_basis: unit
+  procurement_usd: 90000000.0
+  fabrication_usd: 25000000.0
+  engineering_frac: 0.08
+  install_spread: hlv
+  install_days: 6
+  lead_time_months: 30
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 350
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.5
+  notes: ''
+  symbol: pump
+  footprint_l_m: 24
+  footprint_w_m: 16
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: comp_station
+  name: Subsea compression station
+  category: compression
+  cost_basis: unit
+  procurement_usd: 450000000.0
+  fabrication_usd: 150000000.0
+  engineering_frac: 0.08
+  install_spread: hlv
+  install_days: 15
+  lead_time_months: 42
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 1500
+  uncertainty:
+  - 0.85
+  - 1.0
+  - 1.6
+  notes: ''
+  symbol: pump
+  footprint_l_m: 60
+  footprint_w_m: 30
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: sep_station
+  name: Subsea separation + water reinjection
+  category: separation
+  cost_basis: unit
+  procurement_usd: 180000000.0
+  fabrication_usd: 70000000.0
+  engineering_frac: 0.08
+  install_spread: hlv
+  install_days: 10
+  lead_time_months: 36
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 900
+  uncertainty:
+  - 0.85
+  - 1.0
+  - 1.6
+  notes: ''
+  symbol: pump
+  footprint_l_m: 45
+  footprint_w_m: 25
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: riser_base
+  name: Riser base
+  category: riser_base
+  cost_basis: unit
+  procurement_usd: 3000000.0
+  fabrication_usd: 2000000.0
+  engineering_frac: 0.08
+  install_spread: csv
+  install_days: 2
+  lead_time_months: 14
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 120
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: ''
+  symbol: riser_base
+  footprint_l_m: 14
+  footprint_w_m: 14
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: host_tiein
+  name: Host tie-in modification (topsides)
+  category: host
+  cost_basis: unit
+  procurement_usd: 25000000.0
+  fabrication_usd: 15000000.0
+  engineering_frac: 0.2
+  install_spread: host
+  install_days: 60
+  lead_time_months: 24
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 300
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.6
+  notes: Receiving facilities, pig receiver, control/HPU, chemical injection
+  symbol: jacket
+  footprint_l_m: 60
+  footprint_w_m: 45
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: host_semi
+  name: "Host tie-in \u2014 semi-submersible"
+  category: host
+  cost_basis: unit
+  procurement_usd: 30000000.0
+  fabrication_usd: 18000000.0
+  engineering_frac: 0.2
+  install_spread: host
+  install_days: 70
+  lead_time_months: 26
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 350
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.6
+  notes: 'Floater tie-in: riser porch/pull-in, receiving facilities, utilities'
+  symbol: semisub
+  footprint_l_m: 110
+  footprint_w_m: 80
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: host_fpso
+  name: "Host tie-in \u2014 FPSO"
+  category: host
+  cost_basis: unit
+  procurement_usd: 35000000.0
+  fabrication_usd: 20000000.0
+  engineering_frac: 0.22
+  install_spread: host
+  install_days: 80
+  lead_time_months: 28
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 400
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.7
+  notes: Turret/swivel slot, riser pull-in, topsides tie-in
+  symbol: fpso
+  footprint_l_m: 280
+  footprint_w_m: 50
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: fl_rigid_cs
+  name: Rigid CS flowline (coated)
+  category: flowline
+  cost_basis: per_inch_m
+  procurement_usd: 95
+  fabrication_usd: 45
+  engineering_frac: 0.08
+  install_spread: plv
+  install_days: 0.35
+  lead_time_months: 12
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 20
+  min_diameter_in: 4
+  weight_te: 90
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: ''
+  symbol: ''
+  footprint_l_m: 0.0
+  footprint_w_m: 0.0
+  line_color: '#00243D'
+  line_dash: ''
+  wall_thickness_in: 0.75
+  insulation_mm: 0.0
+  coating_mm: 45.0
+- item_id: fl_rigid_cra
+  name: Rigid CRA-lined flowline
+  category: flowline
+  cost_basis: per_inch_m
+  procurement_usd: 260
+  fabrication_usd: 70
+  engineering_frac: 0.08
+  install_spread: plv
+  install_days: 0.4
+  lead_time_months: 16
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 16
+  min_diameter_in: 4
+  weight_te: 95
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: ''
+  symbol: ''
+  footprint_l_m: 0.0
+  footprint_w_m: 0.0
+  line_color: '#004B6B'
+  line_dash: ''
+  wall_thickness_in: 0.75
+  insulation_mm: 0.0
+  coating_mm: 45.0
+- item_id: fl_pip
+  name: Pipe-in-pipe insulated flowline
+  category: flowline
+  cost_basis: per_inch_m
+  procurement_usd: 240
+  fabrication_usd: 110
+  engineering_frac: 0.08
+  install_spread: plv
+  install_days: 0.5
+  lead_time_months: 16
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 14
+  min_diameter_in: 6
+  weight_te: 160
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: ''
+  symbol: ''
+  footprint_l_m: 0.0
+  footprint_w_m: 0.0
+  line_color: '#0F7A8A'
+  line_dash: ''
+  wall_thickness_in: 0.63
+  insulation_mm: 50.0
+  coating_mm: 6.0
+- item_id: fl_deh
+  name: DEH heated rigid flowline
+  category: flowline
+  cost_basis: per_inch_m
+  procurement_usd: 220
+  fabrication_usd: 90
+  engineering_frac: 0.08
+  install_spread: plv
+  install_days: 0.5
+  lead_time_months: 18
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 14
+  min_diameter_in: 6
+  weight_te: 110
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: Includes piggyback cable; topside power supply costed separately
+  symbol: ''
+  footprint_l_m: 0.0
+  footprint_w_m: 0.0
+  line_color: '#C4561B'
+  line_dash: ''
+  wall_thickness_in: 0.75
+  insulation_mm: 50.0
+  coating_mm: 6.0
+- item_id: fl_flex
+  name: Flexible flowline
+  category: flowline
+  cost_basis: per_inch_m
+  procurement_usd: 210
+  fabrication_usd: 0
+  engineering_frac: 0.08
+  install_spread: csv
+  install_days: 0.3
+  lead_time_months: 14
+  rating_psi: 7500
+  slots: 0
+  max_diameter_in: 16
+  min_diameter_in: 2
+  weight_te: 70
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: ''
+  symbol: ''
+  footprint_l_m: 0.0
+  footprint_w_m: 0.0
+  line_color: '#3E8A91'
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 25.0
+  coating_mm: 8.0
+- item_id: umb_static
+  name: Static steel-tube umbilical
+  category: umbilical
+  cost_basis: per_m
+  procurement_usd: 900
+  fabrication_usd: 0
+  engineering_frac: 0.08
+  install_spread: ulv
+  install_days: 0.25
+  lead_time_months: 18
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 25
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: ''
+  symbol: ''
+  footprint_l_m: 0.0
+  footprint_w_m: 0.0
+  line_color: '#E9A23B'
+  line_dash: 8 6
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: umb_dynamic
+  name: Dynamic umbilical
+  category: umbilical
+  cost_basis: per_m
+  procurement_usd: 2500
+  fabrication_usd: 0
+  engineering_frac: 0.08
+  install_spread: ulv
+  install_days: 0.5
+  lead_time_months: 20
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 30
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: ''
+  symbol: ''
+  footprint_l_m: 0.0
+  footprint_w_m: 0.0
+  line_color: '#C98A1F'
+  line_dash: 8 6
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: jumper_rigid
+  name: Rigid spool/jumper
+  category: jumper
+  cost_basis: unit
+  procurement_usd: 800000.0
+  fabrication_usd: 700000.0
+  engineering_frac: 0.08
+  install_spread: csv
+  install_days: 1.5
+  lead_time_months: 6
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 15
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: Fabricated after metrology; lead time from metrology
+  symbol: ''
+  footprint_l_m: 0.0
+  footprint_w_m: 0.0
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.63
+  insulation_mm: 0.0
+  coating_mm: 6.0
+- item_id: riser_flex
+  name: Flexible dynamic riser
+  category: riser
+  cost_basis: per_inch_m
+  procurement_usd: 420
+  fabrication_usd: 0
+  engineering_frac: 0.08
+  install_spread: csv
+  install_days: 2.0
+  lead_time_months: 18
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 16
+  min_diameter_in: 4
+  weight_te: 120
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: ''
+  symbol: ''
+  footprint_l_m: 0.0
+  footprint_w_m: 0.0
+  line_color: '#7D4EBF'
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 30.0
+  coating_mm: 8.0
+- item_id: umb_power
+  name: Electro-hydraulic umbilical with power cores
+  category: umbilical
+  cost_basis: per_m
+  procurement_usd: 1500
+  fabrication_usd: 0.0
+  engineering_frac: 0.08
+  install_spread: ulv
+  install_days: 0.3
+  lead_time_months: 22
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 32
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: Control, chemical and LV/MV power in one umbilical
+  symbol: ''
+  footprint_l_m: 0.0
+  footprint_w_m: 0.0
+  line_color: '#B3801A'
+  line_dash: 8 6
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: chem_line
+  name: Chemical injection line (MEG/methanol)
+  category: utility_line
+  cost_basis: per_m
+  procurement_usd: 260
+  fabrication_usd: 0.0
+  engineering_frac: 0.08
+  install_spread: ulv
+  install_days: 0.2
+  lead_time_months: 14
+  rating_psi: 10000
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 12
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: Stand-alone bulk chemical line; often piggybacked on the flowline
+  symbol: ''
+  footprint_l_m: 0.0
+  footprint_w_m: 0.0
+  line_color: '#9DBA00'
+  line_dash: 4 4
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: gaslift_line
+  name: Gas lift line
+  category: utility_line
+  cost_basis: per_inch_m
+  procurement_usd: 95
+  fabrication_usd: 45
+  engineering_frac: 0.08
+  install_spread: plv
+  install_days: 0.35
+  lead_time_months: 12
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 10
+  min_diameter_in: 3
+  weight_te: 70
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: ''
+  symbol: ''
+  footprint_l_m: 0.0
+  footprint_w_m: 0.0
+  line_color: '#5B8FB9'
+  line_dash: 10 4
+  wall_thickness_in: 0.5
+  insulation_mm: 0.0
+  coating_mm: 40.0
+- item_id: winj_line
+  name: Water injection flowline
+  category: utility_line
+  cost_basis: per_inch_m
+  procurement_usd: 90
+  fabrication_usd: 42
+  engineering_frac: 0.08
+  install_spread: plv
+  install_days: 0.35
+  lead_time_months: 12
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 16
+  min_diameter_in: 4
+  weight_te: 80
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: ''
+  symbol: ''
+  footprint_l_m: 0.0
+  footprint_w_m: 0.0
+  line_color: '#2E86AB'
+  line_dash: ''
+  wall_thickness_in: 0.5
+  insulation_mm: 0.0
+  coating_mm: 40.0
+- item_id: service_line
+  name: Hydraulic/service line
+  category: utility_line
+  cost_basis: per_m
+  procurement_usd: 180
+  fabrication_usd: 0.0
+  engineering_frac: 0.08
+  install_spread: ulv
+  install_days: 0.2
+  lead_time_months: 12
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 8
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: ''
+  symbol: ''
+  footprint_l_m: 0.0
+  footprint_w_m: 0.0
+  line_color: '#8C6D1F'
+  line_dash: 3 5
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: fibre_cable
+  name: Fibre-optic cable
+  category: utility_line
+  cost_basis: per_m
+  procurement_usd: 120
+  fabrication_usd: 0.0
+  engineering_frac: 0.08
+  install_spread: ulv
+  install_days: 0.2
+  lead_time_months: 12
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 5
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: ''
+  symbol: ''
+  footprint_l_m: 0.0
+  footprint_w_m: 0.0
+  line_color: '#6F6F6F'
+  line_dash: 1 5
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: pwr_cable
+  name: Subsea power cable (HV)
+  category: power_cable
+  cost_basis: per_m
+  procurement_usd: 1600
+  fabrication_usd: 0
+  engineering_frac: 0.08
+  install_spread: ulv
+  install_days: 0.3
+  lead_time_months: 24
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 40
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: ''
+  symbol: ''
+  footprint_l_m: 0.0
+  footprint_w_m: 0.0
+  line_color: '#C4561B'
+  line_dash: 2 6
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
