@@ -24,10 +24,20 @@ import tb_flowassurance as tb_fa
 import tb_geo
 import tb_network as net
 
-# Sodir facility kinds worth screening as a host (surface installations that process)
+# Sodir facility kinds worth screening as a host
 HOST_KINDS = ("PLATFORM", "FPSO", "FSU", "FIXED", "FLOATING", "TLP", "JACKET", "SEMISUB",
               "CONDEEP", "SPAR", "MOPU", "MULTI WELL TEMPLATE", "SUBSEA STRUCTURE")
 SURFACE_ONLY_DEFAULT = True
+
+# fclPhase / fclStatus wording that means the facility is no longer a live host.
+# Sodir keeps decommissioned structures in "Facilities, in place" until they are
+# physically removed, so status has to be read, not assumed from the layer name.
+INACTIVE_WORDS = ("REMOV", "SHUT", "ABANDON", "DECOMMISSION", "DISUSED", "DEMOLI",
+                  "PLUGGED", "CESSATION", "OUT OF SERVICE")
+FUTURE_WORDS = ("FUTURE", "PLANNED", "UNDER CONSTRUCTION", "APPROVED", "PROJECT")
+# A mobile unit is not something to tie a field back to.
+MOVEABLE_WORDS = ("MOVEABLE", "MOVABLE", "MOBILE")
+MOVEABLE_KINDS = ("JACK-UP", "JACKUP", "DRILLING", "SEMISUB DRILLING", "VESSEL", "SUPPORT")
 
 
 @dataclass
@@ -40,6 +50,12 @@ class Candidate:
     operator: str = ""
     belongs_to: str = ""
     source: str = "sodir"
+    npdid: str = ""
+    phase: str = ""
+    status: str = ""
+    activity: str = "unknown"      # in operation | not in operation | planned | unknown
+    activity_reason: str = ""
+    fixed_or_moveable: str = ""
 
     @property
     def label(self) -> str:
@@ -48,10 +64,50 @@ class Candidate:
             bits.append(self.kind.title())
         return " · ".join(bits)
 
+    @property
+    def key(self) -> str:
+        """Identity for de-duplication: Sodir's NPDID when present, else name + position."""
+        if self.npdid:
+            return f"npdid:{self.npdid}"
+        return f"{self.name.strip().upper()}@{self.lat:.3f},{self.lon:.3f}"
+
+
+def _has(text: str, words) -> bool:
+    t = (text or "").upper()
+    return any(w in t for w in words)
+
+
+def facility_activity(props: dict) -> tuple:
+    """(activity, reason) from the Sodir status fields.
+
+    Removal and shutdown dates take precedence over the phase text, because a
+    structure keeps its old phase wording until the record is updated.
+    """
+    p = {k.lower(): v for k, v in (props or {}).items()}
+    if p.get("fcldateremoved"):
+        return "not in operation", "removed"
+    if p.get("fcldateshutdown"):
+        return "not in operation", "shut down"
+    phase, status = str(p.get("fclphase") or ""), str(p.get("fclstatus") or "")
+    if _has(phase, INACTIVE_WORDS) or _has(status, INACTIVE_WORDS):
+        return "not in operation", (phase or status).lower()
+    if _has(phase, FUTURE_WORDS) or _has(status, FUTURE_WORDS):
+        return "planned", (phase or status).lower()
+    if p.get("fclstartupdate"):
+        return "in operation", "in production"
+    if phase or status:
+        return "in operation", (phase or status).lower()
+    return "unknown", "no status published"
+
 
 def candidates_from_overlay(fc: dict, surface_only: bool = SURFACE_ONLY_DEFAULT,
-                            kinds: Optional[List[str]] = None) -> List[Candidate]:
-    """Read Sodir facility features (layer 304/307) into tie-in candidates."""
+                            kinds: Optional[List[str]] = None, active_only: bool = True,
+                            fixed_only: bool = True) -> List[Candidate]:
+    """Read Sodir facility features (layer 304/307) into tie-in candidates.
+
+    `active_only` drops facilities that are removed, shut down or still planned;
+    `fixed_only` drops mobile units. Both keep records whose status is unknown.
+    """
     out = []
     for f in (fc or {}).get("features", []):
         g = f.get("geometry") or {}
@@ -63,13 +119,44 @@ def candidates_from_overlay(fc: dict, surface_only: bool = SURFACE_ONLY_DEFAULT,
         kind = str(p.get("fclkind") or "")
         if kinds and kind.upper() not in {k.upper() for k in kinds}:
             continue
+        mobile = _has(str(p.get("fclfixedormoveable") or ""), MOVEABLE_WORDS) or _has(kind, MOVEABLE_KINDS)
+        if fixed_only and mobile:
+            continue
+        activity, reason = facility_activity(p)
+        if active_only and activity in ("not in operation", "planned"):
+            continue
         lon, lat = g["coordinates"][0], g["coordinates"][1]
         out.append(Candidate(
             name=str(p.get("_label") or p.get("fclname") or "Facility"),
             lat=lat, lon=lon, kind=kind,
             water_depth_m=float(p.get("fclwaterdepth") or 0.0),
             operator=str(p.get("fclcurrentoperatorname") or ""),
-            belongs_to=str(p.get("fclbelongstoname") or "")))
+            belongs_to=str(p.get("fclbelongstoname") or ""),
+            npdid=str(p.get("fclnpdidfacility") or ""),
+            phase=str(p.get("fclphase") or ""), status=str(p.get("fclstatus") or ""),
+            activity=activity, activity_reason=reason,
+            fixed_or_moveable=str(p.get("fclfixedormoveable") or "")))
+    return dedupe(out)
+
+
+def dedupe(cands: List[Candidate], radius_m: float = 300.0) -> List[Candidate]:
+    """One entry per facility: the same platform appears in several Sodir layers,
+    and near-identical records share a name and position."""
+    out: List[Candidate] = []
+    seen = set()
+    for c in cands:
+        if c.key in seen:
+            continue
+        twin = next((o for o in out if o.name.strip().upper() == c.name.strip().upper()
+                     and tb_geo.geodesic_distance(o.lat, o.lon, c.lat, c.lon) < radius_m), None)
+        if twin is not None:
+            if not twin.water_depth_m and c.water_depth_m:      # keep the richer record
+                twin.water_depth_m = c.water_depth_m
+            if not twin.operator and c.operator:
+                twin.operator = c.operator
+            continue
+        seen.add(c.key)
+        out.append(c)
     return out
 
 
@@ -80,8 +167,10 @@ def candidates_from_layout(layout) -> List[Candidate]:
             continue
         out.append(Candidate(name=n.label or n.node_id, lat=n.lat, lon=n.lon,
                              kind=layout.catalog.get(n.item_id).name,
-                             water_depth_m=n.water_depth_m, source="layout"))
-    return out
+                             water_depth_m=n.water_depth_m, source="layout",
+                             npdid=f"layout:{n.node_id}", activity="in operation",
+                             activity_reason="in this layout"))
+    return dedupe(out)
 
 
 def distance_and_bearing(layout, node_id: str, cand: Candidate) -> tuple:
@@ -151,11 +240,12 @@ def screen(layout, node_id: str, candidates: List[Candidate], ts: Optional[TieIn
     """Rank candidate hosts for a tie-back from `node_id`. Nearest first."""
     ts = ts or TieInSettings()
     rows = []
-    for cand in candidates:
+    for cand in dedupe(candidates):
         d, az = distance_and_bearing(layout, node_id, cand)
         if d / 1000.0 > ts.max_distance_km:
             continue
-        row = dict(host=cand.name, kind=cand.kind, source=cand.source, operator=cand.operator,
+        row = dict(host=cand.name, kind=cand.kind, status=cand.activity, status_note=cand.activity_reason,
+                   source=cand.source, operator=cand.operator,
                    distance_km=d / 1000.0, bearing_deg=az,
                    line_length_km=d * ts.tortuosity / 1000.0,
                    host_water_depth_m=cand.water_depth_m or float("nan"),

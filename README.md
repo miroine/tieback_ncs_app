@@ -97,6 +97,12 @@ the search radius is ranked by distance, with bearing, line length, a costed tri
 structure has wells — required wellhead pressure, arrival temperature and hydrate margin. *Add to layout*
 builds the chosen tie-back (host, riser base, PLETs, riser, flowline, umbilical) into the project.
 
+Candidates are filtered and de-duplicated before they are offered: facilities that are removed, shut
+down or still planned are dropped (Sodir keeps decommissioned structures in the "in place" layer until
+they are physically removed), mobile units are dropped, and the same facility loaded from several
+layers is merged on its NPDID — or on name and position where no NPDID is published. Each row shows the
+status the decision was based on, and the filters can be switched off to see everything.
+
 If an NCS layer comes back empty the app now says so: a layout near the median line often has no
 Norwegian facility inside the default 40 km radius.
 
@@ -118,12 +124,12 @@ When deploying to Streamlit Community Cloud, upload the whole folder — `test_f
 |---|---|
 | geo / catalog / network / schedule / cost | 29 / 19 / 43 / 25 / 22 |
 | well (IPR/VLP) / cost spreadsheet IO / cases / report | 22 / 12 / 11 / 7 |
-| tie-in screening / design basis | 13 / 21 |
-| map bridge | 33 |
+| tie-in screening / design basis | 21 / 21 |
+| map bridge | 36 |
 | ncs / import / flow assurance | 23 / 27 / 43 |
 | multiphase / thermal / bathymetry | 31 / 25 / 22 |
 | JS core logic / component protocol simulation | 41 / 34 |
-| Headless UI (stub Streamlit, scripted interactions) | 44 |
+| Headless UI (stub Streamlit, scripted interactions) | 45 |
 
 The protocol test runs the real component script against a fake DOM and fake Leaflet; the UI test
 executes `tieback_app.py` with a stub Streamlit. Neither replaces a check in a real browser.

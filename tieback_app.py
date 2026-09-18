@@ -41,7 +41,7 @@ import tb_schedule
 import tb_tiein
 import tb_well
 
-APP_VERSION = "0.9.1"
+APP_VERSION = "0.9.2"
 HERE = Path(__file__).parent
 DEMO_FILE = HERE / "test_fixtures" / "demo_field_a_tieback.yaml"
 
@@ -664,12 +664,23 @@ with tab_layout:
                                        format_func=lambda i: LAY.nodes[i].label or i)
             ti_dia = cc[1].number_input("Line ID (in)", 2.0, 36.0, 10.0, 1.0, key=f"ti_dia_{REV}")
             ti_max = cc[2].number_input("Search radius (km)", 5.0, 200.0, 60.0, 5.0, key=f"ti_max_{REV}")
-            ti_surface = cc[3].checkbox("Surface facilities only", True, key=f"ti_surf_{REV}")
+            ti_surface = cc[3].checkbox("Surface only", True, key=f"ti_surf_{REV}",
+                                        help="Drop subsea structures registered as facilities")
+            cc = st.columns([1, 1, 2])
+            ti_active = cc[0].checkbox("In operation only", True, key=f"ti_act_{REV}",
+                                       help="Sodir keeps shut-down and abandoned structures in the "
+                                            "'in place' layer until they are physically removed")
+            ti_fixed = cc[1].checkbox("Fixed installations only", True, key=f"ti_fix_{REV}",
+                                      help="Excludes rigs and other mobile units")
             fac_layers = [k for k in ("facilities", "facilities_all") if k in S.ncs_overlays]
-            cands = []
+            raw = []
             for k in fac_layers:
-                cands += tb_tiein.candidates_from_overlay(S.ncs_overlays[k], ti_surface)
-            cands += tb_tiein.candidates_from_layout(LAY)
+                raw += tb_tiein.candidates_from_overlay(S.ncs_overlays[k], ti_surface,
+                                                        active_only=ti_active, fixed_only=ti_fixed)
+            raw += tb_tiein.candidates_from_layout(LAY)
+            cands = tb_tiein.dedupe(raw)
+            if fac_layers and len(raw) != len(cands):
+                cc[2].caption(f"{len(raw) - len(cands)} duplicate facility record(s) merged across layers")
             if not cands:
                 st.info("No candidate hosts yet. Load the Sodir facility layers in the sidebar (or add a "
                         "host to the layout) and screen again.")
