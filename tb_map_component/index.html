@@ -71,7 +71,9 @@
   <div id="map" role="application" aria-label="Subsea layout map"></div>
   <div id="toolbar" role="toolbar" aria-label="Layout tools">
     <div class="group">
-      <button class="tool" data-mode="select" aria-pressed="true" title="Select and drag equipment (Esc)">Select</button>
+      <button class="tool" data-mode="select" aria-pressed="true" title="Click to select (Esc)">Select</button>
+      <button class="tool" data-mode="move" aria-pressed="false" title="Drag equipment to reposition it">Move</button>
+      <label class="small" title="Wells and modules jumpered to a structure move with it"><input type="checkbox" id="grp" checked /> with wells</label>
       <button class="tool" data-mode="route" aria-pressed="false" title="Edit the selected line: click line to add a bend, drag bends, right-click a bend to remove">Edit route</button>
     </div>
     <div class="group">
@@ -85,6 +87,13 @@
       <input id="diam" type="number" min="0" max="48" step="0.5" value="10" />
     </div>
     <div class="group">
+      <label class="small" for="symScale" title="Equipment symbol size">Size</label>
+      <input id="symScale" type="range" min="0.4" max="3" step="0.1" value="1" style="width:74px" aria-label="Symbol size" />
+      <label class="small" for="lineScale" title="Line thickness">Lines</label>
+      <input id="lineScale" type="range" min="0.4" max="3" step="0.1" value="1" style="width:74px" aria-label="Line thickness" />
+    </div>
+    <div class="group">
+      <button class="tool" data-mode="pick" aria-pressed="false" title="Click the map to set the point a concept template is placed at">Pick point</button>
       <button class="tool danger" id="btnDelete" disabled title="Delete selected (Del)">Delete</button>
       <button class="tool" id="btnFit" title="Zoom to layout">Zoom to layout</button>
     </div>
@@ -114,6 +123,7 @@
   let lastRev = null, lastFit = null, firstRender = true;
   let mode = "select", selected = null, connectFrom = null;
   let nodeMarkers = {}, edgeLines = {}, labelLayer = null, vertexLayer = null, offsets = {};
+  let dragStart = { lat: 0, lon: 0 }, dragGroup = [], pickMarker = null;
   let overlayGroups = {};
 
   if (typeof L === "undefined") {
@@ -175,6 +185,8 @@
   }
   const HINTS = {
     select: "Click equipment to select it. Drag to move. Del removes the selection.",
+    move: "Drag any item to reposition it. A structure carries its jumpered wells unless you untick 'with wells'.",
+    pick: "Click the map to set the placement point for a concept template.",
     route: "Select a line, then click it to add a bend. Drag bends to reshape; right-click a bend to remove it.",
     add: "Click the map to place the chosen equipment.",
     connect: "Click the first item, then the second, to connect them.",
@@ -185,9 +197,10 @@
     const cont = map.getContainer();
     cont.classList.remove("mode-add", "mode-connect");
     if (m === "add") cont.classList.add("mode-add");
-    if (m === "connect") cont.classList.add("mode-connect");
+    if (m === "connect" || m === "pick") cont.classList.add("mode-connect");
     $("hint").textContent = HINTS[m];
-    Object.values(nodeMarkers).forEach((mk) => { if (mk.dragging) { (m === "select") ? mk.dragging.enable() : mk.dragging.disable(); } });
+    const canDrag = (m === "select" || m === "move");
+    Object.values(nodeMarkers).forEach((mk) => { if (mk.dragging) { canDrag ? mk.dragging.enable() : mk.dragging.disable(); } });
     drawVertices();
     refreshSelectionStyles();
   }
@@ -195,6 +208,12 @@
   $("btnFit").addEventListener("click", fitLayout);
   $("btnDelete").addEventListener("click", deleteSelected);
   $("edgeItem").addEventListener("change", syncDiameter);
+  ["symScale", "lineScale"].forEach((id) => {
+    $(id).addEventListener("input", () => { drawLayout(); });                 // instant, local
+    $(id).addEventListener("change", () => {                                  // persist on release
+      emit("display", { symbol_scale: Number($("symScale").value), line_scale: Number($("lineScale").value) });
+    });
+  });
   document.addEventListener("keydown", (ev) => {
     const tag = (ev.target.tagName || "").toLowerCase();
     if (tag === "input" || tag === "select") return;
@@ -230,12 +249,19 @@
   }
 
   // ── drawing ──
+  function displayOpts() {
+    const d = args.payload.display || {};
+    return { line_scale: Number($("lineScale").value) || 1,
+             thickness_by_diameter: d.thickness_by_diameter !== false };
+  }
+
   function byId() { return C.nodesById(args.payload); }
   function edgeById(id) { return (args.payload.edges || []).find((e) => e.id === id); }
   function nodeById(id) { return (args.payload.nodes || []).find((n) => n.id === id); }
 
   function nodeIcon(n) {
-    const svg = C.nodeSvg(n.symbol || n.kind, n.severity, n.id === selected || n.id === connectFrom);
+    const svg = C.nodeSvg(n.symbol || n.kind, n.severity, n.id === selected || n.id === connectFrom,
+                          Number($("symScale").value) || 1);
     return L.divIcon({ className: "tb-node", html: svg.html, iconSize: [svg.size, svg.size], iconAnchor: [svg.size / 2, svg.size / 2] });
   }
 
@@ -258,7 +284,8 @@
       const ll = C.edgeLatLngs(e, ids);
       if (!ll) return;
       const laid = (e.shape && e.shape.length >= 2) ? e.shape : ll;      // smoothed route from Python
-      const line = L.polyline(C.offsetLatLngs(laid, offsets[e.id]), Object.assign({ pane: "edges", interactive: true }, C.edgeStyle(e, e.id === selected)));
+      const line = L.polyline(C.offsetLatLngs(laid, offsets[e.id]),
+        Object.assign({ pane: "edges", interactive: true }, C.edgeStyle(e, e.id === selected, displayOpts())));
       line.bindTooltip(tooltipFor(e, true), { sticky: true });
       line.on("click", (ev) => { L.DomEvent.stopPropagation(ev); onEdgeClick(e, ev); });
       line.addTo(edgeGroup);
@@ -268,14 +295,28 @@
       const mk = L.marker([n.lat, n.lon], { icon: nodeIcon(n), draggable: true, keyboard: true, title: n.label, riseOnHover: true });
       mk.bindTooltip(tooltipFor(n, false), { direction: "top", offset: [0, -8] });
       mk.on("click", (ev) => { L.DomEvent.stopPropagation(ev); onNodeClick(n); });
-      mk.on("drag", () => { const p = mk.getLatLng(); liveUpdateEdges(n.id, [p.lat, p.lng]); });
+      mk.on("dragstart", () => { dragStart = { lat: n.lat, lon: n.lon }; dragGroup = groupFor(n.id); });
+      mk.on("drag", () => {
+        const p = mk.getLatLng();
+        const dLat = p.lat - dragStart.lat, dLon = p.lng - dragStart.lon;
+        liveUpdateEdges(n.id, [p.lat, p.lng]);
+        dragGroup.forEach((gid) => {              // carry the jumpered wells along on screen
+          const src = nodeById(gid);
+          const gm = nodeMarkers[gid];
+          if (!src || !gm) return;
+          gm.setLatLng({ lat: src.lat + dLat, lng: src.lon + dLon });
+          liveUpdateEdges(gid, [src.lat + dLat, src.lon + dLon]);
+        });
+      });
       mk.on("dragend", () => {
         const p = mk.getLatLng();
+        const grouped = dragGroup.length > 0;
         n.lat = p.lat; n.lon = p.lng;
-        emit("move_node", { id: n.id, lat: p.lat, lon: p.lng });
+        emit(grouped ? "move_group" : "move_node", { id: n.id, lat: p.lat, lon: p.lng });
+        dragGroup = [];
       });
       mk.addTo(nodeGroup);                     // L.Marker.dragging only exists after onAdd
-      if (mode !== "select" && mk.dragging) mk.dragging.disable();
+      if (!(mode === "select" || mode === "move") && mk.dragging) mk.dragging.disable();
       nodeMarkers[n.id] = mk;
     });
     $("empty").style.display = (args.payload.nodes || []).length ? "none" : "flex";
@@ -351,7 +392,7 @@
 
   function refreshSelectionStyles() {
     (args.payload.nodes || []).forEach((n) => { if (nodeMarkers[n.id]) nodeMarkers[n.id].setIcon(nodeIcon(n)); });
-    (args.payload.edges || []).forEach((e) => { if (edgeLines[e.id]) edgeLines[e.id].setStyle(C.edgeStyle(e, e.id === selected)); });
+    (args.payload.edges || []).forEach((e) => { if (edgeLines[e.id]) edgeLines[e.id].setStyle(C.edgeStyle(e, e.id === selected, displayOpts())); });
     updateDeleteButton();
   }
   function updateDeleteButton() { $("btnDelete").disabled = !selected; }
@@ -400,7 +441,30 @@
     select(e.id, true);
   }
 
+  function groupFor(id) {
+    if (!$("grp").checked) return [];
+    const n = nodeById(id);
+    if (!n || ["well", "host"].indexOf(n.kind) >= 0) return [];   // a well moves on its own
+    return C.jumperGroup(args.payload, id);
+  }
+
+  function showPick(lat, lon) {
+    if (pickMarker) map.removeLayer(pickMarker);
+    pickMarker = L.marker([lat, lon], { pane: "vertices", interactive: false,
+      icon: L.divIcon({ className: "tb-node", iconSize: [26, 26], iconAnchor: [13, 13],
+        html: '<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 26 26">'
+          + '<circle cx="13" cy="13" r="9" fill="none" stroke="#EB0037" stroke-width="2" stroke-dasharray="3 2"/>'
+          + '<line x1="13" y1="3" x2="13" y2="23" stroke="#EB0037" stroke-width="1.5"/>'
+          + '<line x1="3" y1="13" x2="23" y2="13" stroke="#EB0037" stroke-width="1.5"/></svg>' }) }).addTo(map);
+  }
+
   map.on("click", (ev) => {
+    if (mode === "pick") {
+      showPick(ev.latlng.lat, ev.latlng.lng);
+      emit("pick", { lat: ev.latlng.lat, lon: ev.latlng.lng });
+      toast("Placement point set — load a template from the sidebar to drop it here.", true);
+      return;
+    }
     if (mode === "add") {
       const opt = $("nodeItem").selectedOptions[0];
       if (!opt) { toast("No equipment in the catalog."); return; }
@@ -473,6 +537,9 @@
       rules: a.rules || {},
       overlays: a.overlays || [],
     };
+    const disp = args.payload.display || {};
+    if (disp.symbol_scale && !$("symScale").matches(":active")) $("symScale").value = disp.symbol_scale;
+    if (disp.line_scale && !$("lineScale").matches(":active")) $("lineScale").value = disp.line_scale;
     fillSelect($("nodeItem"), args.palette.node_items, true);
     fillSelect($("edgeItem"), args.palette.edge_items, true);
     syncDiameter();

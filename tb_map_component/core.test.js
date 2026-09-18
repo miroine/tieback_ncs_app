@@ -74,6 +74,24 @@ check("edge colour/dash from the catalog override the category default", () => {
 });
 check("error severity still wins over the item colour", () =>
   C.edgeStyle({ kind: "flowline", color: "#00243D", severity: "error" }, false).color === "#EB0037");
+check("symbol scale changes the icon size", () => C.nodeSvg("template", "", false, 2).size
+  > C.nodeSvg("template", "", false, 1).size);
+check("symbol scale is clamped", () => C.nodeSvg("template", "", false, 99).size === C.nodeSvg("template", "", false, 4).size);
+check("line scale multiplies weight", () => {
+  const a = C.edgeStyle({ kind: "flowline", diameter_in: 12 }, false, { line_scale: 1 });
+  const b = C.edgeStyle({ kind: "flowline", diameter_in: 12 }, false, { line_scale: 2 });
+  return Math.abs(b.weight - a.weight * 2) < 1e-9;
+});
+check("thickness_by_diameter off removes the bore term", () => {
+  const a = C.edgeStyle({ kind: "flowline", diameter_in: 24 }, false, { line_scale: 1 });
+  const b = C.edgeStyle({ kind: "flowline", diameter_in: 24 }, false, { line_scale: 1, thickness_by_diameter: false });
+  return b.weight < a.weight && b.weight === C.EDGE_STYLE.flowline.base;
+});
+check("selection highlight scales too", () => {
+  const sel = C.edgeStyle({ kind: "flowline", diameter_in: 8 }, true, { line_scale: 2 });
+  const un = C.edgeStyle({ kind: "flowline", diameter_in: 8 }, false, { line_scale: 2 });
+  return Math.abs(sel.weight - un.weight - 5) < 1e-9;
+});
 console.log("core.test.js: " + pass + " passed, " + fail.length + " failed");
 fail.forEach((f) => console.log("  FAIL " + f));
 process.exit(fail.length ? 1 : 0);

@@ -132,13 +132,15 @@
     return s;
   }
 
-  function edgeStyle(edge, selected) {
+  function edgeStyle(edge, selected, display) {
     const s = EDGE_STYLE[edge.kind] || EDGE_STYLE.flowline;
     const d = Number(edge.diameter_in) || 0;
-    let weight = s.base + (d > 0 ? Math.min(d, 24) / 6 : 0);
+    const scale = (display && display.line_scale) || 1;
+    const byDia = !display || display.thickness_by_diameter !== false;
+    let weight = (s.base + (byDia && d > 0 ? Math.min(d, 24) / 6 : 0)) * scale;
     const base = edge.color || s.color;
     const color = edge.severity === "error" ? SEVERITY_COLOR.error : base;
-    if (selected) weight += 2.5;
+    if (selected) weight += 2.5 * scale;
     const dash = edge.dash !== undefined && edge.dash !== "" ? edge.dash : (edge.dash === "" && edge.color ? null : s.dash);
     return { color: color, weight: weight, dashArray: dash || null, opacity: selected ? 1 : 0.9 };
   }
@@ -188,9 +190,10 @@
     return S[symbol] || S.plet;
   }
 
-  function nodeSvg(symbol, severity, selected) {
+  function nodeSvg(symbol, severity, selected, scale) {
     const s = NODE_STYLE[symbol] || NODE_STYLE.plet;
-    const pad = 4, W = s.size + pad * 2;
+    const k = Math.max(0.2, Math.min(4, scale || 1));
+    const pad = 4, W = Math.round(s.size * k) + pad * 2;
     const stroke = severity ? (SEVERITY_COLOR[severity] || "#fff") : "#FFFFFF";
     const sw = severity ? 2.5 : 1.2;
     const ring = selected
@@ -248,6 +251,17 @@
     });
   }
 
+  /** Nodes tied to `id` by a jumper — they travel with a structure when it is moved. */
+  function jumperGroup(payload, id) {
+    const out = [];
+    (payload.edges || []).forEach(function (e) {
+      if (e.kind !== "jumper") return;
+      if (e.source === id) out.push(e.target);
+      else if (e.target === id) out.push(e.source);
+    });
+    return out.filter(function (v, i, a) { return a.indexOf(v) === i; });
+  }
+
   function formatLength(m) {
     if (m == null || isNaN(m)) return "";
     return m >= 1000 ? (m / 1000).toFixed(2) + " km" : Math.round(m) + " m";
@@ -274,6 +288,6 @@
     EDGE_KINDS, NODE_STYLE, EDGE_STYLE, SEVERITY_COLOR,
     makeNonce, eventFactory, edgeAllowed, nodesById, edgeLatLngs, insertVertex, removeVertex,
     moveVertex, haversine, polylineLength, edgeStyle, nodeSvg, symbolShape, parallelOffsets,
-    offsetLatLngs, footprintPolygon, formatLength, escapeHtml, bboxOf,
+    offsetLatLngs, footprintPolygon, jumperGroup, formatLength, escapeHtml, bboxOf,
   };
 });

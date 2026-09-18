@@ -18,9 +18,12 @@ function mkEl(tag) {
 }
 function allOptions(sel) { const out = []; (function walk(n) { n.children.forEach((c) => { if (c.tagName === "OPTION") out.push(c); walk(c); }); })(sel); return out; }
 const els = {};
-["wrap", "map", "toolbar", "nodeItem", "edgeItem", "diam", "btnDelete", "btnFit", "empty", "toast", "status", "hint", "coords"]
-  .forEach((id) => { els[id] = mkEl(id === "nodeItem" || id === "edgeItem" ? "select" : id === "diam" ? "input" : "div"); });
-const modeButtons = ["select", "route", "add", "connect"].map((m) => { const b = mkEl("button"); b.dataset.mode = m; return b; });
+["wrap", "map", "toolbar", "nodeItem", "edgeItem", "diam", "grp", "symScale", "lineScale", "btnDelete", "btnFit", "empty", "toast", "status", "hint", "coords"]
+  .forEach((id) => { els[id] = mkEl(id === "nodeItem" || id === "edgeItem" ? "select" : ["diam", "grp", "symScale", "lineScale"].indexOf(id) >= 0 ? "input" : "div"); });
+els.grp.checked = true;
+els.symScale.value = "1"; els.lineScale.value = "1";
+[els.symScale, els.lineScale].forEach((e) => { e.matches = () => false; });
+const modeButtons = ["select", "move", "route", "add", "connect", "pick"].map((m) => { const b = mkEl("button"); b.dataset.mode = m; return b; });
 const docHandlers = {};
 const document = {
   getElementById: (id) => els[id],
@@ -97,13 +100,13 @@ markers[0].setLatLng({ lat: 60.52, lng: 2.62 }); markers[0].fire("drag"); marker
 check("drag updates connected edge live", () => lines[0].ll[0][0] === 60.52);
 check("dragend → move_node with coordinates", () => { const v = values().pop(); return v.type === "move_node" && v.payload.lat === 60.52 && v.payload.lon === 2.62 && v.seq === 2; });
 // add mode
-modeButtons[2].handlers.click[0]();
+modeButtons.find((b) => b.dataset.mode === "add").handlers.click[0]();
 check("add mode disables dragging + crosshair", () => markers.every((m) => m.dragging.on === false) && container.classList.set.has("mode-add"));
 els.nodeItem.value = "tmpl_4slot";
 mapObj.fire("click", { latlng: { lat: 60.6, lng: 2.7 } });
 check("map click in add mode → add_node with chosen item", () => { const v = values().pop(); return v.type === "add_node" && v.payload.item_id === "tmpl_4slot" && v.payload.lat === 60.6; });
 // connect mode: allowed
-modeButtons[3].handlers.click[0]();
+modeButtons.find((b) => b.dataset.mode === "connect").handlers.click[0]();
 els.edgeItem.value = "jumper_rigid";
 markers[0].fire("click", {}); markers[1].fire("click", {});
 check("connect well→template → add_edge", () => { const v = values().pop(); return v.type === "add_edge" && v.payload.source === "W1" && v.payload.target === "T1" && v.payload.diameter_in === 0; });
@@ -114,10 +117,10 @@ markers[0].fire("click", {}); markers[1].fire("click", {});
 check("disallowed connection blocked client-side with message", () => values().length === before && els.toast.style.display === "block");
 check("flowline enables diameter input within range", () => els.diam.disabled === false);
 // route mode on selected edge
-modeButtons[0].handlers.click[0]();
+modeButtons.find((b) => b.dataset.mode === "select").handlers.click[0]();
 lines[0].fire("click", { latlng: { lat: 60.51, lng: 2.61 } });
 check("click edge → select edge", () => values().pop().payload.id === "J1");
-modeButtons[1].handlers.click[0]();
+modeButtons.find((b) => b.dataset.mode === "route").handlers.click[0]();
 lines[0].fire("click", { latlng: { lat: 60.515, lng: 2.615 } });
 check("route mode click on selected edge → set_route with inserted vertex", () => { const v = values().pop(); return v.type === "set_route" && v.payload.route.length === 1; });
 // keyboard delete
@@ -132,7 +135,7 @@ render({ payload: { nodes: payload.nodes.slice(0, 1), edges: [] }, palette, rule
 check("new rev → redraw from Python state", () => markers.length === nm + 1);
 check("marker dragging disabled only after add (regression: place mode wiped the map)", () => {
   markers.length = 0; polygons.length = 0;
-  modeButtons[2].handlers.click[0]();                       // Place mode
+  modeButtons.find((b) => b.dataset.mode === "add").handlers.click[0]();                       // Place mode
   render({ payload: { nodes: payload.nodes.concat([{ id: "P1", label: "PLET", item: "PLET", kind: "plet", symbol: "plet",
     lat: 60.53, lon: 2.63, severity: "", footprint: [12, 6], heading: 0 }]), edges: payload.edges },
     palette, rules, overlays: [], selected: "P1", height: 500, rev: "r3", fit_token: 0 });
@@ -166,6 +169,61 @@ check("smoothed as-laid shape is drawn when Python supplies it", () => {
     { shape: [[60.5, 2.6], [60.505, 2.605], [60.51, 2.61]], smooth: true })] },
     palette, rules, overlays: [], selected: null, height: 500, rev: "r9", fit_token: 0 });
   return lines[0].ll.length === 3;
+});
+check("Move mode keeps markers draggable", () => {
+  markers.length = 0;
+  render({ payload, palette, rules, overlays: [], selected: null, height: 500, rev: "rmove", fit_token: 0 });
+  modeButtons.find((b) => b.dataset.mode === "move").handlers.click[0]();
+  return markers.length === 2 && markers.every((m) => m.dragging && m.dragging.on === true);
+});
+check("dragging a template emits move_group and carries its wells on screen", () => {
+  const payload2 = { nodes: [
+      { id: "T1", label: "Template", item: "T", kind: "template", symbol: "template", lat: 60.5, lon: 2.6, severity: "", footprint: [30, 20], heading: 0 },
+      { id: "W1", label: "A-1", item: "XT", kind: "well", symbol: "xt", lat: 60.501, lon: 2.601, severity: "", footprint: [5, 5], heading: 0 }],
+    edges: [{ id: "J1", label: "J1", item: "Jumper", kind: "jumper", source: "W1", target: "T1", route: [], length_m: 0, severity: "" }] };
+  markers.length = 0;
+  render({ payload: payload2, palette, rules, overlays: [], selected: null, height: 500, rev: "rg", fit_token: 0 });
+  const tmpl = markers[0];
+  tmpl.fire("dragstart");
+  tmpl.setLatLng({ lat: 60.52, lng: 2.62 });
+  tmpl.fire("drag");
+  const wellMoved = Math.abs(markers[1].getLatLng().lat - 60.521) < 1e-9;
+  tmpl.fire("dragend");
+  const v = values().pop();
+  return wellMoved && v.type === "move_group" && v.payload.id === "T1";
+});
+check("with-wells unticked falls back to a plain move", () => {
+  els.grp.checked = false;
+  const tmpl = markers[0];
+  tmpl.fire("dragstart"); tmpl.setLatLng({ lat: 60.53, lng: 2.63 }); tmpl.fire("drag"); tmpl.fire("dragend");
+  els.grp.checked = true;
+els.symScale.value = "1"; els.lineScale.value = "1";
+[els.symScale, els.lineScale].forEach((e) => { e.matches = () => false; });
+  return values().pop().type === "move_node";
+});
+check("Pick point emits a pick event with the clicked position", () => {
+  modeButtons.find((b) => b.dataset.mode === "pick").handlers.click[0]();
+  mapObj.fire("click", { latlng: { lat: 61.1, lng: 3.3 } });
+  const v = values().pop();
+  return v.type === "pick" && v.payload.lat === 61.1 && v.payload.lon === 3.3;
+});
+check("size sliders redraw locally and emit one display event on release", () => {
+  markers.length = 0;
+  render({ payload: Object.assign({}, payload, { display: { symbol_scale: 1, line_scale: 1, thickness_by_diameter: true } }),
+    palette, rules, overlays: [], selected: null, height: 500, rev: "rdisp", fit_token: 0 });
+  const before = values().length;
+  els.symScale.value = "2.2";
+  els.symScale.handlers.input[0]();                       // live redraw, no event
+  const redrew = markers.length === 4;                    // two more markers drawn
+  const noEvent = values().length === before;
+  els.symScale.handlers.change[0]();                      // released
+  const v = values().pop();
+  return redrew && noEvent && v.type === "display" && v.payload.symbol_scale === 2.2;
+});
+check("payload display settings prime the sliders", () => {
+  render({ payload: Object.assign({}, payload, { display: { symbol_scale: 0.6, line_scale: 1.8, thickness_by_diameter: true } }),
+    palette, rules, overlays: [], selected: null, height: 500, rev: "rdisp2", fit_token: 0 });
+  return Number(els.symScale.value) === 0.6 && Number(els.lineScale.value) === 1.8;
 });
 console.log("protocol.test.js: " + pass + " passed, " + fail.length + " failed");
 fail.forEach((f) => console.log("  FAIL " + f));
