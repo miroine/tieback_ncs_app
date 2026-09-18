@@ -10,6 +10,7 @@ from dataclasses import asdict, fields
 import yaml
 
 import tb_flowassurance as fa
+import tb_map
 from tb_catalog import Catalog
 from tb_cost import CostSettings
 from tb_network import Layout
@@ -51,8 +52,14 @@ def fa_settings_from_dict(d: dict) -> "fa.FASettings":
     return fa.FASettings(**{k: v for k, v in (d or {}).items() if k in valid})
 
 
+def display_settings_from_dict(d: dict) -> "tb_map.DisplaySettings":
+    valid = {f.name for f in fields(tb_map.DisplaySettings)}
+    return tb_map.DisplaySettings(**{k: v for k, v in (d or {}).items() if k in valid})
+
+
 def project_to_yaml(name: str, layout: Layout, cost: CostSettings, sched: ScheduleSettings,
-                    fa_settings: "fa.FASettings" = None) -> str:
+                    fa_settings: "fa.FASettings" = None,
+                    display: "tb_map.DisplaySettings" = None) -> str:
     cat = layout.catalog.to_dict()
     for coll in (cat["spreads"], cat["items"]):
         for rec in coll:
@@ -66,6 +73,7 @@ def project_to_yaml(name: str, layout: Layout, cost: CostSettings, sched: Schedu
         "cost_settings": asdict(cost),
         "schedule_settings": schedule_settings_to_dict(sched),
         "flow_assurance_settings": asdict(fa_settings or fa.FASettings()),
+        "display_settings": asdict(display or tb_map.DisplaySettings()),
     }
     return yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
 
@@ -76,17 +84,19 @@ def project_from_yaml(text: str):
 
 
 def project_from_yaml_full(text: str):
-    """Returns (name, layout, cost_settings, schedule_settings, fa_settings)."""
+    """Returns (name, layout, cost_settings, schedule_settings, fa_settings, display_settings)."""
     doc = yaml.safe_load(text)
     if not isinstance(doc, dict):
         raise ValueError("not a project file")
     if doc.get("schema") == "tieback_layout/1":          # bare layout file → default catalog
         cat = Catalog()
-        return "Imported layout", Layout.from_dict(doc, cat), CostSettings(), ScheduleSettings(), fa.FASettings()
+        return ("Imported layout", Layout.from_dict(doc, cat), CostSettings(), ScheduleSettings(),
+                fa.FASettings(), tb_map.DisplaySettings())
     if doc.get("schema") != SCHEMA:
         raise ValueError(f"unsupported project schema '{doc.get('schema')}'")
     cat = Catalog.from_dict(doc["catalog"])
     layout = Layout.from_dict(doc["layout"], cat)
     return (doc.get("name", "Untitled"), layout, cost_settings_from_dict(doc.get("cost_settings")),
             schedule_settings_from_dict(doc.get("schedule_settings")),
-            fa_settings_from_dict(doc.get("flow_assurance_settings")))
+            fa_settings_from_dict(doc.get("flow_assurance_settings")),
+            display_settings_from_dict(doc.get("display_settings")))

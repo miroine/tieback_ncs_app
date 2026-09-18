@@ -104,6 +104,64 @@ class Layout:
         for eid in [e.edge_id for e in self.edges.values() if node_id in (e.from_node, e.to_node)]:
             self.edges.pop(eid)
 
+    def anchor(self, prefer=("host", "template", "manifold")) -> Optional[Tuple[float, float]]:
+        """Reference point of the layout: the first node of a preferred kind, else the centroid."""
+        if not self.nodes:
+            return None
+        for k in prefer:
+            for n in self.nodes.values():
+                if self.kind(n.node_id) == k:
+                    return n.lat, n.lon
+        lats = [n.lat for n in self.nodes.values()]
+        lons = [n.lon for n in self.nodes.values()]
+        return sum(lats) / len(lats), sum(lons) / len(lons)
+
+    def translate(self, dlat: float, dlon: float):
+        """Shift every node and route vertex by a fixed offset."""
+        for n in self.nodes.values():
+            n.lat, n.lon = n.lat + dlat, n.lon + dlon
+        for e in self.edges.values():
+            e.route = [(la + dlat, lo + dlon) for la, lo in e.route]
+
+    def place_at(self, lat: float, lon: float, anchor_point: Optional[Tuple[float, float]] = None):
+        """Move the whole layout so its anchor sits at (lat, lon), keeping distances.
+
+        Offsets are carried in metres relative to the anchor and re-projected at the
+        destination, so a concept moved from 60°N to 70°N keeps its line lengths
+        (a plain shift in degrees would shrink it east-west).
+        """
+        import math as _m
+        a = anchor_point or self.anchor()
+        if a is None:
+            return
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            raise ValueError("target coordinates out of range")
+        k_src = _m.cos(_m.radians(a[0])) or 1e-9
+        k_dst = _m.cos(_m.radians(lat)) or 1e-9
+
+        def moved(la, lo):
+            dy = (la - a[0]) * 110540.0
+            dx = (lo - a[1]) * 111320.0 * k_src
+            return lat + dy / 110540.0, lon + dx / (111320.0 * k_dst)
+
+        for n in self.nodes.values():
+            n.lat, n.lon = moved(n.lat, n.lon)
+        for e in self.edges.values():
+            e.route = [moved(la, lo) for la, lo in e.route]
+
+    def jumper_group(self, node_id: str) -> List[str]:
+        """Nodes tied to this one by a jumper — the wells and modules that sit on a
+        structure and should travel with it."""
+        out = []
+        for e in self.edges.values():
+            if self.catalog.get(e.item_id).category != "jumper":
+                continue
+            if e.from_node == node_id:
+                out.append(e.to_node)
+            elif e.to_node == node_id:
+                out.append(e.from_node)
+        return sorted(set(out))
+
     def kind(self, node_id: str) -> str:
         return self.catalog.get(self.nodes[node_id].item_id).category
 

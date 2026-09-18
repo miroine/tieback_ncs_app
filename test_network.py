@@ -171,4 +171,29 @@ def piggyback_checks():
     lay.add_edge(n.Edge("FIB1", "fibre_cable", "PLET_T", "PLET_H", attrs={"piggyback_on": "CHEM1"}))
     assert "PIGGYBACK_CHAIN" in codes(lay, "error")
 S.check("piggyback checks: missing, self, wrong carrier, chained", piggyback_checks)
+def anchor_and_place():
+    lay = demo()
+    assert lay.anchor() == (60.6, 2.5)                       # the host
+    L0 = lay.edge_length(lay.edges["FL1"])
+    lay.place_at(71.5, 22.0)
+    assert abs(lay.nodes["HOST_A"].lat - 71.5) < 1e-9 and abs(lay.nodes["HOST_A"].lon - 22.0) < 1e-9
+    assert abs(lay.edge_length(lay.edges["FL1"]) / L0 - 1) < 0.005      # distances preserved
+    assert lay.edges["FL1"].route and abs(lay.edges["FL1"].route[0][0] - 71.5) < 0.1
+    assert not [f for f in lay.validate() if f.severity == "error"]
+S.check("place_at moves a concept to a new location keeping its dimensions", anchor_and_place)
+def plain_translate():
+    lay = demo(); lay.translate(0.5, -0.25)
+    assert abs(lay.nodes["W1"].lat - (60.5012 + 0.5)) < 1e-9 and abs(lay.edges["FL1"].route[0][1] - (2.60 - 0.25)) < 1e-9
+S.check("translate shifts nodes and route vertices together", plain_translate)
+S.check("anchor falls back to the centroid without a host/structure",
+        lambda: (lambda l: (l.add_node(n.Node("P", "plet_std", 60.0, 3.0)),
+                            l.add_node(n.Node("Q", "plet_std", 61.0, 4.0)),
+                            l.anchor() == (60.5, 3.5))[-1])(n.Layout(c.Catalog())))
+S.check("place_at on an empty layout is a no-op", lambda: n.Layout(c.Catalog()).place_at(60, 3) is None)
+S.raises("place_at out of range raises", ValueError, lambda: demo().place_at(95.0, 3.0))
+def jumper_group():
+    lay = demo()
+    assert lay.jumper_group("TMPL_A") == ["PLET_T", "W1", "W2", "W3", "W4"]
+    assert lay.jumper_group("W1") == ["TMPL_A"] and lay.jumper_group("HOST_A") == []
+S.check("jumper group lists what sits on a structure", jumper_group)
 sys.exit(0 if S.report() else 1)

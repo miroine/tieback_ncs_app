@@ -109,7 +109,7 @@ def persist():
     lay = demo(); fa.set_well_inputs(lay, "W1", fa.WellFA(oil_sm3_d=1234, max_whp_bara=99))
     lay.edges["FL1"].attrs["u_w_m2k"] = 2.5
     txt = pj.project_to_yaml("x", lay, tb_cost.CostSettings(), tb_schedule.ScheduleSettings(), fa.FASettings(arrival_bara=25))
-    _, lay2, _, _, fas = pj.project_from_yaml_full(txt)
+    _, lay2, _, _, fas, _ = pj.project_from_yaml_full(txt)
     assert fa.well_inputs(lay2)["W1"].oil_sm3_d == 1234 and lay2.edges["FL1"].attrs["u_w_m2k"] == 2.5 and fas.arrival_bara == 25
 S.check("well inputs, U overrides and FA settings persist in project file", persist)
 def section():

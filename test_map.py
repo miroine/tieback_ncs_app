@@ -117,6 +117,75 @@ def payload_shape():
     assert abs(e["shape"][0][0] - 60.5020) < 1e-9 and abs(e["shape"][0][1] - 2.6660) < 1e-9   # starts at the node
 S.check("payload carries the as-laid smoothed shape alongside the editable bends", payload_shape)
 
+def move_group():
+    lay, st = demo(), {}
+    w1 = (lay.nodes["W1"].lat, lay.nodes["W1"].lon)
+    t0 = (lay.nodes["TMPL_A"].lat, lay.nodes["TMPL_A"].lon)
+    r = m.apply_event(lay, ev(1, "move_group", {"id": "TMPL_A", "lat": t0[0] + 0.01, "lon": t0[1] - 0.02}), st)
+    assert r["changed"] and "5 attached" in r["message"]
+    assert abs(lay.nodes["W1"].lat - (w1[0] + 0.01)) < 1e-9 and abs(lay.nodes["W1"].lon - (w1[1] - 0.02)) < 1e-9
+    assert abs(lay.nodes["HOST_A"].lat - 60.6) < 1e-12          # not jumpered to the template
+S.check("move_group carries the jumpered wells with the structure", move_group)
+S.check("move_group on an unknown node errors", lambda: m.apply_event(demo(), ev(1, "move_group",
+        {"id": "ZZ", "lat": 60, "lon": 2}), {})["error"])
+def pick_event():
+    lay, st = demo(), {}
+    r = m.apply_event(lay, ev(1, "pick", {"lat": 61.25, "lon": 3.4}), st)
+    assert st["picked"] == [61.25, 3.4] and not r["changed"] and "61.25" in r["message"]
+S.check("pick stores the placement point without changing the layout", pick_event)
+def pick_ed50():
+    lay, st = demo(), {}
+    lay.settings.datum = "ED50"
+    m.apply_event(lay, ev(1, "pick", {"lat": 61.25, "lon": 3.4}), st)
+    import tb_geo
+    assert abs(st["picked"][0] - tb_geo.transform_datum(61.25, 3.4, "WGS84", "ED50")[0]) < 1e-12
+S.check("picked point converted into the layout datum", pick_ed50)
+
+# ── appearance: scale, colour mode, fluid ──
+def fluid_defaults():
+    lay = demo()
+    assert m.fluid_of(lay, lay.edges["FL1"]) == "multiphase"
+    assert m.fluid_of(lay, lay.edges["UMB1"]) == "control"
+    lay.add_edge(n.Edge("GL1", "gaslift_line", "HOST_A", "TMPL_A", diameter_in=6))
+    lay.add_edge(n.Edge("WI1", "winj_line", "HOST_A", "PLET_T", diameter_in=8))
+    assert m.fluid_of(lay, lay.edges["GL1"]) == "gas lift" and m.fluid_of(lay, lay.edges["WI1"]) == "water injection"
+S.check("fluid defaults come from the item, then the category", fluid_defaults)
+def fluid_override():
+    lay = demo(); lay.edges["FL1"].attrs["fluid"] = "gas"
+    assert m.fluid_of(lay, lay.edges["FL1"]) == "gas"
+    lay.edges["FL1"].attrs["fluid"] = "nonsense"
+    assert m.fluid_of(lay, lay.edges["FL1"]) == "multiphase"     # unknown value falls back
+S.check("stated fluid overrides the default; nonsense is ignored", fluid_override)
+def colour_modes():
+    lay = demo(); lay.edges["FL1"].attrs["fluid"] = "gas"; lay.edges["UMB1"].phase = 2
+    by = lambda d: {e["id"]: e["color"] for e in m.build_payload(lay, None, d)["edges"]}
+    assert by(m.DisplaySettings(color_mode="fluid"))["FL1"] == m.FLUID_COLORS["gas"]
+    assert by(m.DisplaySettings(color_mode="item"))["FL1"] == lay.catalog.get("fl_rigid_cs").line_color
+    ph = by(m.DisplaySettings(color_mode="phase"))
+    assert ph["UMB1"] == m.PHASE_COLORS[1] and ph["FL1"] == m.PHASE_COLORS[0]
+    lay.edges["FL1"].diameter_in = 0                              # provoke an error finding
+    assert by(m.DisplaySettings(color_mode="checks"))["FL1"] == "#EB0037"
+S.check("colour modes: fluid, equipment type, phase and checks", colour_modes)
+def custom_colour():
+    d = m.DisplaySettings(color_mode="fluid", fluid_colors={**m.FLUID_COLORS, "multiphase": "#123456"})
+    assert [e for e in m.build_payload(demo(), None, d)["edges"] if e["id"] == "FL1"][0]["color"] == "#123456"
+S.check("custom fluid colour is used", custom_colour)
+S.check("display block travels in the payload",
+        lambda: m.build_payload(demo(), None, m.DisplaySettings(symbol_scale=2.5, line_scale=0.5,
+                                                                thickness_by_diameter=False))["display"]
+        == {"symbol_scale": 2.5, "line_scale": 0.5, "thickness_by_diameter": False, "color_mode": "item"})
+S.raises("bad colour mode raises", ValueError, lambda: m.DisplaySettings(color_mode="rainbow"))
+S.raises("scale outside 0.2–4 raises", ValueError, lambda: m.DisplaySettings(symbol_scale=9.0))
+def display_event():
+    d = m.DisplaySettings()
+    assert m.apply_display_event(d, {"type": "display", "payload": {"symbol_scale": 1.7, "line_scale": 2.2}})
+    assert d.symbol_scale == 1.7 and d.line_scale == 2.2
+    assert not m.apply_display_event(d, {"type": "display", "payload": {"symbol_scale": 1.7}})   # no change
+    m.apply_display_event(d, {"type": "display", "payload": {"symbol_scale": 99}})
+    assert d.symbol_scale == 4.0                                  # clamped, not rejected
+    assert not m.apply_display_event(d, {"type": "select", "payload": {}})
+S.check("toolbar size event updates and clamps the display settings", display_event)
+
 # project bundle
 def project_rt():
     lay = demo(); lay.catalog.override("tmpl_4slot", procurement_usd=13e6)

@@ -23,6 +23,7 @@ import requests
 import streamlit as st
 import yaml
 
+import tb_basis
 import tb_bathymetry
 import tb_cases
 import tb_catalog
@@ -37,9 +38,10 @@ import tb_network
 import tb_project
 import tb_report
 import tb_schedule
+import tb_tiein
 import tb_well
 
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.9.0"
 HERE = Path(__file__).parent
 DEMO_FILE = HERE / "test_fixtures" / "demo_field_a_tieback.yaml"
 
@@ -100,21 +102,24 @@ def bump():
 def load_demo():
     txt = DEMO_FILE.read_text() if DEMO_FILE.exists() else ""
     if txt:
-        _, lay, cs, ss, fas = tb_project.project_from_yaml_full(txt)
+        _, lay, cs, ss, fas, disp = tb_project.project_from_yaml_full(txt)
+        return "Field A tie-back (demo)", lay, cs, ss, fas, disp
     else:
         lay, cs, ss = tb_network.Layout(tb_catalog.Catalog()), tb_cost.CostSettings(), tb_schedule.ScheduleSettings()
-        fas = tb_fa.FASettings()
-    return "Field A tie-back (demo)", lay, cs, ss, fas
+        fas, disp = tb_fa.FASettings(), tb_map.DisplaySettings()
+    return "Field A tie-back (demo)", lay, cs, ss, fas, disp
 
 
-def set_project(name, layout, cost, sched, fa_settings=None):
+def set_project(name, layout, cost, sched, fa_settings=None, display=None):
+    st.session_state.display = display or tb_map.DisplaySettings()
     st.session_state.fa_settings = fa_settings or tb_fa.FASettings()
     st.session_state.project_name = name
     st.session_state.layout = layout
     st.session_state.cost_settings = cost
     st.session_state.sched_settings = sched
     st.session_state.weather_factor = cost.weather_factor
-    st.session_state.map_state = {}
+    st.session_state.map_state = {k: v for k, v in st.session_state.get("map_state", {}).items()
+                                  if k in ("view", "picked", "seen")}
     st.session_state.mc = None
     st.session_state.fit_token += 1
     bump()
@@ -132,6 +137,7 @@ def init_state():
     ss.nok_per_usd = 10.5
     ss.last_upload = None
     ss.last_layer_upload = None
+    ss.catalog_source = ""
     set_project(*load_demo())
 
 
@@ -198,7 +204,7 @@ with st.sidebar:
     c1, c2 = st.columns(2)
     with c1:
         st.download_button("Save project", tb_project.project_to_yaml(S.project_name, LAY, S.cost_settings,
-                                                                      S.sched_settings, S.fa_settings),
+                                                                      S.sched_settings, S.fa_settings, S.display),
                            file_name=f"{S.project_name.replace(' ', '_')}.yaml", mime="text/yaml")
     with c2:
         if st.button("Load demo"):
@@ -215,9 +221,23 @@ with st.sidebar:
                 names[f.name] = f.stem
         pick = st.selectbox("Start from a concept template", list(names), format_func=lambda k: names[k],
                             key=f"tpl_{REV}")
+        picked = S.map_state.get("picked")
+        view = S.map_state.get("view")
+        where = ["Picked point on the map", "Centre of the current map view", "Template's own coordinates"]
+        avail = [w for w in where if (w != where[0] or picked) and (w != where[1] or view)]
+        place_mode = st.radio("Place it at", avail, key=f"tplwhere_{REV}",
+                              help="Use the map's 'Pick point' tool to choose a spot, then load the template there")
+        if picked:
+            st.caption(f"Picked point: {picked[0]:.5f}°N, {picked[1]:.5f}°E")
+        else:
+            st.caption("No point picked yet — use 'Pick point' on the map toolbar.")
         if st.button("Load template"):
             try:
                 lay = tb_network.Layout.from_dict(yaml.safe_load((tpl_dir / pick).read_text()), tb_catalog.Catalog())
+                if place_mode == where[0] and picked:
+                    lay.place_at(float(picked[0]), float(picked[1]))
+                elif place_mode == where[1] and view:
+                    lay.place_at((view[1] + view[3]) / 2, (view[0] + view[2]) / 2)
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Template failed to load: {exc}")
             else:
@@ -251,6 +271,33 @@ with st.sidebar:
     S.currency = cur
     if cur == "MNOK":
         S.nok_per_usd = st.number_input("NOK per USD", 1.0, 30.0, float(S.nok_per_usd), 0.1)
+
+    with st.expander("Appearance"):
+        disp = S.display
+        modes = {"item": "Equipment type", "fluid": "Fluid / service", "phase": "Development phase",
+                 "checks": "Design checks"}
+        cmode = st.selectbox("Colour lines by", list(modes), format_func=lambda k: modes[k],
+                             index=list(modes).index(disp.color_mode), key=f"cmode_{REV}")
+        cc = st.columns(2)
+        sym = cc[0].slider("Symbol size", 0.4, 3.0, float(disp.symbol_scale), 0.1, key=f"symsc_{REV}")
+        lsc = cc[1].slider("Line thickness", 0.4, 3.0, float(disp.line_scale), 0.1, key=f"linesc_{REV}")
+        bydia = st.checkbox("Thicker lines for larger bore", bool(disp.thickness_by_diameter),
+                            key=f"bydia_{REV}")
+        colors = dict(disp.fluid_colors)
+        if cmode == "fluid":
+            st.caption("Colour per fluid or service")
+            cols = st.columns(2)
+            for i, f_ in enumerate(tb_map.FLUIDS):
+                colors[f_] = cols[i % 2].color_picker(f_.title(), colors.get(f_, tb_map.FLUID_COLORS[f_]),
+                                                      key=f"fc_{f_}_{REV}")
+            if st.button("Reset fluid colours"):
+                colors = dict(tb_map.FLUID_COLORS)
+                S.display = tb_map.DisplaySettings(sym, lsc, bydia, cmode, colors)
+                bump()
+                st.rerun()
+        if (cmode, sym, lsc, bydia, colors) != (disp.color_mode, disp.symbol_scale, disp.line_scale,
+                                                disp.thickness_by_diameter, disp.fluid_colors):
+            S.display = tb_map.DisplaySettings(sym, lsc, bydia, cmode, colors)
 
     st.subheader("NCS map layers")
     st.caption("Live from Sodir FactMaps (WGS84). Fetched for the layout area or the current map view.")
@@ -326,7 +373,10 @@ with st.sidebar:
                     st.warning(f"{tb_ncs.NCS_LAYERS[k].title}: {exc}")
                     continue
                 S.ncs_overlays[k] = {**fc, "rev": f"{k}:{bbox}"}
-                if fc.get("truncated"):
+                if not fc["features"]:
+                    st.info(f"{fc['title']}: nothing inside this area — widen the search radius or pan to "
+                            f"the field you are tying into.")
+                elif fc.get("truncated"):
                     st.info(f"{fc['title']}: showing first {len(fc['features'])} features — zoom in and load for map view.")
 
     st.subheader("Import map layer")
@@ -383,8 +433,8 @@ findings = LAY.validate()
 n_err = sum(f.severity == "error" for f in findings)
 n_warn = sum(f.severity == "warning" for f in findings)
 
-tab_layout, tab_cat, tab_cost, tab_sched, tab_fa, tab_cases, tab_exp = st.tabs(
-    ["Layout", "Equipment catalog", "Cost", "Schedule", "Flow assurance", "Cases", "Export"])
+tab_layout, tab_cat, tab_cost, tab_sched, tab_fa, tab_basis, tab_cases, tab_exp = st.tabs(
+    ["Layout", "Equipment catalog", "Cost", "Schedule", "Flow assurance", "Design basis", "Cases", "Export"])
 
 # ═══════════════════════════════ LAYOUT ═══════════════════════════════
 with tab_layout:
@@ -398,9 +448,13 @@ with tab_layout:
     m5.metric("Checks", f"{n_err} errors · {n_warn} warnings" if (n_err or n_warn) else "All clear")
 
     overlays = list(S.ncs_overlays.values()) + list(S.user_overlays)
-    payload = tb_map.build_payload(LAY, findings)
+    payload = tb_map.build_payload(LAY, findings, S.display)
     event = tb_map.render_map(payload, tb_map.build_palette(CAT), overlays, S.map_state.get("selected"),
                               height=640, fit_token=S.fit_token)
+    if tb_map.apply_display_event(S.display, event):
+        tb_map.apply_event(LAY, event, S.map_state)      # consume it so it is not re-applied
+        bump()
+        st.rerun()
     result = tb_map.apply_event(LAY, event, S.map_state)
     if result["error"]:
         st.toast(result["error"], icon="⚠️")
@@ -482,6 +536,11 @@ with tab_layout:
                 st.caption("Route bends (lat/lon, from start to end)")
                 route_new = st.data_editor(route_df, num_rows="dynamic", key=f"route_{sel}_{REV}", **STRETCH)
                 others = [e2.edge_id for e2 in LAY.edges.values() if e2.edge_id != sel and e2.route]
+                fluids = list(tb_map.FLUIDS)
+                cur_fluid = tb_map.fluid_of(LAY, edge)
+                fluid = st.selectbox("Fluid / service", fluids, index=fluids.index(cur_fluid),
+                                     key=f"fluid_{sel}_{REV}",
+                                     help="Used when the map colours lines by fluid, and in the reports")
                 carriers = ["—"] + [e2.edge_id for e2 in LAY.edges.values()
                                     if e2.edge_id != sel and CAT.get(e2.item_id).category in ("flowline", "riser")]
                 cur_carrier = edge.attrs.get("piggyback_on") or "—"
@@ -501,6 +560,7 @@ with tab_layout:
             if ok:
                 edge.label, edge.item_id, edge.diameter_in, edge.phase = label, item_id, diam, int(phase)
                 edge.attrs["smooth"] = bool(smooth)
+                edge.attrs["fluid"] = fluid
                 if piggy == "—":
                     edge.attrs.pop("piggyback_on", None)
                 else:
@@ -533,6 +593,78 @@ with tab_layout:
             st.dataframe(fdf, hide_index=True, height=300, **STRETCH)
         else:
             st.success("No design check findings.")
+
+    if S.map_state.get("picked"):
+        cc = st.columns([2, 1, 1])
+        pk = S.map_state["picked"]
+        cc[0].caption(f"Picked point {pk[0]:.5f}°N, {pk[1]:.5f}°E — place a template here from the sidebar, "
+                      f"or move the whole layout to it.")
+        if cc[1].button("Move layout here"):
+            LAY.place_at(float(pk[0]), float(pk[1]))
+            bump()
+            S.fit_token += 1
+            st.rerun()
+        if sel in LAY.nodes and cc[2].button(f"Move {sel} here"):
+            LAY.move_node(sel, float(pk[0]), float(pk[1]))
+            bump()
+            st.rerun()
+
+    with st.expander("Tie-in screening — where should this structure connect?"):
+        order_kind = {"template": 0, "manifold": 1, "boosting": 2, "plem": 3, "plet": 4}
+        structures = sorted([nid for nid in LAY.nodes if LAY.kind(nid) in order_kind],
+                            key=lambda nid: (order_kind[LAY.kind(nid)], nid))
+        if not structures:
+            st.caption("Place a template or manifold first, then screen it against nearby hosts.")
+        else:
+            cc = st.columns([2, 1, 1, 1])
+            src_node = cc[0].selectbox("Structure", structures, key=f"ti_node_{REV}",
+                                       format_func=lambda i: LAY.nodes[i].label or i)
+            ti_dia = cc[1].number_input("Line ID (in)", 2.0, 36.0, 10.0, 1.0, key=f"ti_dia_{REV}")
+            ti_max = cc[2].number_input("Search radius (km)", 5.0, 200.0, 60.0, 5.0, key=f"ti_max_{REV}")
+            ti_surface = cc[3].checkbox("Surface facilities only", True, key=f"ti_surf_{REV}")
+            fac_layers = [k for k in ("facilities", "facilities_all") if k in S.ncs_overlays]
+            cands = []
+            for k in fac_layers:
+                cands += tb_tiein.candidates_from_overlay(S.ncs_overlays[k], ti_surface)
+            cands += tb_tiein.candidates_from_layout(LAY)
+            if not cands:
+                st.info("No candidate hosts yet. Load the Sodir facility layers in the sidebar (or add a "
+                        "host to the layout) and screen again.")
+            elif st.button("Screen tie-in options", type="primary"):
+                ts = tb_tiein.TieInSettings(diameter_in=ti_dia, max_distance_km=ti_max)
+                with st.spinner(f"Screening {len(cands)} candidate host(s)…"):
+                    S.tiein_rows = tb_tiein.screen(LAY, src_node, cands, ts, S.fa_settings, S.cost_settings,
+                                                   tb_fa.well_inputs(LAY))
+                    S.tiein_node, S.tiein_settings = src_node, ts
+            if S.get("tiein_rows") is not None and S.get("tiein_node") == src_node:
+                rows = S.tiein_rows
+                if not rows:
+                    st.warning(f"No host within {ti_max:.0f} km of {src_node}.")
+                else:
+                    tdf = pd.DataFrame(rows).drop(columns=["lat", "lon"], errors="ignore")
+                    st.dataframe(tdf, hide_index=True, **STRETCH, column_config={
+                        c_: st.column_config.NumberColumn(format="%.1f") for c_ in tdf.columns
+                        if tdf[c_].dtype.kind == "f"})
+                    best = rows[0]
+                    st.success(f"Nearest: {best['host']} at {best['distance_km']:.1f} km "
+                               f"({best['bearing_deg']:.0f}° true) — line {best['line_length_km']:.1f} km, "
+                               + (f"{best.get('required_whp_bara', float('nan')):.0f} bara needed at the wellhead, "
+                                  f"arrival {best.get('arrival_t_c', float('nan')):.0f} °C"
+                                  if "required_whp_bara" in best else "cost only"))
+                    cc = st.columns([2, 1])
+                    chosen = cc[0].selectbox("Build a tie-back to", [r["host"] for r in rows],
+                                             key=f"ti_pick_{REV}")
+                    if cc[1].button("Add to layout"):
+                        cand = next(c_ for c_ in cands if c_.name == chosen)
+                        try:
+                            added = tb_tiein.attach_to_layout(LAY, src_node, cand, S.tiein_settings)
+                        except Exception as exc:  # noqa: BLE001
+                            st.error(str(exc))
+                        else:
+                            S.tiein_rows = None
+                            bump()
+                            S.fit_token += 1
+                            st.rerun()
 
     with st.expander("Add equipment by coordinates"):
         with st.form(f"add_coord_{REV}"):
@@ -702,6 +834,7 @@ with tab_cat:
         except Exception as exc:  # noqa: BLE001
             st.error(f"Catalog not loaded: {exc}")
         else:
+            S.catalog_source = lib.name
             st.success(f"Loaded {len(CAT.items)} items and {len(CAT.spreads)} vessel spreads from {lib.name}")
             st.rerun()
 
@@ -1016,6 +1149,7 @@ with tab_fa:
                                  max_velocity_m_s=r.max_velocity_m_s, erosional_ratio=r.erosional_ratio,
                                  hydrate_margin_c=r.min_hydrate_margin_c,
                                  cooldown_h=(np.nan if r.heated or math.isinf(r.cooldown_h) else r.cooldown_h),
+                                 fluid=tb_map.fluid_of(LAY, LAY.edges[r.edge_id]),
                                  seabed_profile=r.uses_seabed_profile, free_spans=len(r.free_spans))
                             for r in FA_RES.edges.values()])
         st.dataframe(ldf, hide_index=True, **STRETCH, column_config={
@@ -1240,6 +1374,38 @@ with tab_fa:
 
         st.download_button("Download line results (CSV)", ldf.to_csv(index=False), "tieback_flow_assurance_lines.csv")
 
+# ═══════════════════════════ DESIGN BASIS ═══════════════════════════
+with tab_basis:
+    st.caption(tb_basis.UNITS_NOTE)
+    basis_rows = tb_basis.design_basis(LAY, S.cost_settings, S.sched_settings, S.fa_settings,
+                                       S.nok_per_usd, S.get("catalog_source", ""))
+    counts = tb_basis.summary(basis_rows)
+    k = st.columns(4)
+    k[0].metric("Entered", counts["ok"])
+    k[1].metric("On defaults", counts["default"])
+    k[2].metric("Missing", counts["missing"])
+    k[3].metric("To resolve", counts["action"])
+    todo = tb_basis.outstanding(basis_rows)
+    if todo:
+        st.markdown("#### To close out before the numbers can be relied on")
+        for r in todo:
+            st.markdown(f"- **{r['item']}** ({r['category']}): {r['value']}"
+                        + (f" — {r['note']}" if r["note"] else ""))
+    else:
+        st.success("Every checklist item has a project value.")
+    st.markdown("#### Full checklist")
+    show = st.multiselect("Show", ["ok", "default", "missing", "action"],
+                          default=["ok", "default", "missing", "action"], key=f"basis_f_{REV}")
+    bdf = pd.DataFrame([r for r in basis_rows if r["status"] in show])
+    st.dataframe(bdf, hide_index=True, **STRETCH, column_config={
+        "category": st.column_config.TextColumn("Category", width="medium"),
+        "item": st.column_config.TextColumn("Item", width="medium"),
+        "value": st.column_config.TextColumn("Value (SI)", width="medium"),
+        "status": st.column_config.TextColumn("Status", width="small"),
+        "note": st.column_config.TextColumn("Note", width="large")})
+    st.download_button("Design basis (CSV)", pd.DataFrame(basis_rows).to_csv(index=False),
+                       "tieback_design_basis.csv")
+
 # ═══════════════════════════════ CASES ═══════════════════════════════
 with tab_cases:
     st.caption("Snapshot concepts and compare them on cost, schedule and flow assurance. A case stores the "
@@ -1252,7 +1418,7 @@ with tab_cases:
     if cc[2].button("Save current as case", type="primary"):
         S.cases = [c_ for c_ in S.cases if c_["name"] != case_name]
         S.cases.append(tb_cases.snapshot(case_name, LAY, S.cost_settings, S.sched_settings, S.fa_settings,
-                                         case_note))
+                                         case_note, S.display))
         S.case_rows = None
         st.rerun()
 
@@ -1328,7 +1494,7 @@ with tab_exp:
     st.markdown("#### Downloads")
     cc = st.columns(3)
     cc[0].download_button("Project (.yaml)", tb_project.project_to_yaml(S.project_name, LAY, S.cost_settings,
-                                                                        S.sched_settings, S.fa_settings),
+                                                                        S.sched_settings, S.fa_settings, S.display),
                           f"{S.project_name.replace(' ', '_')}.yaml", "text/yaml")
     cc[1].download_button("Layout (GeoJSON)", json.dumps(tb_import.layout_to_geojson(LAY)),
                           "tieback_layout.geojson", "application/geo+json")
@@ -1342,7 +1508,8 @@ with tab_exp:
         with st.spinner("Costing, scheduling, solving and writing the document…"):
             try:
                 S.report_bytes = tb_report.build_report(S.project_name, LAY, S.cost_settings, S.sched_settings,
-                                                        S.fa_settings, rep_author, rep_fa)
+                                                        S.fa_settings, rep_author, rep_fa, S.nok_per_usd,
+                                                        S.get("catalog_source", ""))
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Report failed: {exc}")
     if S.get("report_bytes"):

@@ -11,14 +11,14 @@ def case(name="base", lay=None, **kw):
 C0 = case()
 
 def restore_identical():
-    name, lay, cost, sched, fas = cs.restore(C0)
+    name, lay, cost, sched, fas, disp = cs.restore(C0)
     assert name == "base" and lay.quantities() == demo().quantities()
     assert cost == tb_cost.CostSettings() and fas.arrival_bara == 30.0 and sched.rigs == 1
 S.check("case restores the project exactly", restore_identical)
 def snapshot_is_frozen():
     c0 = case("frozen")
     lay = demo(); lay.remove_node("W1")            # edit after snapshotting
-    _, restored, _, _, _ = cs.restore(c0)
+    _, restored, _, _, _, _ = cs.restore(c0)
     assert "W1" in restored.nodes
 S.check("editing the layout afterwards does not change a saved case", snapshot_is_frozen)
 R = cs.summarise(C0)

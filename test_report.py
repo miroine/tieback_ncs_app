@@ -54,4 +54,13 @@ def empty_layout():
     data = rep.build_report("Empty", n.Layout(c.Catalog()), tb_cost.CostSettings(), tb_schedule.ScheduleSettings())
     assert len(data) > 10000
 S.check("an empty layout still produces a document", empty_layout)
+def basis_section():
+    from docx import Document
+    doc = Document(io.BytesIO(DATA))
+    heads = [p.text for p in doc.paragraphs if p.style.name.startswith("Heading")]
+    body = "\n".join(p.text for p in doc.paragraphs)
+    txt = "\n".join(cell.text for t in doc.tables for r in t.rows for cell in r.cells)
+    assert "Design basis checklist" in heads and "SI-enheter" in body
+    assert "Host arrival pressure" in txt and "bara" in txt and "Cost library" in txt
+S.check("design basis checklist is included in the report", basis_section)
 sys.exit(0 if S.report() else 1)

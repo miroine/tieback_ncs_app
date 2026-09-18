@@ -18,7 +18,10 @@ come from Sodir FactMaps. All need internet access (Streamlit Community Cloud ha
 ## Using the map
 | Tool | Action |
 |---|---|
-| Select | Click to select; drag equipment to move it. `Del` deletes, `Esc` returns to Select. |
+| Select | Click to select. `Del` deletes, `Esc` returns to Select. |
+| Move | Drag equipment to reposition it. A structure carries its jumpered wells and modules unless *with wells* is unticked. |
+| Size / Lines sliders | Scale equipment symbols and line thickness on the map; the setting is saved with the project. |
+| Pick point | Click the map to set a placement point: load a concept template there, move the whole layout to it, or send the selected item to it. |
 | Layer control (top right) | Basemap, EMODnet bathymetry and depth contours, plus any NCS or imported layer. |
 | Place | Choose equipment, then click the map. |
 | Connect | Choose a connection type (and ID), click the first item then the second. Invalid pairs are blocked. |
@@ -28,6 +31,12 @@ Properties (label, coordinates in lat/lon or UTM, water depth, heading, SITP, HI
 fixed length, route bends) are edited below the map; bulk edits in *All equipment*. Lines sharing the
 same two end points are drawn side by side, and *Copy route from* runs a new line (chemical, gas lift,
 fibre) along an existing corridor.
+
+Appearance (sidebar) sets how lines are coloured — by equipment type, by fluid or service
+(multiphase, oil, gas, condensate, water injection, gas lift, chemical, control, power), by development
+phase, or by design-check severity — with a colour picker per fluid, symbol and line scaling, and an
+option to drop the bore-size term from line thickness. Each line's fluid is set in its property editor
+and defaults from its equipment type.
 
 Routes are either cornered (straight legs) or smoothed — a centripetal Catmull-Rom curve through the
 surveyed bends, which is what the line length, cost and flow assurance then use. Bends tighter than the
@@ -51,12 +60,14 @@ from the production-path checks and the flow-assurance network but are costed an
 |---|---|
 | `tieback_app.py` | Streamlit UI only |
 | `tb_map.py`, `tb_map_component/` | Custom bi-directional Leaflet component (Streamlit v1 protocol, no npm build) and the Python event reducer |
+| `tb_tiein.py` | Tie-in screening: Sodir facilities or layout hosts as candidate hosts, distance and bearing, trial tie-back costed and solved, and one-click attach to the layout |
+| `tb_basis.py` | Design basis checklist in SI units (m, bar, °C, Sm³/d, tonn, MNOK) with entered / default / missing / to-resolve status |
 | `tb_cases.py` | Concept cases: snapshot a whole project, compare cases on cost, schedule and flow assurance, save/load case sets |
 | `tb_report.py` | DG2/DG3 screening report as a Word document with charts |
 | `tb_well.py` | Well IPR (PI, Vogel, gas back-pressure), tubing VLP via Beggs-Brill, and the operating point against network back-pressure |
 | `tb_costio.py` | Cost catalog import/export as Excel workbook or CSV pair |
 | `tb_bathymetry.py` | EMODnet Bathymetry: WMS layers, `depth_sample` for node depths, route profiles along each line, taut-string free-span screening |
-| `tb_ncs.py` | Sodir FactMaps client (fields 502, discoveries 503, facilities 304, pipelines 311, wellbores 204/205, discoveries 503 active / 504 all, licences 616, blocks 802, quadrants 803, structural elements 704), pagination past 1000 records, Esri-JSON fallback, layer re-discovery, and the service's own renderer so overlays match FactMaps symbology |
+| `tb_ncs.py` | Sodir FactMaps client (fields 502, discoveries 503, facilities 304, pipelines 311, wellbores 204/205, facilities 304 in place / 307 all, discoveries 503 active / 504 all, licences 616, blocks 802, quadrants 803, structural elements 704), pagination past 1000 records, Esri-JSON fallback, layer re-discovery, and the service's own renderer so overlays match FactMaps symbology |
 | `tb_import.py` | GeoJSON, KML/KMZ, zipped shapefile (pure Python), CSV points; ED50/WGS84 geographic + UTM; layout → GeoJSON |
 | `tb_geo.py` | UTM/TM (Krüger 6th order), ED50↔WGS84 Helmert, Vincenty, route lengths |
 | `tb_catalog.py` | 24 equipment items, 6 vessel spreads, overrides, uncertainty, connection rules, YAML library |
@@ -72,23 +83,36 @@ Internal units: metres, inches (ID), psi, days, USD.
 
 ## Starting points
 - `templates/` — five concept templates (satellite, daisy chain, dual flowline loop, phased with
-  boosting, deepwater FPSO cluster). Load one from the sidebar.
+  boosting, deepwater FPSO cluster). Load one from the sidebar, placed at the point you picked on the
+  map, at the centre of the current view, or at its own coordinates. Placement keeps distances, so a
+  concept moved from 60°N to 71°N holds its line lengths.
 - `library/cost_library_template.yaml` and `.xlsx` — cost catalog to fill in with your own rates
   (YAML, Excel or CSV all import from the Equipment catalog tab).
 - `tools/pvt_studio_selftest.py` — run against PVT Studio's `nodal.py` to check the Beggs-Brill fixes.
 - `docs/ROADMAP.md` — the improvement plan, easiest first.
+
+## Tie-in screening
+Load the Sodir facility layers, select a template or manifold, and screen it: every candidate host within
+the search radius is ranked by distance, with bearing, line length, a costed trial tie-back and — when the
+structure has wells — required wellhead pressure, arrival temperature and hydrate margin. *Add to layout*
+builds the chosen tie-back (host, riser base, PLETs, riser, flowline, umbilical) into the project.
+
+If an NCS layer comes back empty the app now says so: a layout near the median line often has no
+Norwegian facility inside the default 40 km radius.
 
 ## Tests
 `python run_tests.py` (needs `scipy` for reference integrals and Node ≥ 18 for the JS suites)
 
 | Suite | Checks |
 |---|---|
-| geo / catalog / network / schedule / cost | 29 / 19 / 37 / 25 / 22 |
-| well (IPR/VLP) / cost spreadsheet IO / cases / report | 22 / 12 / 11 / 6 |
-| ncs / import / map + project | 23 / 27 / 21 |
-| multiphase / thermal / bathymetry / flow assurance | 31 / 25 / 22 / 43 |
-| JS core logic / component protocol simulation | 36 / 28 |
-| Headless UI (stub Streamlit, scripted interactions) | 35 |
+| geo / catalog / network / schedule / cost | 29 / 19 / 43 / 25 / 22 |
+| well (IPR/VLP) / cost spreadsheet IO / cases / report | 22 / 12 / 11 / 7 |
+| tie-in screening / design basis | 13 / 21 |
+| map bridge | 33 |
+| ncs / import / flow assurance | 23 / 27 / 43 |
+| multiphase / thermal / bathymetry | 31 / 25 / 22 |
+| JS core logic / component protocol simulation | 41 / 34 |
+| Headless UI (stub Streamlit, scripted interactions) | 44 |
 
 The protocol test runs the real component script against a fake DOM and fake Leaflet; the UI test
 executes `tieback_app.py` with a stub Streamlit. Neither replaces a check in a real browser.

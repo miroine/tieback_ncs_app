@@ -45,6 +45,8 @@ NCS_LAYERS: Dict[str, NcsLayer] = {l.key: l for l in (
              ("dscName", "DISCNAME", "discName"), "#E9A23B", r"^discovery, all"),
     NcsLayer("facilities", 304, "Facilities in place", "point", ("fclName", "FACNAME"), "#EB0037",
              r"^facilities, in place$", True),
+    NcsLayer("facilities_all", 307, "All facilities (incl. planned)", "point", ("fclName", "FACNAME"),
+             "#C4561B", r"^all facilities$"),
     NcsLayer("pipelines", 311, "Pipelines", "line", ("pipName", "PIPENAME"), "#00243D",
              r"^pipelines$", True),
     NcsLayer("dev_wells", 205, "Development wellbores", "point", ("wlbWellboreName", "WELLBORENAME"),
@@ -184,10 +186,17 @@ def fetch_layer(key: str, bbox, session, max_features: int = 5000, simplify_deg:
     url = f"{SERVICE_URL}/{lid}/query"
     features: List[dict] = []
     offset, truncated = 0, False
+    fmt = "geojson"
     while True:
-        resp = session.get(url, params=query_params(bbox, offset, simplify_deg), timeout=timeout)
+        resp = session.get(url, params=query_params(bbox, offset, simplify_deg, fmt), timeout=timeout)
         resp.raise_for_status()
-        fc, exceeded = to_feature_collection(resp.json())
+        payload = resp.json()
+        if fmt == "geojson" and isinstance(payload, dict) and "error" in payload:
+            fmt = "json"          # some layers only publish Esri JSON — retry once in that format
+            resp = session.get(url, params=query_params(bbox, offset, simplify_deg, fmt), timeout=timeout)
+            resp.raise_for_status()
+            payload = resp.json()
+        fc, exceeded = to_feature_collection(payload)
         page = fc["features"]
         for f in page:
             if not f.get("geometry"):

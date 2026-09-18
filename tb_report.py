@@ -24,6 +24,7 @@ from docx.enum.section import WD_ORIENT  # noqa: E402
 from docx.enum.text import WD_ALIGN_PARAGRAPH  # noqa: E402
 from docx.shared import Inches, Pt, RGBColor  # noqa: E402
 
+import tb_basis  # noqa: E402
 import tb_cost  # noqa: E402
 import tb_flowassurance as tb_fa  # noqa: E402
 import tb_schedule  # noqa: E402
@@ -128,7 +129,8 @@ def _fmt(v, nd=1):
 
 
 def build_report(project_name: str, layout, cost_settings, sched_settings, fa_settings=None,
-                 author: str = "", include_flow_assurance: bool = True) -> bytes:
+                 author: str = "", include_flow_assurance: bool = True, nok_per_usd: float = 10.5,
+                 catalog_source: str = "") -> bytes:
     """Returns the .docx bytes for a screening report on this project."""
     doc = Document()
     sec = doc.sections[0]
@@ -276,6 +278,24 @@ def build_report(project_name: str, layout, cost_settings, sched_settings, fa_se
                 if section:
                     doc.add_paragraph(f"Route section, {res.wells[0]['label']} to host:")
                     doc.add_picture(_section_chart(section), width=Inches(6.4))
+
+    # ── design basis checklist ──
+    doc.add_page_break()
+    _heading(doc, "Design basis checklist", 1)
+    basis = tb_basis.design_basis(layout, cost_settings, sched_settings, fa_settings, nok_per_usd,
+                                  catalog_source)
+    counts = tb_basis.summary(basis)
+    doc.add_paragraph(f"{counts['ok']} items entered for this project, {counts['default']} on built-in "
+                      f"defaults, {counts['missing']} missing, {counts['action']} to resolve. "
+                      + tb_basis.UNITS_NOTE)
+    _table(doc, ["Category", "Item", "Value (SI)", "Status"],
+           [[r["category"], r["item"], r["value"], r["status"]] for r in basis], [1.3, 1.9, 1.9, 0.7])
+    todo = tb_basis.outstanding(basis)
+    if todo:
+        doc.add_paragraph("Outstanding before these numbers can be relied on:")
+        for r in todo:
+            doc.add_paragraph(f"{r['item']} ({r['category']}): {r['value']}"
+                              + (f" — {r['note']}" if r["note"] else ""), style="List Bullet")
 
     # ── assumptions ──
     doc.add_page_break()

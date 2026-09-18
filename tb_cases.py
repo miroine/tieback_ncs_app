@@ -26,22 +26,22 @@ SCHEMA = "tieback_caseset/1"
 
 
 def snapshot(name: str, layout: Layout, cost: tb_cost.CostSettings, sched: tb_schedule.ScheduleSettings,
-             fa: Optional[tb_fa.FASettings] = None, note: str = "") -> dict:
+             fa: Optional[tb_fa.FASettings] = None, note: str = "", display=None) -> dict:
     return {
         "name": name,
         "note": note,
         "saved_utc": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
-        "project": yaml.safe_load(tb_project.project_to_yaml(name, layout, cost, sched, fa)),
+        "project": yaml.safe_load(tb_project.project_to_yaml(name, layout, cost, sched, fa, display)),
     }
 
 
 def restore(case: dict):
-    """Returns (name, layout, cost_settings, schedule_settings, fa_settings)."""
+    """Returns (name, layout, cost_settings, schedule_settings, fa_settings, display_settings)."""
     return tb_project.project_from_yaml_full(yaml.safe_dump(case["project"], sort_keys=False))
 
 
 def summarise(case: dict, run_flow_assurance: bool = True) -> dict:
-    name, layout, cost, sched, fa = restore(case)
+    name, layout, cost, sched, fa, _display = restore(case)
     findings = layout.validate()
     est = tb_cost.estimate(layout, cost)
     row = {
