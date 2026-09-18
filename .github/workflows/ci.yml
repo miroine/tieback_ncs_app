@@ -13,5 +13,5 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: pip install numpy pandas pyyaml scipy
+      - run: pip install numpy pandas pyyaml scipy  openpyxl
       - run: python run_tests.py
