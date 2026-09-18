@@ -34,22 +34,34 @@ const groups = [];
 function layerGroup() { const g = { layers: [], addTo() { return this; }, clearLayers() { this.layers = []; }, removeLayer(l) { this.layers = this.layers.filter((x) => x !== l); } }; groups.push(g); return g; }
 function addable(o) { o.addTo = function (g) { if (g && g.layers) g.layers.push(this); return this; }; o.bindTooltip = function () { return this; }; return o; }
 const container = { classList: { set: new Set(), add(c) { this.set.add(c); }, remove(...c) { c.forEach((x) => this.set.delete(x)); } } };
-const mapObj = evented({ createPane: () => ({ style: {} }), setView() { return this; }, getContainer: () => container, invalidateSize() {},
+const mapObj = evented({ createPane: () => ({ style: {} }), setView() { return this; }, opts: null, getContainer: () => container, invalidateSize() {}, getZoom: () => 15,
   fitBounds(b) { this.fitted = b; }, removeLayer() {}, getBounds: () => ({ getWest: () => 2, getSouth: () => 60, getEast: () => 3, getNorth: () => 61 }) });
-const markers = [], lines = [];
+const markers = [], lines = [], polygons = [];
 const L = {
-  map: () => mapObj,
-  tileLayer: () => ({ addTo() { return this; } }),
-  control: { layers: () => ({ addTo() { return this; }, addOverlay() {}, removeLayer() {} }), scale: () => ({ addTo() { return this; } }) },
+  map: (id, opts) => { mapObj.opts = opts; return mapObj; },
+  tileLayer: Object.assign((url, o) => { L._tiles = (L._tiles || []).concat([o]); return { addTo() { return this; } }; },
+    { wms: (url, o) => ({ url, o, addTo() { return this; } }) }),
+  control: { layers: (base, over) => { L._overlays = over || {}; return { addTo() { return this; }, addOverlay(l, name) { L._added = (L._added || []).concat(name); }, removeLayer() {} }; },
+             scale: () => ({ addTo() { return this; } }) },
   layerGroup,
   divIcon: (o) => o,
-  marker: (ll, opts) => { let pos = { lat: ll[0], lng: ll[1] }; const mk = addable(evented({ opts, getLatLng: () => pos, setLatLng(p) { pos = p; },
-    setIcon(i) { this.icon = i; }, dragging: { on: true, enable() { this.on = true; }, disable() { this.on = false; } } })); markers.push(mk); return mk; },
+  // Real Leaflet creates marker.dragging in _initInteraction() during onAdd — NOT in the
+  // constructor. The fake mirrors that so "disable before add" fails here like it does live.
+  marker: (ll, opts) => {
+    let pos = { lat: ll[0], lng: ll[1] };
+    const mk = evented({ opts, getLatLng: () => pos, setLatLng(p) { pos = p; }, setIcon(i) { this.icon = i; },
+      bindTooltip() { return this; },
+      addTo(g) { if (g && g.layers) g.layers.push(this);
+        this.dragging = { on: true, enable() { this.on = true; }, disable() { this.on = false; } }; return this; } });
+    markers.push(mk); return mk;
+  },
   polyline: (ll, opts) => { const pl = addable(evented({ ll, opts, setLatLngs(x) { this.ll = x; }, setStyle(s) { this.opts = Object.assign({}, this.opts, s); } })); lines.push(pl); return pl; },
-  geoJSON: (fc, o) => ({ fc, addTo() { return this; } }),
+  geoJSON: (fc, o) => { L._geo = (L._geo || []).concat([{ fc, o }]); return { fc, addTo() { return this; } }; },
+  polygon: (pts, o) => { const p = addable(evented({ pts, o })); polygons.push(p); return p; },
   circleMarker: () => ({}),
   DomEvent: { stopPropagation() {}, preventDefault() {} },
 };
+const C = require("./core.js");
 const sent = [];
 const win = { parent: { postMessage: (m) => sent.push(m) }, TBCore: require("./core.js"), L, handlers: {},
   addEventListener(t, f) { (this.handlers[t] = this.handlers[t] || []).push(f); } };
@@ -118,6 +130,43 @@ render({ payload, palette, rules, overlays: [], selected: null, height: 500, rev
 check("same rev → no redraw", () => markers.length === nm);
 render({ payload: { nodes: payload.nodes.slice(0, 1), edges: [] }, palette, rules, overlays: [], selected: "W1", height: 500, rev: "r2", fit_token: 0 });
 check("new rev → redraw from Python state", () => markers.length === nm + 1);
+check("marker dragging disabled only after add (regression: place mode wiped the map)", () => {
+  markers.length = 0; polygons.length = 0;
+  modeButtons[2].handlers.click[0]();                       // Place mode
+  render({ payload: { nodes: payload.nodes.concat([{ id: "P1", label: "PLET", item: "PLET", kind: "plet", symbol: "plet",
+    lat: 60.53, lon: 2.63, severity: "", footprint: [12, 6], heading: 0 }]), edges: payload.edges },
+    palette, rules, overlays: [], selected: "P1", height: 500, rev: "r3", fit_token: 0 });
+  return markers.length === 3 && markers.every((m) => m.dragging && m.dragging.on === false);
+});
+check("true-scale footprints drawn when zoomed in", () => polygons.length >= 1);
+check("bathymetry WMS overlays registered", () => Object.keys(L._overlays).some((k) => /bathymetry/i.test(k))
+  && L._overlays["Bathymetry (EMODnet)"].o.layers === "mean_multicolour");
+check("parallel lines between the same nodes are offset apart", () => {
+  const off = C.parallelOffsets([{ id: "a", source: "X", target: "Y" }, { id: "b", source: "Y", target: "X" }], 60);
+  return off.a !== off.b && Math.abs(off.a - off.b) === 60;
+});
+check("Sodir overlay style uses per-feature colour and pattern", () => {
+  L._geo = [];
+  render({ payload, palette, rules, selected: null, height: 500, rev: "r4", fit_token: 0,
+    overlays: [{ type: "FeatureCollection", geometry: "polygon", title: "Discoveries", color: "#888",
+      features: [{ type: "Feature", geometry: { type: "Polygon", coordinates: [[[2, 60], [2, 61], [3, 61], [2, 60]]] },
+        properties: { _label: "D1", _fill: "#0BBE00", _outline: "#828282" } },
+        { type: "Feature", geometry: { type: "Polygon", coordinates: [[[4, 60], [4, 61], [5, 61], [4, 60]]] },
+          properties: { _label: "D2", _fill: "#FF0000", _pattern: "oil_gas" } }] }] });
+  const st = L._geo[L._geo.length - 1].o.style;
+  return st(L._geo[L._geo.length - 1].fc.features[0]).fillColor === "#0BBE00"
+    && st(L._geo[L._geo.length - 1].fc.features[1]).className === "hatch-oil_gas";
+});
+check("map allows zooming past the Ocean basemap's native levels", () =>
+  mapObj.opts.maxZoom === 19 && L._tiles.some((o) => o.maxNativeZoom === 13 && o.maxZoom === 19)
+  && L._tiles.every((o) => !o.maxZoom || o.maxZoom >= 19));
+check("smoothed as-laid shape is drawn when Python supplies it", () => {
+  lines.length = 0;
+  render({ payload: { nodes: payload.nodes, edges: [Object.assign({}, payload.edges[0],
+    { shape: [[60.5, 2.6], [60.505, 2.605], [60.51, 2.61]], smooth: true })] },
+    palette, rules, overlays: [], selected: null, height: 500, rev: "r9", fit_token: 0 });
+  return lines[0].ll.length === 3;
+});
 console.log("protocol.test.js: " + pass + " passed, " + fail.length + " failed");
 fail.forEach((f) => console.log("  FAIL " + f));
 process.exit(fail.length ? 1 : 0);

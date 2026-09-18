@@ -11,26 +11,33 @@
   const EDGE_KINDS = ["flowline", "umbilical", "jumper", "riser", "power_cable"];
 
   // Equinor-derived palette; kind → symbol + colour
+  // symbol → plan-view drawing + colour. Keyed by CatalogItem.symbol, falling back to category.
   const NODE_STYLE = {
-    well:        { shape: "circle",   color: "#00243D", size: 14 },
-    template:    { shape: "square",   color: "#243746", size: 22 },
-    manifold:    { shape: "square",   color: "#4A6B82", size: 20 },
-    plet:        { shape: "diamond",  color: "#007079", size: 14 },
-    plem:        { shape: "diamond",  color: "#005F66", size: 18 },
-    ilt:         { shape: "diamond",  color: "#3E8A91", size: 12 },
-    ssiv:        { shape: "bowtie",   color: "#7D4EBF", size: 16 },
-    boosting:    { shape: "hexagon",  color: "#E9A23B", size: 22 },
-    compression: { shape: "hexagon",  color: "#C4561B", size: 26 },
-    separation:  { shape: "hexagon",  color: "#8C6D1F", size: 26 },
-    riser_base:  { shape: "square",   color: "#6F6F6F", size: 14 },
-    host:        { shape: "triangle", color: "#EB0037", size: 26 },
+    xt:          { color: "#00243D", size: 16 },
+    well:        { color: "#00243D", size: 16 },
+    template:    { color: "#243746", size: 30 },
+    manifold:    { color: "#4A6B82", size: 26 },
+    plet:        { color: "#007079", size: 18 },
+    plem:        { color: "#005F66", size: 20 },
+    ilt:         { color: "#3E8A91", size: 14 },
+    ssiv:        { color: "#7D4EBF", size: 18 },
+    pump:        { color: "#E9A23B", size: 26 },
+    boosting:    { color: "#E9A23B", size: 26 },
+    compression: { color: "#C4561B", size: 30 },
+    separation:  { color: "#8C6D1F", size: 30 },
+    riser_base:  { color: "#6F6F6F", size: 18 },
+    jacket:      { color: "#EB0037", size: 30 },
+    semisub:     { color: "#EB0037", size: 32 },
+    fpso:        { color: "#EB0037", size: 34 },
+    host:        { color: "#EB0037", size: 30 },
   };
   const EDGE_STYLE = {
-    flowline:    { color: "#00243D", dash: null,    base: 3 },
-    umbilical:   { color: "#E9A23B", dash: "8 6",   base: 2.5 },
-    jumper:      { color: "#6F6F6F", dash: null,    base: 4 },
-    riser:       { color: "#7D4EBF", dash: null,    base: 4 },
-    power_cable: { color: "#C4561B", dash: "2 6",   base: 2.5 },
+    flowline:     { color: "#00243D", dash: null,   base: 3 },
+    umbilical:    { color: "#E9A23B", dash: "8 6",  base: 2.5 },
+    jumper:       { color: "#6F6F6F", dash: null,   base: 4 },
+    riser:        { color: "#7D4EBF", dash: null,   base: 4 },
+    power_cable:  { color: "#C4561B", dash: "2 6",  base: 2.5 },
+    utility_line: { color: "#9DBA00", dash: "4 4",  base: 2.5 },
   };
   const SEVERITY_COLOR = { error: "#EB0037", warning: "#E9A23B", info: "#3E8A91" };
 
@@ -129,39 +136,116 @@
     const s = EDGE_STYLE[edge.kind] || EDGE_STYLE.flowline;
     const d = Number(edge.diameter_in) || 0;
     let weight = s.base + (d > 0 ? Math.min(d, 24) / 6 : 0);
-    const color = edge.severity === "error" ? SEVERITY_COLOR.error : s.color;
+    const base = edge.color || s.color;
+    const color = edge.severity === "error" ? SEVERITY_COLOR.error : base;
     if (selected) weight += 2.5;
-    return { color: color, weight: weight, dashArray: s.dash, opacity: selected ? 1 : 0.9 };
+    const dash = edge.dash !== undefined && edge.dash !== "" ? edge.dash : (edge.dash === "" && edge.color ? null : s.dash);
+    return { color: color, weight: weight, dashArray: dash || null, opacity: selected ? 1 : 0.9 };
   }
 
-  function nodeSvg(kind, severity, selected) {
-    const s = NODE_STYLE[kind] || NODE_STYLE.plet;
-    const z = s.size, h = z / 2, pad = 4, W = z + pad * 2;
+  /** Plan-view symbol for one item. Shapes are schematic, not to scale — the
+   *  true footprint is drawn separately when the map is zoomed in. */
+  function symbolShape(symbol, W) {
+    const c = W / 2, p = 4, z = W - 2 * p, r = z / 2;
+    const S = {};
+    S.xt = '<circle cx="' + c + '" cy="' + c + '" r="' + r + '"/>' +
+      '<g stroke-width="1.6" stroke="#fff" fill="none"><line x1="' + (c - r * 0.6) + '" y1="' + c + '" x2="' + (c + r * 0.6) + '" y2="' + c +
+      '"/><line x1="' + c + '" y1="' + (c - r * 0.6) + '" x2="' + c + '" y2="' + (c + r * 0.6) + '"/></g>';
+    S.template = '<rect x="' + p + '" y="' + (p + z * 0.15) + '" width="' + z + '" height="' + z * 0.7 + '" rx="2"/>' +
+      '<g fill="#fff"><circle cx="' + (c - z * 0.25) + '" cy="' + (c - z * 0.13) + '" r="' + z * 0.09 + '"/>' +
+      '<circle cx="' + (c + z * 0.25) + '" cy="' + (c - z * 0.13) + '" r="' + z * 0.09 + '"/>' +
+      '<circle cx="' + (c - z * 0.25) + '" cy="' + (c + z * 0.13) + '" r="' + z * 0.09 + '"/>' +
+      '<circle cx="' + (c + z * 0.25) + '" cy="' + (c + z * 0.13) + '" r="' + z * 0.09 + '"/></g>' +
+      '<rect x="' + p + '" y="' + (p + z * 0.15) + '" width="' + z + '" height="' + z * 0.7 + '" rx="2" fill="none" stroke="#fff" stroke-width="1.2"/>';
+    S.manifold = '<rect x="' + p + '" y="' + (c - z * 0.22) + '" width="' + z + '" height="' + z * 0.44 + '" rx="2"/>' +
+      '<g stroke="#fff" stroke-width="1.5"><line x1="' + p + '" y1="' + c + '" x2="' + (W - p) + '" y2="' + c + '"/>' +
+      '<line x1="' + (c - z * 0.2) + '" y1="' + (c - z * 0.22) + '" x2="' + (c - z * 0.2) + '" y2="' + (c - z * 0.38) + '"/>' +
+      '<line x1="' + (c + z * 0.2) + '" y1="' + (c - z * 0.22) + '" x2="' + (c + z * 0.2) + '" y2="' + (c - z * 0.38) + '"/></g>';
+    S.plet = '<rect x="' + p + '" y="' + (c - z * 0.25) + '" width="' + z * 0.75 + '" height="' + z * 0.5 + '" rx="1.5"/>' +
+      '<polygon points="' + (p + z * 0.75) + ',' + (c - z * 0.25) + ' ' + (W - p) + ',' + c + ' ' + (p + z * 0.75) + ',' + (c + z * 0.25) + '"/>';
+    S.plem = S.plet;
+    S.ilt = '<rect x="' + p + '" y="' + (c - z * 0.18) + '" width="' + z + '" height="' + z * 0.36 + '" rx="1.5"/>' +
+      '<rect x="' + (c - z * 0.1) + '" y="' + p + '" width="' + z * 0.2 + '" height="' + z * 0.4 + '"/>';
+    S.ssiv = '<circle cx="' + c + '" cy="' + c + '" r="' + r + '"/>' +
+      '<polygon fill="#fff" points="' + (c - r * 0.55) + ',' + (c - r * 0.55) + ' ' + (c + r * 0.55) + ',' + (c + r * 0.55) + ' ' +
+      (c + r * 0.55) + ',' + (c - r * 0.55) + ' ' + (c - r * 0.55) + ',' + (c + r * 0.55) + '"/>';
+    S.pump = '<rect x="' + p + '" y="' + (c - z * 0.3) + '" width="' + z + '" height="' + z * 0.6 + '" rx="2"/>' +
+      '<circle cx="' + (c - z * 0.18) + '" cy="' + c + '" r="' + z * 0.17 + '" fill="#fff"/>' +
+      '<circle cx="' + (c + z * 0.18) + '" cy="' + c + '" r="' + z * 0.17 + '" fill="#fff"/>';
+    S.riser_base = '<rect x="' + p + '" y="' + p + '" width="' + z + '" height="' + z + '" rx="2"/>' +
+      '<circle cx="' + c + '" cy="' + c + '" r="' + z * 0.22 + '" fill="#fff"/>';
+    S.jacket = '<rect x="' + p + '" y="' + p + '" width="' + z + '" height="' + z + '" rx="1"/>' +
+      '<g stroke="#fff" stroke-width="1.4" fill="none"><line x1="' + p + '" y1="' + p + '" x2="' + (W - p) + '" y2="' + (W - p) +
+      '"/><line x1="' + (W - p) + '" y1="' + p + '" x2="' + p + '" y2="' + (W - p) + '"/></g>';
+    S.semisub = '<rect x="' + p + '" y="' + (c - z * 0.34) + '" width="' + z + '" height="' + z * 0.68 + '" rx="2"/>' +
+      '<g fill="#fff"><rect x="' + (p + z * 0.12) + '" y="' + (c - z * 0.22) + '" width="' + z * 0.16 + '" height="' + z * 0.16 + '"/>' +
+      '<rect x="' + (p + z * 0.72) + '" y="' + (c - z * 0.22) + '" width="' + z * 0.16 + '" height="' + z * 0.16 + '"/>' +
+      '<rect x="' + (p + z * 0.12) + '" y="' + (c + z * 0.06) + '" width="' + z * 0.16 + '" height="' + z * 0.16 + '"/>' +
+      '<rect x="' + (p + z * 0.72) + '" y="' + (c + z * 0.06) + '" width="' + z * 0.16 + '" height="' + z * 0.16 + '"/></g>';
+    S.fpso = '<path d="M ' + p + ' ' + (c - z * 0.22) + ' L ' + (p + z * 0.72) + ' ' + (c - z * 0.22) + ' L ' + (W - p) + ' ' + c +
+      ' L ' + (p + z * 0.72) + ' ' + (c + z * 0.22) + ' L ' + p + ' ' + (c + z * 0.22) + ' Z"/>' +
+      '<circle cx="' + (p + z * 0.22) + '" cy="' + c + '" r="' + z * 0.1 + '" fill="#fff"/>';
+    return S[symbol] || S.plet;
+  }
+
+  function nodeSvg(symbol, severity, selected) {
+    const s = NODE_STYLE[symbol] || NODE_STYLE.plet;
+    const pad = 4, W = s.size + pad * 2;
     const stroke = severity ? (SEVERITY_COLOR[severity] || "#fff") : "#FFFFFF";
-    const sw = severity ? 3 : 1.5;
-    const c = W / 2;
-    let shape;
-    switch (s.shape) {
-      case "circle": shape = '<circle cx="' + c + '" cy="' + c + '" r="' + h + '"/>'; break;
-      case "square": shape = '<rect x="' + pad + '" y="' + pad + '" width="' + z + '" height="' + z + '" rx="2"/>'; break;
-      case "diamond": shape = '<polygon points="' + c + ',' + pad + ' ' + (W - pad) + ',' + c + ' ' + c + ',' + (W - pad) + ' ' + pad + ',' + c + '"/>'; break;
-      case "triangle": shape = '<polygon points="' + c + ',' + pad + ' ' + (W - pad) + ',' + (W - pad) + ' ' + pad + ',' + (W - pad) + '"/>'; break;
-      case "bowtie": shape = '<polygon points="' + pad + ',' + pad + ' ' + (W - pad) + ',' + (W - pad) + ' ' + (W - pad) + ',' + pad + ' ' + pad + ',' + (W - pad) + '"/>'; break;
-      default: { // hexagon
-        const pts = [];
-        for (let i = 0; i < 6; i++) {
-          const ang = Math.PI / 3 * i + Math.PI / 6;
-          pts.push((c + h * Math.cos(ang)).toFixed(1) + "," + (c + h * Math.sin(ang)).toFixed(1));
-        }
-        shape = '<polygon points="' + pts.join(" ") + '"/>';
-      }
-    }
-    const ring = selected ? '<circle cx="' + c + '" cy="' + c + '" r="' + (c - 0.5) + '" fill="none" stroke="#EB0037" stroke-width="1.5" stroke-dasharray="3 2"/>' : "";
+    const sw = severity ? 2.5 : 1.2;
+    const ring = selected
+      ? '<rect x="1" y="1" width="' + (W - 2) + '" height="' + (W - 2) + '" fill="none" stroke="#EB0037" stroke-width="1.5" stroke-dasharray="3 2"/>'
+      : "";
     return {
       html: '<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + W + '" viewBox="0 0 ' + W + " " + W +
-        '"><g fill="' + s.color + '" stroke="' + stroke + '" stroke-width="' + sw + '">' + shape + "</g>" + ring + "</svg>",
+        '"><g fill="' + s.color + '" stroke="' + stroke + '" stroke-width="' + sw + '">' + symbolShape(symbol, W) + "</g>" + ring + "</svg>",
       size: W,
     };
+  }
+
+  /** Lateral offsets (metres) for lines sharing the same pair of end nodes, so a
+   *  flowline, umbilical and chemical line between the same points stay readable. */
+  function parallelOffsets(edges, spacing) {
+    const groups = {};
+    (edges || []).forEach(function (e) {
+      const key = [e.source, e.target].sort().join("|");
+      (groups[key] = groups[key] || []).push(e.id);
+    });
+    const out = {};
+    Object.keys(groups).forEach(function (k) {
+      const ids = groups[k];
+      ids.forEach(function (id, i) { out[id] = (i - (ids.length - 1) / 2) * (spacing || 60); });
+    });
+    return out;
+  }
+
+  function offsetLatLngs(latlngs, offsetM) {
+    if (!offsetM) return latlngs;
+    const out = [];
+    for (let i = 0; i < latlngs.length; i++) {
+      const a = latlngs[Math.max(i - 1, 0)], b = latlngs[Math.min(i + 1, latlngs.length - 1)];
+      const lat0 = latlngs[i][0];
+      const k = Math.cos(lat0 * Math.PI / 180);
+      let dx = (b[1] - a[1]) * k * 111320, dy = (b[0] - a[0]) * 110540;
+      const L = Math.hypot(dx, dy) || 1;
+      const nx = -dy / L, ny = dx / L;                 // left-hand normal
+      out.push([lat0 + offsetM * ny / 110540, latlngs[i][1] + offsetM * nx / (111320 * k)]);
+    }
+    return out;
+  }
+
+  /** True-scale plan footprint corners for a rectangular structure. */
+  function footprintPolygon(lat, lon, lengthM, widthM, headingDeg) {
+    if (!(lengthM > 0 && widthM > 0)) return null;
+    const h = (headingDeg || 0) * Math.PI / 180;
+    const k = Math.cos(lat * Math.PI / 180);
+    const corners = [[lengthM / 2, widthM / 2], [lengthM / 2, -widthM / 2],
+                     [-lengthM / 2, -widthM / 2], [-lengthM / 2, widthM / 2]];
+    return corners.map(function (c) {
+      const x = c[0] * Math.sin(h) + c[1] * Math.cos(h);     // east
+      const y = c[0] * Math.cos(h) - c[1] * Math.sin(h);     // north
+      return [lat + y / 110540, lon + x / (111320 * k)];
+    });
   }
 
   function formatLength(m) {
@@ -189,6 +273,7 @@
   return {
     EDGE_KINDS, NODE_STYLE, EDGE_STYLE, SEVERITY_COLOR,
     makeNonce, eventFactory, edgeAllowed, nodesById, edgeLatLngs, insertVertex, removeVertex,
-    moveVertex, haversine, polylineLength, edgeStyle, nodeSvg, formatLength, escapeHtml, bboxOf,
+    moveVertex, haversine, polylineLength, edgeStyle, nodeSvg, symbolShape, parallelOffsets,
+    offsetLatLngs, footprintPolygon, formatLength, escapeHtml, bboxOf,
   };
 });

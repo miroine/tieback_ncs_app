@@ -46,6 +46,8 @@
   }
   #toast.ok { border-left-color: var(--pistachio); }
   .tb-node { background: transparent; border: 0; }
+  .hatch-oil_gas path, path.hatch-oil_gas { fill: url(#tb-oilgas) !important; }
+  .hatch-gas_condensate path, path.hatch-gas_condensate { fill: url(#tb-gascond) !important; }
   .tb-node svg { display: block; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.35)); }
   .tb-vertex { background: #fff; border: 2px solid var(--torch); border-radius: 50%; }
   .tb-label { background: rgba(255,255,255,0.85); border: 0; box-shadow: none; color: var(--navy); font: 600 11px var(--font); padding: 0 3px; }
@@ -57,6 +59,14 @@
 </style>
 </head>
 <body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <pattern id="tb-oilgas" patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(45)">
+    <rect width="8" height="8" fill="#0BBE00" fill-opacity="0.65"/><rect width="4" height="8" fill="#FF0000" fill-opacity="0.65"/>
+  </pattern>
+  <pattern id="tb-gascond" patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(45)">
+    <rect width="8" height="8" fill="#FF0000" fill-opacity="0.6"/><rect width="4" height="8" fill="#FFC000" fill-opacity="0.75"/>
+  </pattern>
+</defs></svg>
 <div id="wrap">
   <div id="map" role="application" aria-label="Subsea layout map"></div>
   <div id="toolbar" role="toolbar" aria-label="Layout tools">
@@ -103,7 +113,7 @@
   let args = { payload: { nodes: [], edges: [] }, palette: { node_items: [], edge_items: [] }, rules: {}, overlays: [] };
   let lastRev = null, lastFit = null, firstRender = true;
   let mode = "select", selected = null, connectFrom = null;
-  let nodeMarkers = {}, edgeLines = {}, labelLayer = null, vertexLayer = null;
+  let nodeMarkers = {}, edgeLines = {}, labelLayer = null, vertexLayer = null, offsets = {};
   let overlayGroups = {};
 
   if (typeof L === "undefined") {
@@ -112,25 +122,39 @@
     return;
   }
 
-  const map = L.map("map", { zoomControl: true, preferCanvas: false, doubleClickZoom: false, boxZoom: true })
-    .setView([60.5, 3.0], 7);
+  // maxZoom on the map, maxNativeZoom on each source: tiles are upscaled past their native
+  // level instead of capping how far you can zoom in (the Ocean base only has tiles to z13).
+  const map = L.map("map", { zoomControl: true, preferCanvas: false, doubleClickZoom: false, boxZoom: true,
+                             maxZoom: 19 }).setView([60.5, 3.0], 7);
+  map.createPane("bathymetry").style.zIndex = 250;
   map.createPane("overlays").style.zIndex = 350;
+  map.createPane("footprints").style.zIndex = 400;
   map.createPane("edges").style.zIndex = 420;
   map.createPane("vertices").style.zIndex = 640;
 
   const basemaps = {
     "Ocean (Esri)": L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}",
-      { maxZoom: 13, attribution: "Tiles © Esri — GEBCO, NOAA, Garmin, HERE" }),
+      { maxNativeZoom: 13, maxZoom: 19, attribution: "Tiles © Esri — GEBCO, NOAA, Garmin, HERE" }),
     "OpenStreetMap": L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-      { maxZoom: 19, attribution: "© OpenStreetMap contributors" }),
+      { maxNativeZoom: 19, maxZoom: 19, attribution: "© OpenStreetMap contributors" }),
     "Satellite (Esri)": L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-      { maxZoom: 18, attribution: "Tiles © Esri" }),
+      { maxNativeZoom: 18, maxZoom: 19, attribution: "Tiles © Esri" }),
   };
   basemaps["Ocean (Esri)"].addTo(map);
-  const layerControl = L.control.layers(basemaps, {}, { position: "topright", collapsed: true }).addTo(map);
+  // EMODnet Bathymetry (DTM ~115 m grid, depths to LAT)
+  const bathy = {
+    "Bathymetry (EMODnet)": L.tileLayer.wms("https://ows.emodnet-bathymetry.eu/wms", {
+      layers: "mean_multicolour", format: "image/png", transparent: true, opacity: 0.65, pane: "bathymetry", maxZoom: 19,
+      attribution: "Bathymetry © EMODnet Bathymetry Consortium" }),
+    "Depth contours (EMODnet)": L.tileLayer.wms("https://ows.emodnet-bathymetry.eu/wms", {
+      layers: "contours", format: "image/png", transparent: true, opacity: 0.9, pane: "bathymetry", maxZoom: 19,
+      attribution: "Bathymetry © EMODnet Bathymetry Consortium" }),
+  };
+  const layerControl = L.control.layers(basemaps, bathy, { position: "topright", collapsed: true }).addTo(map);
   L.control.scale({ metric: true, imperial: false, position: "bottomright" }).addTo(map);
   const edgeGroup = L.layerGroup().addTo(map);
   const nodeGroup = L.layerGroup().addTo(map);
+  const footprintGroup = L.layerGroup().addTo(map);
   labelLayer = L.layerGroup().addTo(map);
   vertexLayer = L.layerGroup().addTo(map);
 
@@ -211,7 +235,7 @@
   function nodeById(id) { return (args.payload.nodes || []).find((n) => n.id === id); }
 
   function nodeIcon(n) {
-    const svg = C.nodeSvg(n.kind, n.severity, n.id === selected || n.id === connectFrom);
+    const svg = C.nodeSvg(n.symbol || n.kind, n.severity, n.id === selected || n.id === connectFrom);
     return L.divIcon({ className: "tb-node", html: svg.html, iconSize: [svg.size, svg.size], iconAnchor: [svg.size / 2, svg.size / 2] });
   }
 
@@ -229,10 +253,12 @@
     edgeGroup.clearLayers(); nodeGroup.clearLayers(); labelLayer.clearLayers();
     nodeMarkers = {}; edgeLines = {};
     const ids = byId();
+    offsets = C.parallelOffsets(args.payload.edges, 60);
     (args.payload.edges || []).forEach((e) => {
       const ll = C.edgeLatLngs(e, ids);
       if (!ll) return;
-      const line = L.polyline(ll, Object.assign({ pane: "edges", interactive: true }, C.edgeStyle(e, e.id === selected)));
+      const laid = (e.shape && e.shape.length >= 2) ? e.shape : ll;      // smoothed route from Python
+      const line = L.polyline(C.offsetLatLngs(laid, offsets[e.id]), Object.assign({ pane: "edges", interactive: true }, C.edgeStyle(e, e.id === selected)));
       line.bindTooltip(tooltipFor(e, true), { sticky: true });
       line.on("click", (ev) => { L.DomEvent.stopPropagation(ev); onEdgeClick(e, ev); });
       line.addTo(edgeGroup);
@@ -248,14 +274,32 @@
         n.lat = p.lat; n.lon = p.lng;
         emit("move_node", { id: n.id, lat: p.lat, lon: p.lng });
       });
-      if (mode !== "select") mk.dragging.disable();
-      mk.addTo(nodeGroup);
+      mk.addTo(nodeGroup);                     // L.Marker.dragging only exists after onAdd
+      if (mode !== "select" && mk.dragging) mk.dragging.disable();
       nodeMarkers[n.id] = mk;
     });
     $("empty").style.display = (args.payload.nodes || []).length ? "none" : "flex";
+    drawFootprints();
     drawVertices();
     updateDeleteButton();
   }
+
+  /** True-scale plan footprints, drawn once the map is zoomed in far enough to see them. */
+  function drawFootprints() {
+    footprintGroup.clearLayers();
+    if (map.getZoom() < 13) return;
+    (args.payload.nodes || []).forEach((n) => {
+      const fp = n.footprint || [];
+      const mk = nodeMarkers[n.id];
+      const pos = mk ? [mk.getLatLng().lat, mk.getLatLng().lng] : [n.lat, n.lon];
+      const poly = C.footprintPolygon(pos[0], pos[1], fp[0], fp[1], n.heading || 0);
+      if (!poly) return;
+      L.polygon(poly, { pane: "footprints", color: "#FFFFFF", weight: 1, opacity: 0.9,
+                        fillColor: (C.NODE_STYLE[n.symbol || n.kind] || {}).color || "#243746",
+                        fillOpacity: 0.45, interactive: false }).addTo(footprintGroup);
+    });
+  }
+  map.on("zoomend", drawFootprints);
 
   function liveUpdateEdges(nodeId, latlng) {
     const ids = byId();
@@ -264,8 +308,12 @@
     (args.payload.edges || []).forEach((e) => {
       if (e.source !== nodeId && e.target !== nodeId) return;
       const ll = C.edgeLatLngs(e, ids);
-      if (ll && edgeLines[e.id]) { edgeLines[e.id].setLatLngs(ll); msg.push(e.label + " ≈ " + C.formatLength(C.polylineLength(ll))); }
+      if (ll && edgeLines[e.id]) {
+        edgeLines[e.id].setLatLngs(C.offsetLatLngs(ll, offsets[e.id]));
+        msg.push(e.label + " ≈ " + C.formatLength(C.polylineLength(ll)));
+      }
     });
+    drawFootprints();
     $("hint").textContent = msg.length ? "Geodesic (before allowance): " + msg.join(", ") : "Moving " + nodeId;
   }
 
@@ -281,7 +329,7 @@
         const p = h.getLatLng();
         const r = C.moveVertex(e.route, idx, [p.lat, p.lng]);
         const ll = C.edgeLatLngs(Object.assign({}, e, { route: r }), byId());
-        if (edgeLines[e.id]) edgeLines[e.id].setLatLngs(ll);
+        if (edgeLines[e.id]) edgeLines[e.id].setLatLngs(C.offsetLatLngs(ll, offsets[e.id]));
         $("hint").textContent = e.label + " ≈ " + C.formatLength(C.polylineLength(ll)) + " geodesic";
       });
       h.on("dragend", () => {
@@ -294,7 +342,7 @@
         e.route = C.removeVertex(e.route, idx);
         emit("set_route", { id: e.id, route: e.route });
         const ll = C.edgeLatLngs(e, byId());
-        if (edgeLines[e.id]) edgeLines[e.id].setLatLngs(ll);
+        if (edgeLines[e.id]) edgeLines[e.id].setLatLngs(C.offsetLatLngs(ll, offsets[e.id]));
         drawVertices();
       });
       h.addTo(vertexLayer);
@@ -344,7 +392,7 @@
       const ll = C.edgeLatLngs(e, byId());
       e.route = C.insertVertex(ll, e.route, [ev.latlng.lat, ev.latlng.lng]);
       emit("set_route", { id: e.id, route: e.route });
-      edgeLines[e.id].setLatLngs(C.edgeLatLngs(e, byId()));
+      edgeLines[e.id].setLatLngs(C.offsetLatLngs(C.edgeLatLngs(e, byId()), offsets[e.id]));
       drawVertices();
       return;
     }
@@ -390,8 +438,17 @@
       const title = fc.title || ("Layer " + (i + 1));
       const g = L.geoJSON(fc, {
         pane: "overlays",
-        style: () => ({ color: color, weight: fc.geometry === "line" ? 2 : 1.2, fillOpacity: 0.12, opacity: 0.85 }),
-        pointToLayer: (f, latlng) => L.circleMarker(latlng, { pane: "overlays", radius: 4, color: "#fff", weight: 1, fillColor: color, fillOpacity: 0.95 }),
+        style: (f) => {
+          const p = (f && f.properties) || {};
+          const fill = p._fill || color;
+          const st = { color: p._outline || "#828282", weight: fc.geometry === "line" ? 2 : 1,
+                       fillColor: fill, fillOpacity: fc.geometry === "polygon" ? 0.55 : 0.12, opacity: 0.9 };
+          if (fc.geometry === "line") { st.color = fill; st.fillOpacity = 0; }
+          if (p._pattern) st.className = "hatch-" + p._pattern;      // CSS fill: url(#...)
+          return st;
+        },
+        pointToLayer: (f, latlng) => L.circleMarker(latlng, { pane: "overlays", radius: 4, color: "#fff", weight: 1,
+          fillColor: ((f && f.properties) || {})._fill || color, fillOpacity: 0.95 }),
         onEachFeature: (f, lyr) => {
           const p = f.properties || {};
           const lab = p._label || p.name || p.NAME || "";

@@ -45,6 +45,35 @@ check("formatLength", () => C.formatLength(950) === "950 m" && C.formatLength(14
 check("escapeHtml", () => C.escapeHtml('<a href="x">&') === "&lt;a href=&quot;x&quot;&gt;&amp;");
 check("bboxOf includes route vertices", () => eq(C.bboxOf(payload), [[60, 2], [60.2, 3]]));
 check("bboxOf empty -> null", () => C.bboxOf({ nodes: [] }) === null);
+check("symbols exist for every plan-view type", () => ["xt","template","manifold","plet","ssiv","pump","jacket","semisub","fpso","riser_base","ilt"]
+  .every((k) => C.symbolShape(k, 30).length > 20));
+check("unknown symbol falls back to PLET shape", () => C.symbolShape("nope", 30) === C.symbolShape("plet", 30));
+check("footprint: 100 m × 50 m, heading 0 → ±50 m north, ±25 m east", () => {
+  const fp = C.footprintPolygon(60.5, 2.6, 100, 50, 0);
+  const dLat = Math.abs(fp[0][0] - 60.5) * 110540, dLon = Math.abs(fp[0][1] - 2.6) * 111320 * Math.cos(60.5 * Math.PI / 180);
+  return Math.abs(dLat - 50) < 0.5 && Math.abs(dLon - 25) < 0.5;
+});
+check("footprint rotates with heading 90°", () => {
+  const fp = C.footprintPolygon(60.5, 2.6, 100, 50, 90);
+  return Math.abs(Math.abs(fp[0][0] - 60.5) * 110540 - 25) < 0.5;
+});
+check("footprint needs both dimensions", () => C.footprintPolygon(60, 3, 0, 20, 0) === null);
+check("offsetLatLngs shifts perpendicular by the given metres", () => {
+  const off = C.offsetLatLngs([[60, 3], [60.1, 3]], 100);
+  return Math.abs(Math.abs(off[0][1] - 3) * 111320 * Math.cos(60 * Math.PI / 180) - 100) < 1;
+});
+check("zero offset returns the same geometry", () => C.offsetLatLngs([[60, 3], [61, 3]], 0).length === 2);
+check("three lines on one corridor spread symmetrically", () => {
+  const o = C.parallelOffsets([{ id: "a", source: "X", target: "Y" }, { id: "b", source: "X", target: "Y" },
+    { id: "c", source: "X", target: "Y" }], 60);
+  return o.a === -60 && o.b === 0 && o.c === 60;
+});
+check("edge colour/dash from the catalog override the category default", () => {
+  const st = C.edgeStyle({ kind: "utility_line", color: "#9DBA00", dash: "4 4", diameter_in: 0 }, false);
+  return st.color === "#9DBA00" && st.dashArray === "4 4";
+});
+check("error severity still wins over the item colour", () =>
+  C.edgeStyle({ kind: "flowline", color: "#00243D", severity: "error" }, false).color === "#EB0037");
 console.log("core.test.js: " + pass + " passed, " + fail.length + " failed");
 fail.forEach((f) => console.log("  FAIL " + f));
 process.exit(fail.length ? 1 : 0);
