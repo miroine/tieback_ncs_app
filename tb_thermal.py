@@ -107,6 +107,35 @@ def cooldown_hours(t0_c: float, t_hydrate_c: float, t_amb_c: float, u_w_m2k: flo
     return tau_s * math.log((t0_c - t_amb_c) / (t_hydrate_c - t_amb_c)) / 3600.0
 
 
+# ───────────────────────── Joule-Thomson expansion ─────────────────────────
+
+R_UNIVERSAL = 8.314462           # J/(mol·K)
+MW_AIR_G = 28.9647               # g/mol
+JT_LIQUID_K_PER_BAR = -0.02      # liquids warm slightly on expansion (friction-dominated)
+
+
+def jt_coefficient_gas_k_per_bar(p_psia: float, t_f: float, gas_sg: float, z_fn, cp_j_kgk: float = CP_GAS) -> float:
+    """Real-gas Joule-Thomson coefficient, K/bar (positive = cools on expansion).
+
+        μ_JT = (R_specific · T²) / (p · c_p · Z) · (∂Z/∂T)_p
+
+    `z_fn(p_psia, t_f, gas_sg)` supplies the compressibility factor (tb_multiphase.z_factor),
+    differentiated numerically at constant pressure.
+    """
+    z = z_fn(p_psia, t_f, gas_sg)
+    dz_dt_k = (z_fn(p_psia, t_f + 1.0, gas_sg) - z_fn(p_psia, t_f - 1.0, gas_sg)) / 2.0 * 1.8
+    r_specific = R_UNIVERSAL / (MW_AIR_G * gas_sg / 1000.0)
+    t_k = (t_f + 459.67) / 1.8
+    mu_k_per_pa = r_specific * t_k ** 2 / (max(p_psia, 1.0) * 6894.757 * cp_j_kgk * max(z, 0.1)) * dz_dt_k
+    return mu_k_per_pa * 1e5
+
+
+def jt_coefficient_mixture_k_per_bar(p_psia, t_f, gas_sg, gas_mass_frac: float, z_fn) -> float:
+    """Mass-weighted JT coefficient for the flowing mixture."""
+    g = min(max(gas_mass_frac, 0.0), 1.0)
+    return g * jt_coefficient_gas_k_per_bar(p_psia, t_f, gas_sg, z_fn) + (1 - g) * JT_LIQUID_K_PER_BAR
+
+
 def hydrate_temperature_f(p_psia: float, gas_sg: float) -> float:
     """Towler & Mokhatab (2005) hydrate formation temperature, °F."""
     if p_psia <= 14.7:

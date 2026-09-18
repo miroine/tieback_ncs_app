@@ -29,7 +29,7 @@ S.check("query params", params)
 S.raises("invalid bbox raises", ValueError, lambda: ncs.query_params((3, 60, 2, 61)))
 def paging():
     s = FakeSession([gj_page(1000, 0, True), gj_page(1000, 1000, True), gj_page(10, 2000, False)])
-    fc = ncs.fetch_layer("facilities", BB, s)
+    fc = ncs.fetch_layer("facilities", BB, s, use_renderer=False)
     assert len(fc["features"]) == 2010 and len(s.calls) == 3
     assert [c[1]["resultOffset"] for c in s.calls] == [0, 1000, 2000]
     assert s.calls[0][0].endswith("/MapServer/304/query")
@@ -37,11 +37,11 @@ def paging():
 S.check("pagination follows exceededTransferLimit", paging)
 def trunc():
     s = FakeSession([gj_page(1000, 0, True), gj_page(1000, 1000, True)])
-    fc = ncs.fetch_layer("facilities", BB, s, max_features=1500)
+    fc = ncs.fetch_layer("facilities", BB, s, max_features=1500, use_renderer=False)
     assert len(fc["features"]) == 1500 and fc["truncated"] and len(s.calls) == 2
 S.check("max_features truncates and flags", trunc)
 S.check("coordinates rounded to 6 dp",
-        lambda: ncs.fetch_layer("facilities", BB, FakeSession([gj_page(1, 0, False)]))["features"][0]["geometry"]["coordinates"][0] == 2.123457)
+        lambda: ncs.fetch_layer("facilities", BB, FakeSession([gj_page(1, 0, False), {}]))["features"][0]["geometry"]["coordinates"][0] == 2.123457)
 def esri():
     page = {"features": [
         {"attributes": {"pipName": "P1"}, "geometry": {"paths": [[[2, 60], [2.5, 60.5]]]}},
@@ -61,7 +61,7 @@ S.check("two clockwise rings -> MultiPolygon", esri_multi)
 S.raises("service error payload raises", RuntimeError,
          lambda: ncs.to_feature_collection({"error": {"code": 400, "message": "bad"}}))
 S.check("null geometry skipped in fetch",
-        lambda: len(ncs.fetch_layer("fields", BB, FakeSession([{"features": [{"attributes": {"fldName": "X"}, "geometry": None}]}]))["features"]) == 0)
+        lambda: len(ncs.fetch_layer("fields", BB, FakeSession([{"features": [{"attributes": {"fldName": "X"}, "geometry": None}]}]))["features"]) == 0)  # no features → no renderer call
 def discover():
     svc = {"layers": [{"id": 999, "name": "Pipelines"}, {"id": 1502, "name": "Field by status"}, {"id": 1, "name": "Other"}]}
     d = ncs.discover_layers(svc)
@@ -78,4 +78,46 @@ def labels():
     assert ncs.label_for({"someName": "X"}, L) == "X"
     assert ncs.label_for({}, L) == ""
 S.check("label fallbacks (case-insensitive, *name)", labels)
+# ── service-driven symbology ──
+RJ = {"drawingInfo": {"renderer": {"type": "uniqueValue", "field1": "dscHcType", "uniqueValueInfos": [
+    {"value": "OIL", "symbol": {"type": "esriSFS", "color": [11, 190, 0, 165], "outline": {"color": [130, 130, 130, 165]}}},
+    {"value": "GAS", "symbol": {"type": "esriSFS", "color": [255, 0, 0, 165], "outline": {"color": [130, 130, 130, 165]}}},
+    {"value": "OIL/GAS", "symbol": {"type": "esriPFS", "outline": {"color": [130, 130, 130, 165]}}}]}}}
+S.check("layer 504 = all discoveries by main HC type", lambda: ncs.NCS_LAYERS["discoveries_all"].layer_id == 504)
+S.check("NCS bbox covers North Sea to Barents", lambda: ncs.NCS_BBOX[1] < 56 and ncs.NCS_BBOX[3] > 81)
+def renderer():
+    r = ncs.parse_renderer(RJ)
+    assert r["field"] == "dscHcType"
+    assert r["values"]["OIL"]["fill"] == "#0BBE00" and r["values"]["GAS"]["fill"] == "#FF0000"
+    assert r["values"]["OIL/GAS"]["pattern"] == "oil_gas"
+S.check("renderer parsed: Sodir oil green, gas red, oil/gas hatched", renderer)
+S.check("simple renderer supported", lambda: ncs.parse_renderer(
+    {"drawingInfo": {"renderer": {"type": "simple", "symbol": {"type": "esriSFS", "color": [1, 2, 3, 255]}}}})["default"]["fill"] == "#010203")
+S.check("no drawingInfo → empty renderer", lambda: ncs.parse_renderer({}) == {"field": None, "values": {}, "default": None})
+def applied():
+    r = ncs.parse_renderer(RJ)
+    fc = ncs.apply_renderer({"features": [{"properties": {"dscHcType": "OIL"}}, {"properties": {"DSCHCTYPE": "GAS"}},
+                                          {"properties": {"dscHcType": "UNKNOWN"}}]}, r, "#E9A23B")
+    p_ = [f["properties"] for f in fc["features"]]
+    assert p_[0]["_fill"] == "#0BBE00" and p_[1]["_fill"] == "#FF0000" and p_[2]["_fill"] == "#E9A23B"
+    assert p_[0]["_outline"] == "#828282" and "_pattern" not in p_[0]
+S.check("features coloured by HC type, unknown values fall back", applied)
+def fetch_with_renderer():
+    s_ = FakeSession([gj_page(2, 0, False), RJ])
+    fc = ncs.fetch_layer("discoveries_all", BB, s_)
+    assert fc["renderer"]["field"] == "dscHcType" and s_.calls[-1][1]["f"] == "json"
+    assert all("_fill" in f["properties"] for f in fc["features"])
+S.check("fetch_layer attaches renderer styling", fetch_with_renderer)
+def renderer_failure():
+    class Flaky(FakeSession):
+        def get(self, url, params=None, timeout=None):
+            if params.get("f") == "json":
+                raise ConnectionError("no symbology")
+            return super().get(url, params, timeout)
+    fc = ncs.fetch_layer("fields", BB, Flaky([gj_page(1, 0, False)]))
+    assert fc["renderer"] is None and len(fc["features"]) == 1
+S.check("renderer failure keeps the data", renderer_failure)
+S.check("use_renderer=False skips the extra call",
+        lambda: len(FakeSession([gj_page(1, 0, False)]).calls) == 0
+        and ncs.fetch_layer("fields", BB, FakeSession([gj_page(1, 0, False)]), use_renderer=False)["features"])
 sys.exit(0 if S.report() else 1)

@@ -43,6 +43,7 @@ class CostSettings:
     survey_precomm_frac: float = 0.08
     owners_cost_frac: float = 0.05
     contingency_frac: float = 0.15
+    piggyback_install_frac: float = 0.3   # strapped lines add this share of their own lay time
     element_factor: Dict[str, float] = field(default_factory=dict)
     element_override_usd: Dict[str, float] = field(default_factory=dict)
     currency_rate: float = 1.0     # display multiplier only (e.g. NOK per USD)
@@ -74,9 +75,12 @@ def estimate(layout, settings: Optional[CostSettings] = None) -> dict:
         fab = it.fabrication_usd * q
         eng = it.engineering_frac * (proc + fab)
         days = _offshore_days(it, row) * (1.0 if it.install_spread == "host" else s.weather_factor)
+        piggy = bool(row.get("piggyback_on"))
+        if piggy:
+            days *= s.piggyback_install_frac      # laid with the carrier, not a separate campaign
         spread = cat.spreads[it.install_spread]
         inst = days * spread.day_rate_usd
-        if days > 0:
+        if days > 0 and not piggy:
             spreads_used.add((it.install_spread, row["phase"]))
         f = s.element_factor.get(row["element_id"], 1.0)
         proc, fab, eng, inst = proc * f, fab * f, eng * f, inst * f
@@ -89,7 +93,7 @@ def estimate(layout, settings: Optional[CostSettings] = None) -> dict:
                 proc, fab, eng, inst = proc * k, fab * k, eng * k, inst * k
             else:
                 proc = target
-        lines.append(dict(row, spread=it.install_spread, quantity_basis=q, offshore_days=days,
+        lines.append(dict(row, spread=it.install_spread, piggyback=piggy, quantity_basis=q, offshore_days=days,
                           procurement=proc, fabrication=fab, engineering=eng, installation=inst,
                           direct=proc + fab + eng + inst, overridden=overridden, factor=f))
 

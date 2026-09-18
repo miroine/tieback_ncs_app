@@ -100,4 +100,75 @@ def yrt():
     assert lay.quantities() == lay2.quantities()
 S.check("layout YAML round-trip preserves quantities", yrt)
 S.check("quantity rows = nodes + edges", lambda: len(demo().quantities()) == 9 + 9)
+def smoothing():
+    lay = demo()
+    L0 = lay.edge_length(lay.edges["FL1"])
+    lay.edges["FL1"].attrs["smooth"] = True
+    assert len(lay.edge_shape(lay.edges["FL1"])) == 2 * lay.settings.smooth_samples + 1
+    assert lay.edge_length(lay.edges["FL1"]) > L0        # curve is slightly longer than the corner
+    assert lay.edge_length(lay.edges["FL1"]) / L0 < 1.05
+S.check("smoothed route resamples the corridor and lengthens the line slightly", smoothing)
+S.check("smoothing a 2-point line is a no-op",
+        lambda: (lambda l: (l.edges["J_T"].attrs.__setitem__("smooth", True),
+                            len(l.edge_shape(l.edges["J_T"])) == 2)[-1])(demo()))
+def bend_radius():
+    lay = demo()
+    lay.edges["FL1"].route = [(60.55, 2.60), (60.5505, 2.5985)]    # near-hairpin over ~150 m
+    assert "BEND_RADIUS" in codes(lay, "warning")
+    lay.settings.min_bend_radius_m = 50.0
+    assert "BEND_RADIUS" not in codes(lay, "warning")
+S.check("tight route bend warns against the minimum lay radius", bend_radius)
+S.check("gentle route bend passes", lambda: "BEND_RADIUS" not in codes(demo(), "warning"))
+def lift():
+    lay = demo()
+    lay.catalog.override("tmpl_4slot", install_spread="csv")      # 400 te structure on a 250 te CSV
+    fs = [f for f in lay.validate() if f.code == "LIFT_CAPACITY"]
+    assert fs and fs[0].element_id == "TMPL_A" and "250" in fs[0].message
+S.check("structure heavier than its vessel's hook is flagged", lift)
+S.check("heavy-lift spread carries the template fine", lambda: "LIFT_CAPACITY" not in codes(demo(), "warning"))
+S.check("spread with no stated capacity is not checked",
+        lambda: (lambda l: (l.catalog.spreads["hlv"].__setattr__("lift_capacity_te", 0),
+                            l.catalog.override("tmpl_4slot", weight_te=99999),
+                            "LIFT_CAPACITY" not in codes(l, "warning"))[-1])(demo()))
+def templates():
+    import pathlib
+    files = sorted(pathlib.Path("templates").glob("*.yaml"))
+    assert len(files) >= 5
+    for f in files:
+        lay = n.Layout.from_dict(yaml.safe_load(f.read_text()), c.Catalog())
+        errs = [x for x in lay.validate() if x.severity == "error"]
+        assert not errs, (f.name, [x.message for x in errs])
+        assert lay.nodes and lay.edges and any(lay.kind(x) == "host" for x in lay.nodes)
+S.check("every shipped concept template loads and passes the design checks", templates)
+def piggyback_follows_carrier():
+    lay = demo()
+    lay.add_edge(n.Edge("CHEM1", "chem_line", "PLET_T", "PLET_H"))
+    straight = lay.edge_length(lay.edges["CHEM1"])
+    lay.edges["CHEM1"].attrs["piggyback_on"] = "FL1"
+    assert lay.edge_shape(lay.edges["CHEM1"]) == lay.edge_shape(lay.edges["FL1"])
+    assert lay.edge_length(lay.edges["CHEM1"]) > straight and codes(lay, "error") == []
+S.check("strapped line follows the carrier corridor", piggyback_follows_carrier)
+def piggyback_reversed():
+    lay = demo()
+    lay.add_edge(n.Edge("CHEM1", "chem_line", "PLET_H", "PLET_T", attrs={"piggyback_on": "FL1"}))
+    assert lay.edge_shape(lay.edges["CHEM1"]) == lay.edge_shape(lay.edges["FL1"])[::-1]
+S.check("strapped line run the other way follows the corridor reversed", piggyback_reversed)
+def piggyback_own_route_wins():
+    lay = demo()
+    lay.add_edge(n.Edge("CHEM1", "chem_line", "PLET_T", "PLET_H", route=[(60.52, 2.63)],
+                        attrs={"piggyback_on": "FL1"}))
+    assert lay.edge_shape(lay.edges["CHEM1"]) != lay.edge_shape(lay.edges["FL1"])
+S.check("an explicit route overrides the carrier corridor", piggyback_own_route_wins)
+def piggyback_checks():
+    lay = demo()
+    lay.add_edge(n.Edge("CHEM1", "chem_line", "PLET_T", "PLET_H", attrs={"piggyback_on": "NOPE"}))
+    assert "PIGGYBACK_MISSING" in codes(lay, "error")
+    lay.edges["CHEM1"].attrs["piggyback_on"] = "CHEM1"
+    assert "PIGGYBACK_SELF" in codes(lay, "error")
+    lay.edges["CHEM1"].attrs["piggyback_on"] = "UMB1"
+    assert "PIGGYBACK_CARRIER" in codes(lay, "warning")
+    lay.edges["CHEM1"].attrs["piggyback_on"] = "FL1"
+    lay.add_edge(n.Edge("FIB1", "fibre_cable", "PLET_T", "PLET_H", attrs={"piggyback_on": "CHEM1"}))
+    assert "PIGGYBACK_CHAIN" in codes(lay, "error")
+S.check("piggyback checks: missing, self, wrong carrier, chained", piggyback_checks)
 sys.exit(0 if S.report() else 1)

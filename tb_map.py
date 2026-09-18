@@ -23,7 +23,7 @@ from typing import Dict, List, Optional
 
 import tb_geo
 import tb_network as net
-from tb_catalog import EDGE_RULES, edge_allowed
+from tb_catalog import EDGE_KINDS, EDGE_RULES, NODE_KINDS, edge_allowed
 
 COMPONENT_DIR = Path(__file__).parent / "tb_map_component"
 
@@ -32,6 +32,7 @@ ID_PREFIX = {
     "ilt": "ILT", "ssiv": "SSIV", "boosting": "MPP", "compression": "COMP",
     "separation": "SEP", "riser_base": "RB", "host": "HOST",
     "flowline": "FL", "umbilical": "UMB", "jumper": "J", "riser": "RIS", "power_cable": "PC",
+    "utility_line": "UL",
 }
 SEV_RANK = {"error": 3, "warning": 2, "info": 1}
 
@@ -71,6 +72,9 @@ def build_payload(layout: "net.Layout", findings=None) -> dict:
     cat = layout.catalog
     nodes = [dict(id=n.node_id, label=n.label or n.node_id, item_id=n.item_id,
                   item=cat.get(n.item_id).name, kind=cat.get(n.item_id).category,
+                  symbol=cat.get(n.item_id).symbol or cat.get(n.item_id).category,
+                  footprint=[cat.get(n.item_id).footprint_l_m, cat.get(n.item_id).footprint_w_m],
+                  heading=float(n.attrs.get("heading_deg", 0.0) or 0.0),
                   lat=to_display(layout, n.lat, n.lon)[0], lon=to_display(layout, n.lat, n.lon)[1],
                   phase=n.phase, hipps=n.hipps,
                   severity=sev.get(n.node_id, "")) for n in layout.nodes.values()]
@@ -78,6 +82,9 @@ def build_payload(layout: "net.Layout", findings=None) -> dict:
                   item=cat.get(e.item_id).name, kind=cat.get(e.item_id).category,
                   source=e.from_node, target=e.to_node, diameter_in=e.diameter_in,
                   route=[list(to_display(layout, float(a), float(b))) for a, b in e.route],
+                  shape=[list(to_display(layout, float(a), float(b))) for a, b in layout.edge_shape(e)],
+                  smooth=bool(e.attrs.get("smooth")),
+                  color=cat.get(e.item_id).line_color, dash=cat.get(e.item_id).line_dash,
                   length_m=round(layout.edge_length(e), 1), phase=e.phase,
                   severity=sev.get(e.edge_id, "")) for e in layout.edges.values()]
     return {"nodes": nodes, "edges": edges}
@@ -87,10 +94,10 @@ def build_palette(catalog) -> dict:
     node_items, edge_items = [], []
     for it in catalog.items.values():
         rec = dict(id=it.item_id, name=it.name, kind=it.category)
-        if it.category in ID_PREFIX and it.category in ("flowline", "umbilical", "jumper", "riser", "power_cable"):
+        if it.category in EDGE_KINDS:
             rec.update(min_d=it.min_diameter_in, max_d=it.max_diameter_in, basis=it.cost_basis)
             edge_items.append(rec)
-        else:
+        elif it.category in NODE_KINDS:
             node_items.append(rec)
     return {"node_items": node_items, "edge_items": edge_items}
 

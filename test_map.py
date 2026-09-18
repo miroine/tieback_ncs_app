@@ -17,9 +17,13 @@ S.check("payload JSON-serialisable with severity, route, length", payload)
 def palette():
     pal = m.build_palette(c.Catalog())
     kinds_e = {i["kind"] for i in pal["edge_items"]}
-    assert kinds_e == {"flowline", "umbilical", "jumper", "riser", "power_cable"}
+    assert kinds_e == set(c.EDGE_KINDS) == {"flowline", "umbilical", "jumper", "riser", "power_cable", "utility_line"}
     assert all(i["kind"] not in kinds_e for i in pal["node_items"]) and len(pal["node_items"]) >= 15
-S.check("palette splits node / edge items", palette)
+S.check("palette splits node / edge items (all catalog categories covered)", palette)
+S.check("payload carries symbol, footprint, heading and line style",
+        lambda: (lambda pl: [x for x in pl["nodes"] if x["id"] == "TMPL_A"][0]["symbol"] == "template"
+                 and [x for x in pl["nodes"] if x["id"] == "TMPL_A"][0]["footprint"] == [32, 22]
+                 and [e for e in pl["edges"] if e["id"] == "UMB1"][0]["dash"] == "8 6")(m.build_payload(demo())))
 S.check("rev deterministic and content-sensitive",
         lambda: m.content_rev({"a": 1}) == m.content_rev({"a": 1}) != m.content_rev({"a": 2}))
 S.check("severity_map keeps worst", lambda: m.severity_map([n.Finding("info", "x", "", "A"), n.Finding("error", "y", "", "A"),
@@ -105,6 +109,13 @@ def wgs_identity():
     pl = m.build_payload(demo()); w1 = [x for x in pl["nodes"] if x["id"] == "W1"][0]
     assert (w1["lat"], w1["lon"]) == (60.5012, 2.6676)
 S.check("WGS84 layout displayed unchanged", wgs_identity)
+
+def payload_shape():
+    lay = demo(); lay.edges["FL1"].attrs["smooth"] = True
+    e = [x for x in m.build_payload(lay)["edges"] if x["id"] == "FL1"][0]
+    assert e["smooth"] and len(e["shape"]) == 21 and len(e["route"]) == 1
+    assert abs(e["shape"][0][0] - 60.5020) < 1e-9 and abs(e["shape"][0][1] - 2.6660) < 1e-9   # starts at the node
+S.check("payload carries the as-laid smoothed shape alongside the editable bends", payload_shape)
 
 # project bundle
 def project_rt():

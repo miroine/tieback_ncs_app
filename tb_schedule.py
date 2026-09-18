@@ -228,8 +228,14 @@ def build_from_layout(layout, settings: Optional[ScheduleSettings] = None):
             return sorted({(proc_ids[el.item_id], 0.0) for el in elements if el.item_id in proc_ids})
 
         structs = [n for n in nodes if cat.get(n.item_id).category in STRUCTURE_KINDS]
-        pipes = [e for e in edges if cat.get(e.item_id).category in PIPELAY_KINDS]
-        cables = [e for e in edges if cat.get(e.item_id).category in CABLE_KINDS]
+        # utility lines follow the spread they are installed from: rigid ones with the pipelay
+        # campaign, hose/cable types with the umbilical campaign
+        piggy = [e for e in edges if e.attrs.get("piggyback_on")]     # strapped to a carrier: laid with it
+        pipes = [e for e in edges if e not in piggy and (cat.get(e.item_id).category in PIPELAY_KINDS
+                 or (cat.get(e.item_id).category == "utility_line" and cat.get(e.item_id).install_spread == "plv"))]
+        cables = [e for e in edges if e not in piggy and (cat.get(e.item_id).category in CABLE_KINDS
+                  or (cat.get(e.item_id).category == "utility_line" and cat.get(e.item_id).install_spread != "plv"))]
+        pipes += piggy
         jumpers = [e for e in edges if cat.get(e.item_id).category == "jumper"]
         wells = [n for n in nodes if cat.get(n.item_id).category == "well"]
         hosts = [n for n in nodes if cat.get(n.item_id).category == "host"]

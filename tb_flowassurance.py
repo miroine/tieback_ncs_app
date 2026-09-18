@@ -32,6 +32,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Tuple
 
+import tb_bathymetry as tb_bath
 import tb_multiphase as mp
 import tb_thermal as th
 
@@ -93,6 +94,12 @@ class FASettings:
     host_liquid_capacity_sm3_d: float = 15000.0
     host_gas_capacity_msm3_d: float = 5.0     # million Sm³/d
     erosional_c: float = 100.0
+    use_seabed_profile: bool = True     # follow stored EMODnet profiles instead of a straight slope
+    free_span_gap_m: float = 0.5        # seabed clearance that counts as a span
+    max_free_span_m: float = 400.0
+    include_jt: bool = True             # Joule-Thomson cooling in the thermal march
+    pt_iterations: int = 3              # P/T coupling passes (JT needs > 1)
+    severe_slug_vsg_m_s: float = 3.0    # riser gas velocity below which slugging is flagged
 
     def __post_init__(self):
         if self.inhibitor not in th.INHIBITORS:
@@ -183,6 +190,37 @@ def edge_geometry(layout, edge, upstream: str, s: FASettings) -> Tuple[float, fl
     return length, theta
 
 
+def station_elevations(layout, edge, upstream: str, length_m: float, n_seg: int, s: "FASettings") -> List[float]:
+    """Elevation (m, negative below sea level) at each station boundary.
+
+    Uses the stored EMODnet seabed profile when present, oriented from the
+    upstream end; otherwise interpolates straight between the end-node depths.
+    """
+    z_up, z_dn = -_depth(layout, upstream, s), -_depth(
+        layout, edge.to_node if edge.from_node == upstream else edge.from_node, s)
+    prof = edge.attrs.get("seabed_profile") if s.use_seabed_profile else None
+    cat = layout.catalog.get(edge.item_id).category
+    if prof and len(prof) >= 2 and cat != "riser":
+        zs = [-float(d) for d in prof]
+        if upstream == edge.to_node:
+            zs = zs[::-1]
+        out = []
+        for i in range(n_seg + 1):
+            x = i * (len(zs) - 1) / n_seg
+            lo, hi = int(math.floor(x)), min(int(math.ceil(x)), len(zs) - 1)
+            out.append(zs[lo] if hi == lo else zs[lo] + (zs[hi] - zs[lo]) * (x - lo))
+        return out
+    return [z_up + (z_dn - z_up) * i / n_seg for i in range(n_seg + 1)]
+
+
+def station_inclinations(elevs: List[float], dl_m: float) -> List[float]:
+    """Inclination (deg, + = uphill in flow direction) for each station."""
+    out = []
+    for a, b in zip(elevs[:-1], elevs[1:]):
+        out.append(math.degrees(math.asin(max(-1.0, min(1.0, (b - a) / max(dl_m, 1e-9))))))
+    return out
+
+
 @dataclass
 class EdgeResult:
     edge_id: str
@@ -206,6 +244,12 @@ class EdgeResult:
     min_hydrate_margin_c: float = 0.0
     cooldown_h: float = math.inf
     heated: bool = False
+    liquid_inventory_m3: float = 0.0
+    free_spans: List[dict] = field(default_factory=list)
+    uses_seabed_profile: bool = False
+    elevations: List[float] = field(default_factory=list)
+    min_gas_velocity_m_s: float = 0.0
+    slug_risk: bool = False
     profile: List[dict] = field(default_factory=list)
 
 
@@ -217,6 +261,10 @@ class FAResult:
     wells: List[dict]
     host: dict
     findings: List[Tuple[str, str, str]]     # (severity, element, message)
+
+
+def e_item(layout, edge_id: str) -> str:
+    return layout.edges[edge_id].item_id
 
 
 def _flow_tree(layout):
@@ -268,90 +316,164 @@ def solve(layout, settings: Optional[FASettings] = None, wells: Optional[Dict[st
     for h in hosts:
         visit(h)                                   # order: upstream nodes before downstream ones
 
-    # stream at each node (fluid, q_o, q_w) and temperature (°C)
+    # ── stream blending, then coupled temperature (downstream) / pressure (upstream) passes ──
     node_stream: Dict[str, Tuple[mp.Fluid, float, float]] = {}
-    node_temp: Dict[str, float] = {}
     edge_res: Dict[str, EdgeResult] = {}
-    incoming: Dict[str, List[Tuple[mp.Fluid, float, float, float, float]]] = defaultdict(list)  # +cap, T
+    seg_counts: Dict[str, int] = {}
+    station_p: Dict[str, List[float]] = {}        # per edge, pressure at each station (psia)
+    node_temp: Dict[str, float] = {}
+    edge_t: Dict[str, List[float]] = {}           # per edge, temperature at each station (°C)
+    node_p: Dict[str, float] = {}
 
-    for n in order:
-        if layout.kind(n) == "well" and n in wells:
-            wf = wells[n]
-            q_o, q_w = wf.rates_stb_d()
-            flu = wf.fluid()
-            m = th.stream_mass(q_o, q_w, flu.gor_scf_stb, flu.api, flu.gas_sg)
-            incoming[n].append((flu, q_o, q_w, m.capacity_w_k, wf.wht_c))
-        if not incoming[n]:
-            continue
-        flu, q_o, q_w = blend([(f, a, b) for f, a, b, _, _ in incoming[n]])
-        node_stream[n] = (flu, q_o, q_w)
-        node_temp[n] = th.mix_temperature([(c, t) for _, _, _, c, t in incoming[n]])
-        if n not in down:
-            continue
-        eid, v = down[n]
-        e = layout.edges[eid]
-        length_m, theta = edge_geometry(layout, e, n, s)
-        d_in = float(dia.get(eid, edge_diameter_in(layout, e, s)))
-        u = u_value(layout, e)
-        m = th.stream_mass(q_o, q_w, flu.gor_scf_stb, flu.api, flu.gas_sg)
-        lam = th.decay_length_m(m.total, m.cp, u, d_in * 0.0254)
-        heated = e.item_id in HEATED_ITEMS
-        t_in = node_temp[n]
-        t_out = th.temperature_at(length_m, t_in, s.seabed_temp_c, lam)
-        r = EdgeResult(eid, n, v, length_m, theta, d_in, u, t_in_c=t_in, t_out_c=t_out,
-                       oil_sm3_d=q_o / SM3_TO_STB, water_sm3_d=q_w / SM3_TO_STB,
-                       gas_msm3_d=q_o * flu.gor_scf_stb / SM3SM3_TO_SCFSTB / SM3_TO_STB / 1e6, heated=heated)
-        r._lam = lam      # noqa: SLF001 — transient for pressure pass
-        edge_res[eid] = r
-        incoming[v].append((flu, q_o, q_w, m.capacity_w_k, t_out))
+    def blend_streams():
+        incoming: Dict[str, List[Tuple[mp.Fluid, float, float]]] = defaultdict(list)
+        for n_ in order:
+            if layout.kind(n_) == "well" and n_ in wells:
+                wf = wells[n_]
+                q_o_, q_w_ = wf.rates_stb_d()
+                incoming[n_].append((wf.fluid(), q_o_, q_w_))
+            if not incoming[n_]:
+                continue
+            node_stream[n_] = blend(incoming[n_])
+            if n_ in down:
+                incoming[down[n_][1]].append(node_stream[n_])
 
-    # pressure pass: downstream → upstream
-    node_p: Dict[str, float] = {h: s.arrival_bara * BARA_TO_PSIA for h in hosts}
-    for n in reversed(order):
-        if n not in down or n not in node_stream:
-            continue
-        eid, v = down[n]
-        r = edge_res[eid]
-        flu, q_o, q_w = node_stream[n]
+    def geometry():
+        for n_ in order:
+            if n_ not in down or n_ not in node_stream:
+                continue
+            eid, v = down[n_]
+            e = layout.edges[eid]
+            flu, q_o_, q_w_ = node_stream[n_]
+            length_m, theta = edge_geometry(layout, e, n_, s)
+            d_in = float(dia.get(eid, edge_diameter_in(layout, e, s)))
+            u = u_value(layout, e)
+            edge_res[eid] = EdgeResult(eid, n_, v, length_m, theta, d_in, u,
+                                       oil_sm3_d=q_o_ / SM3_TO_STB, water_sm3_d=q_w_ / SM3_TO_STB,
+                                       gas_msm3_d=q_o_ * flu.gor_scf_stb / SM3SM3_TO_SCFSTB / SM3_TO_STB / 1e6,
+                                       heated=e.item_id in HEATED_ITEMS)
+            seg_counts[eid] = max(4, math.ceil(length_m / s.segment_length_m))
+
+    def temperature_pass():
+        """Downstream march: pipe heat loss plus Joule-Thomson over each station."""
+        arriving: Dict[str, List[Tuple[float, float]]] = defaultdict(list)   # (m·cp, T)
+        for n_ in order:
+            if n_ not in node_stream:
+                continue
+            flu, q_o_, q_w_ = node_stream[n_]
+            m = th.stream_mass(q_o_, q_w_, flu.gor_scf_stb, flu.api, flu.gas_sg)
+            if layout.kind(n_) == "well" and n_ in wells:
+                arriving[n_].append((m.capacity_w_k, wells[n_].wht_c))
+            node_temp[n_] = th.mix_temperature(arriving[n_]) if arriving[n_] else s.seabed_temp_c
+            if n_ not in down:
+                continue
+            eid, v = down[n_]
+            r = edge_res[eid]
+            n_seg = seg_counts[eid]
+            dl_m = r.length_m / n_seg
+            lam = th.decay_length_m(m.total, m.cp, r.u_w_m2k, r.d_in * 0.0254)
+            gas_frac = m.gas_kg_s / m.total if m.total > 0 else 0.0
+            t = node_temp[n_]
+            temps = []
+            ps = station_p.get(eid)
+            for i in range(n_seg):
+                t_mid = th.temperature_at(dl_m / 2.0, t, s.seabed_temp_c, lam)   # exponential midpoint
+                t_next = th.temperature_at(dl_m, t, s.seabed_temp_c, lam)
+                if s.include_jt and ps:
+                    p_in = ps[i - 1] if i > 0 else ps[0]
+                    dp_bar = (ps[i] - p_in) / BARA_TO_PSIA if i > 0 else 0.0
+                    mu = th.jt_coefficient_mixture_k_per_bar(max(ps[i], 1.0), th.c_to_f(t), flu.gas_sg,
+                                                             gas_frac, mp.z_factor)
+                    t_mid += mu * dp_bar / 2.0
+                    t_next += mu * dp_bar
+                temps.append(t_mid)
+                t = t_next
+            edge_t[eid] = temps
+            r.t_in_c, r.t_out_c = node_temp[n_], t
+            arriving[v].append((m.capacity_w_k, t))
+
+    def pressure_pass():
+        """Upstream march from the host arrival pressure."""
+        node_p.clear()
+        for h in hosts:
+            node_p[h] = s.arrival_bara * BARA_TO_PSIA
+        for n_ in reversed(order):
+            if n_ not in down or n_ not in node_stream:
+                continue
+            eid, v = down[n_]
+            r = edge_res[eid]
+            edge_obj = layout.edges[eid]
+            flu, q_o_, q_w_ = node_stream[n_]
+            rel_rough = rough_default / r.d_in
+            n_seg = seg_counts[eid]
+            dl_m = r.length_m / n_seg
+            p = node_p[v]
+            patterns = defaultdict(float)
+            prof, ps = [], [0.0] * n_seg
+            min_margin, max_v, max_ero, max_h = math.inf, 0.0, 0.0, 0.0
+            liquid_m3, min_vsg = 0.0, math.inf
+            temps = edge_t.get(eid) or [r.t_in_c] * n_seg
+            area_m2 = math.pi * (r.d_in * 0.0254) ** 2 / 4.0
+            elevs = station_elevations(layout, edge_obj, n_, r.length_m, n_seg, s)
+            thetas = station_inclinations(elevs, dl_m)
+            r.elevations = elevs
+            r.uses_seabed_profile = bool(edge_obj.attrs.get("seabed_profile")) and s.use_seabed_profile \
+                and layout.catalog.get(edge_obj.item_id).category != "riser"
+            for i in range(n_seg - 1, -1, -1):
+                t_c = temps[i]
+                g = mp.segment_gradient(flu, q_o_, q_w_, p, th.c_to_f(t_c), r.d_in, thetas[i], rel_rough)
+                p_new = max(p + g["dpdl"] * dl_m * M_TO_FT, 1.0)
+                ps[i] = (p + p_new) / 2.0
+                patterns[g["pattern"]] += dl_m
+                ero = g["v_m"] / mp.erosional_velocity_ft_s(g["rho_ns"], s.erosional_c)
+                margin = th.hydrate_margin_c(t_c, ps[i], flu.gas_sg, s.inhibitor, s.inhibitor_wt_pct)
+                min_margin, max_v = min(min_margin, margin), max(max_v, g["v_m"] / M_TO_FT)
+                max_ero, max_h = max(max_ero, ero), max(max_h, g["holdup"])
+                liquid_m3 += g["holdup"] * area_m2 * dl_m
+                min_vsg = min(min_vsg, g["v_sg"] / M_TO_FT)
+                prof.append(dict(x_m=(i + 0.5) * dl_m, p_bara=ps[i] / BARA_TO_PSIA, t_c=t_c,
+                                 holdup=g["holdup"], pattern=g["pattern"], v_m_m_s=g["v_m"] / M_TO_FT,
+                                 hydrate_margin_c=margin, elev_m=(elevs[i] + elevs[i + 1]) / 2,
+                                 incl_deg=thetas[i]))
+                p = p_new
+            node_p[n_] = p
+            station_p[eid] = ps
+            r.p_in_bara, r.p_out_bara = p / BARA_TO_PSIA, node_p[v] / BARA_TO_PSIA
+            r.dominant_pattern = max(patterns, key=patterns.get) if patterns else ""
+            r.max_holdup, r.max_velocity_m_s, r.erosional_ratio = max_h, max_v, max_ero
+            r.min_hydrate_margin_c = min_margin
+            r.liquid_inventory_m3 = liquid_m3
+            r.min_gas_velocity_m_s = 0.0 if min_vsg is math.inf else min_vsg
+            cat_ = layout.catalog.get(e_item(layout, eid)).category
+            r.slug_risk = (cat_ == "riser" and r.dominant_pattern in ("intermittent", "segregated", "transition")
+                           and r.min_gas_velocity_m_s < s.severe_slug_vsg_m_s)
+            r.profile = sorted(prof, key=lambda d: d["x_m"])
+
+    blend_streams()
+    geometry()
+    for _ in range(max(1, int(s.pt_iterations) if s.include_jt else 1)):
+        temperature_pass()
+        pressure_pass()
+
+    # free-span screening from the stored seabed profiles
+    for eid, r in edge_res.items():
         e = layout.edges[eid]
-        rel_rough = rough_default / r.d_in
-        n_seg = max(4, math.ceil(r.length_m / s.segment_length_m))
-        dl_m = r.length_m / n_seg
-        p = node_p[v]
-        patterns = defaultdict(float)
-        prof = []
-        min_margin, max_v, max_ero, max_h = math.inf, 0.0, 0.0, 0.0
-        for i in range(n_seg, 0, -1):                       # station i at distance i·dl from edge inlet
-            x_mid = (i - 0.5) * dl_m
-            t_c = th.temperature_at(x_mid, r.t_in_c, s.seabed_temp_c, r._lam)
-            g = mp.segment_gradient(flu, q_o, q_w, p, th.c_to_f(t_c), r.d_in, r.theta_deg, rel_rough)
-            p_new = max(p + g["dpdl"] * dl_m * M_TO_FT, 1.0)
-            patterns[g["pattern"]] += dl_m
-            rho_mix = g["rho_ns"]
-            v_m = g["v_m"]
-            ero = v_m / mp.erosional_velocity_ft_s(rho_mix, s.erosional_c)
-            margin = th.hydrate_margin_c(t_c, (p + p_new) / 2, flu.gas_sg, s.inhibitor, s.inhibitor_wt_pct)
-            min_margin, max_v = min(min_margin, margin), max(max_v, v_m / M_TO_FT)
-            max_ero, max_h = max(max_ero, ero), max(max_h, g["holdup"])
-            prof.append(dict(x_m=(i - 0.5) * dl_m, p_bara=(p + p_new) / 2 / BARA_TO_PSIA, t_c=t_c,
-                             holdup=g["holdup"], pattern=g["pattern"], v_m_m_s=v_m / M_TO_FT,
-                             hydrate_margin_c=margin))
-            p = p_new
-        node_p[n] = p
-        r.p_in_bara, r.p_out_bara = p / BARA_TO_PSIA, node_p[v] / BARA_TO_PSIA
-        r.dominant_pattern = max(patterns, key=patterns.get) if patterns else ""
-        r.max_holdup, r.max_velocity_m_s, r.erosional_ratio = max_h, max_v, max_ero
-        r.min_hydrate_margin_c = min_margin
-        r.profile = sorted(prof, key=lambda d: d["x_m"])
-        # cool-down from the colder end, at the higher (settle-out-conservative) pressure
+        prof = e.attrs.get("seabed_profile")
+        if prof and len(prof) >= 3 and s.use_seabed_profile:
+            dx = r.length_m / (len(prof) - 1)
+            r.free_spans = tb_bath.free_spans([float(d) for d in prof], dx, s.free_span_gap_m,
+                                              s.max_free_span_m)
+
+    # cool-down, once the converged profiles are known
+    for eid, r in edge_res.items():
+        flu, q_o_, q_w_ = node_stream[r.upstream]
         p_shut = max(r.p_in_bara, r.p_out_bara) * BARA_TO_PSIA
         t_h_c = th.f_to_c(th.hydrate_temperature_f(p_shut, flu.gas_sg)
                           - th.hammerschmidt_depression_f(s.inhibitor, s.inhibitor_wt_pct))
-        rho_l = mp.local_properties(flu, q_o, q_w, p_shut, th.c_to_f(r.t_out_c))["rho_l"] * 16.018
+        rho_l = mp.local_properties(flu, q_o_, q_w_, p_shut, th.c_to_f(r.t_out_c))["rho_l"] * 16.018
         r.cooldown_h = th.cooldown_hours(min(r.t_in_c, r.t_out_c), t_h_c, s.seabed_temp_c, r.u_w_m2k,
                                          r.d_in * 0.0254, WALL_FRACTION * r.d_in * 0.0254, rho_l,
                                          th.CP_WATER * flu.water_cut + th.CP_OIL * (1 - flu.water_cut))
-        del r._lam
 
     # ── checks ──
     well_rows = []
@@ -376,6 +498,14 @@ def solve(layout, settings: Optional[FASettings] = None, wells: Optional[Dict[st
                 layout.edges[eid].item_id).category in ("flowline", "riser"):
             findings.append(("warning", eid, f"Cool-down to hydrate temperature in {r.cooldown_h:.1f} h "
                                              f"(< {s.no_touch_hours:.0f} h no-touch)."))
+        if r.slug_risk:
+            findings.append(("warning", eid, f"Severe slugging risk: riser gas velocity down to "
+                                             f"{r.min_gas_velocity_m_s:.1f} m/s in {r.dominant_pattern} flow."))
+        if r.free_spans:
+            longest = max(r.free_spans, key=lambda x: x["length_m"])
+            findings.append(("warning", eid, f"{len(r.free_spans)} potential free span(s) on the seabed "
+                                             f"profile; longest {longest['length_m']:,.0f} m with "
+                                             f"{longest['max_gap_m']:.1f} m clearance — survey and span check."))
         if r.erosional_ratio > 1.0:
             findings.append(("warning", eid, f"Mixture velocity {r.erosional_ratio:.2f}× API RP 14E erosional limit."))
     host = {}
@@ -397,6 +527,192 @@ def solve(layout, settings: Optional[FASettings] = None, wells: Optional[Dict[st
                                          f"{s.host_gas_capacity_msm3_d:.2f} MSm³/d."))
     return FAResult(edge_res, {k: v / BARA_TO_PSIA for k, v in node_p.items()}, node_temp, well_rows,
                     host, findings)
+
+
+def path_section(layout, result: FAResult, well: str, settings: Optional[FASettings] = None) -> List[dict]:
+    """Longitudinal section from a wellhead to the host: seabed and as-laid line
+    elevation with the local pressure, temperature and hydrate curve.
+
+    Elevation is metres relative to sea level (negative below). Flowlines and
+    jumpers follow the seabed; a riser leaves the seabed at its base and climbs
+    to the host, so the seabed stays at the riser-base depth beneath it.
+    """
+    s = settings or FASettings()
+    path = layout.path_to_host(well) if well in layout.nodes else None
+    if path is None:
+        return []
+    nodes, edges = path
+    rows: List[dict] = []
+    x0 = 0.0
+    for i, eid in enumerate(edges):
+        r = result.edges.get(eid)
+        if r is None:
+            continue
+        cat = layout.catalog.get(layout.edges[eid].item_id).category
+        z_up = -_depth(layout, nodes[i], s)
+        z_dn = -_depth(layout, nodes[i + 1], s)
+        for pt in r.profile:
+            f = min(max(pt["x_m"] / max(r.length_m, 1e-9), 0.0), 1.0)
+            z_pipe = pt.get("elev_m", z_up + (z_dn - z_up) * f)
+            z_bed = min(z_up, z_dn) if cat == "riser" else z_pipe
+            rows.append(dict(distance_m=x0 + pt["x_m"], line=eid, kind=cat,
+                             pipe_elev_m=z_pipe, seabed_elev_m=z_bed,
+                             p_bara=pt["p_bara"], t_c=pt["t_c"],
+                             hydrate_t_c=pt["t_c"] - pt["hydrate_margin_c"],
+                             hydrate_margin_c=pt["hydrate_margin_c"], pattern=pt["pattern"],
+                             velocity_m_s=pt["v_m_m_s"], holdup=pt["holdup"]))
+        x0 += r.length_m
+    if rows:      # close the section at the host so the riser reaches sea level
+        last_e = result.edges.get(edges[-1])
+        rows.append(dict(rows[-1], distance_m=x0, pipe_elev_m=-_depth(layout, nodes[-1], s),
+                         seabed_elev_m=rows[-1]["seabed_elev_m"],
+                         p_bara=last_e.p_out_bara if last_e else rows[-1]["p_bara"],
+                         t_c=last_e.t_out_c if last_e else rows[-1]["t_c"]))
+    return rows
+
+
+def section_nodes(layout, result: FAResult, well: str, settings: Optional[FASettings] = None) -> List[dict]:
+    """Node markers (name, distance along the section, elevation) for the same path."""
+    s = settings or FASettings()
+    path = layout.path_to_host(well) if well in layout.nodes else None
+    if path is None:
+        return []
+    nodes, edges = path
+    out, x = [], 0.0
+    for i, nid in enumerate(nodes):
+        out.append(dict(node=nid, label=layout.nodes[nid].label or nid, kind=layout.kind(nid),
+                        distance_m=x, elev_m=-_depth(layout, nid, s),
+                        p_bara=result.node_pressure_bara.get(nid),
+                        t_c=result.node_temp_c.get(nid)))
+        if i < len(edges):
+            r = result.edges.get(edges[i])
+            x += r.length_m if r else 0.0
+    return out
+
+
+def pipe_cross_section(item, d_in: float) -> List[dict]:
+    """Concentric build-up (mm diameters) for a pipe cross-section drawing."""
+    bore = max(float(d_in), 0.0) * 25.4
+    layers = [dict(name="Bore (fluid)", outer_mm=bore, color="#7FB2D6", note=f'{d_in:g}" ID')]
+    od = bore
+    if item.wall_thickness_in > 0:
+        od = bore + 2 * item.wall_thickness_in * 25.4
+        layers.append(dict(name="Steel wall", outer_mm=od, color="#54616C",
+                           note=f'{item.wall_thickness_in:g}" WT'))
+    else:
+        od = bore + 2 * 20.0      # flexible: armour/pressure sheath layers
+        layers.append(dict(name="Flexible armour layers", outer_mm=od, color="#54616C", note="≈20 mm"))
+    if item.insulation_mm > 0:
+        od += 2 * item.insulation_mm
+        layers.append(dict(name="Insulation", outer_mm=od, color="#E9C46A", note=f"{item.insulation_mm:g} mm"))
+    if item.coating_mm > 0:
+        od += 2 * item.coating_mm
+        label = "Concrete weight coating" if item.coating_mm >= 30 else "External coating"
+        layers.append(dict(name=label, outer_mm=od, color="#B8B8B8", note=f"{item.coating_mm:g} mm"))
+    if item.item_id == "fl_pip":
+        od += 2 * 12.0
+        layers.append(dict(name="Outer carrier pipe", outer_mm=od, color="#3C4750", note="12 mm"))
+    if item.item_id == "fl_deh":
+        layers.append(dict(name="DEH piggyback cable", outer_mm=od, color="#C4561B", note="riser/piggyback"))
+    return layers
+
+
+def scale_rates(wells: Dict[str, WellFA], fraction: float) -> Dict[str, WellFA]:
+    out = {}
+    for k, w in wells.items():
+        w2 = WellFA(**{f: getattr(w, f) for f in WellFA.__dataclass_fields__})
+        w2.oil_sm3_d = w.oil_sm3_d * fraction
+        out[k] = w2
+    return out
+
+
+def rate_sensitivity(layout, settings: Optional[FASettings] = None, wells: Optional[Dict[str, WellFA]] = None,
+                     fractions=(1.0, 0.7, 0.5, 0.3)) -> List[dict]:
+    """Turndown check: the same layout at reduced rates.
+
+    Reports how arrival conditions, hydrate margin and liquid inventory move with rate.
+    `surge_vs_design_m3` is the inventory difference against the design case — positive
+    means extra liquid sitting in the line that the host must absorb on ramp-up. Which
+    way it goes depends on the fluid: holdup rises as velocity falls, but lower line
+    pressure liberates gas and shrinks the liquid volume. This is a screening indicator,
+    not a transient simulation.
+    """
+    s = settings or FASettings()
+    wells = wells if wells is not None else well_inputs(layout)
+    base_inventory = None
+    rows = []
+    for f in fractions:
+        res = solve(layout, s, scale_rates(wells, f))
+        inv = sum(r.liquid_inventory_m3 for r in res.edges.values())
+        if base_inventory is None:
+            base_inventory = inv
+        host = next(iter(res.host.values())) if res.host else {}
+        rows.append(dict(
+            fraction=f,
+            oil_sm3_d=sum(w.oil_sm3_d for w in scale_rates(wells, f).values()),
+            arrival_t_c=host.get("arrival_t_c", math.nan),
+            max_required_whp_bara=max((w["required_whp_bara"] for w in res.wells), default=math.nan),
+            min_hydrate_margin_c=min((r.min_hydrate_margin_c for r in res.edges.values() if not r.heated),
+                                     default=math.nan),
+            min_cooldown_h=min((r.cooldown_h for r in res.edges.values() if not r.heated), default=math.nan),
+            liquid_inventory_m3=inv,
+            surge_vs_design_m3=inv - base_inventory,
+            slug_risk=any(r.slug_risk for r in res.edges.values()),
+            max_velocity_m_s=max((r.max_velocity_m_s for r in res.edges.values()), default=math.nan)))
+    return rows
+
+
+def solve_coupled(layout, settings: Optional[FASettings] = None, wells: Optional[Dict[str, WellFA]] = None,
+                  iprs: Optional[Dict[str, "tb_well.IPR"]] = None,
+                  tubings: Optional[Dict[str, "tb_well.Tubing"]] = None,
+                  iterations: int = 10, damping: float = 0.6, tol_frac: float = 0.01):
+    """Nodal solution: rates come from each well's IPR/VLP against the network back-pressure.
+
+    The network is linearised around the current rates (one extra solve at +10 %)
+    so every well can find its own operating point cheaply; rates are then damped
+    and the network re-solved until they stop moving.
+    """
+    import tb_well
+    s = settings or FASettings()
+    wells = dict(wells if wells is not None else well_inputs(layout))
+    iprs = iprs or {}
+    tubings = tubings or {}
+    active = [w for w in wells if w in iprs]
+    if not active:
+        return solve(layout, s, wells), {w: v.oil_sm3_d for w, v in wells.items()}, dict(
+            converged=True, iterations=0, note="No IPR defined — rates taken as entered.")
+    history = []
+    res = solve(layout, s, wells)
+    for it in range(iterations):
+        base = {w["well"]: w["required_whp_bara"] for w in res.wells}
+        bumped = solve(layout, s, scale_rates(wells, 1.1))
+        bump = {w["well"]: w["required_whp_bara"] for w in bumped.wells}
+        moved = 0.0
+        for w in active:
+            q0 = wells[w].oil_sm3_d
+            if q0 <= 0 or w not in base:
+                continue
+            slope = (bump.get(w, base[w]) - base[w]) / max(0.1 * q0, 1e-9)      # bara per Sm³/d
+            whp0, q0_stb = base[w], q0 * SM3_TO_STB
+
+            def required(q_stb, _s=slope, _w=whp0, _q0=q0_stb):
+                return (_w + _s * (q_stb - _q0) / SM3_TO_STB) * BARA_TO_PSIA
+
+            op = tb_well.operating_point(wells[w].fluid(), iprs[w], tubings.get(w, tb_well.Tubing()),
+                                         required, water_cut=wells[w].water_cut)
+            q_new_sm3 = op["rate_stb_d"] / SM3_TO_STB
+            q_damped = q0 + damping * (q_new_sm3 - q0)
+            moved = max(moved, abs(q_damped - q0) / max(q0, 1e-9))
+            wells[w].oil_sm3_d = max(q_damped, 0.0)
+        res = solve(layout, s, wells)
+        history.append({w: wells[w].oil_sm3_d for w in active})
+        if moved < tol_frac:
+            return res, {w: v.oil_sm3_d for w, v in wells.items()}, dict(
+                converged=True, iterations=it + 1, note="", history=history)
+    return res, {w: v.oil_sm3_d for w, v in wells.items()}, dict(
+        converged=False, iterations=iterations,
+        note=f"Rates still moving by more than {tol_frac:.0%} — check the IPR and tubing inputs.",
+        history=history)
 
 
 def diameter_sweep(layout, edge_id: str, diameters_in, settings: Optional[FASettings] = None) -> List[dict]:

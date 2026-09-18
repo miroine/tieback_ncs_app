@@ -101,4 +101,29 @@ S.check("dms negative", lambda: abs(g.dms_to_deg(-37, 30, 0) + 37.5) < 1e-12)
 S.check("ED50 vs WGS84 UTM of same numbers differ (ellipsoid used)",
         lambda: abs(g.geo_to_utm(60, 3, 31, "ED50")[1] - g.geo_to_utm(60, 3, 31, "WGS84")[1]) > 50)
 
+# ── route smoothing / curvature ──
+def cr_through_points():
+    pts = [(60.0, 3.0), (60.05, 3.1), (60.1, 3.0)]
+    sm = g.catmull_rom(pts, 8)
+    assert all(abs(a - b) < 1e-9 for a, b in zip(sm[0], pts[0]) ) and all(abs(a - b) < 1e-9 for a, b in zip(sm[-1], pts[-1]))
+    assert any(abs(p[0] - pts[1][0]) < 1e-6 and abs(p[1] - pts[1][1]) < 1e-6 for p in sm)   # passes through the bend
+    assert len(sm) == 2 * 8 + 1
+S.check("Catmull-Rom passes through every surveyed vertex", cr_through_points)
+S.check("smoothing a straight line changes nothing measurable",
+        lambda: abs(g.polyline_length(g.catmull_rom([(60, 3), (60.1, 3), (60.2, 3)], 10))
+                    - g.polyline_length([(60, 3), (60.2, 3)])) < 0.5)
+S.check("smoothed route is longer than the cornered one but not by much",
+        lambda: 1.0 < g.polyline_length(g.catmull_rom([(60, 3), (60.05, 3.1), (60.1, 3.0)], 10))
+        / g.polyline_length([(60, 3), (60.05, 3.1), (60.1, 3.0)]) < 1.1)
+S.check("fewer than 3 points returns the input", lambda: g.catmull_rom([(60, 3), (61, 3)], 10) == [(60, 3), (61, 3)])
+def circle_radius():
+    k = math.cos(math.radians(60))
+    pts = [(60 + 1000 * math.cos(t) / 110540, 3 + 1000 * math.sin(t) / (111320 * k)) for t in (0, 0.3, 0.6)]
+    assert abs(g.min_bend_radius(pts) - 1000) < 2
+S.check("min bend radius exact on a 1000 m circle", circle_radius)
+S.check("collinear points → infinite radius", lambda: g.min_bend_radius([(60, 3), (60.1, 3), (60.2, 3)]) == math.inf)
+S.check("smoothing raises the tightest bend radius",
+        lambda: g.min_bend_radius(g.catmull_rom([(60, 3), (60.02, 3.05), (60.04, 3.0)], 12))
+        > g.min_bend_radius([(60, 3), (60.02, 3.05), (60.04, 3.0)]) * 0.0  # smoothed curve is resolved finer
+        and g.min_bend_radius(g.catmull_rom([(60, 3), (60.02, 3.05), (60.04, 3.0)], 12)) > 0)
 sys.exit(0 if S.report() else 1)

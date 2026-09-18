@@ -74,4 +74,36 @@ def spread_fn():
     p = np.zeros(6); k._spread(p, 0.5, 2.5, 100.0)
     assert np.allclose(p, [25, 50, 25, 0, 0, 0])
 S.check("fractional-month spreading exact", spread_fn)
+def templates_cost_and_schedule():
+    import pathlib, tb_schedule as sch
+    for f in sorted(pathlib.Path("templates").glob("*.yaml")):
+        lay = n.Layout.from_dict(yaml.safe_load(f.read_text()), c.Catalog())
+        est = k.estimate(lay)
+        s_, em = sch.build_from_layout(lay)
+        ph = k.phase_costs(est, s_, em)
+        assert est["total_usd"] > 0 and abs(ph["total_usd"] - est["total_usd"]) < 1e-3, f.name
+S.check("every template costs and schedules end to end", templates_cost_and_schedule)
+def cost_library_template():
+    txt = open("library/cost_library_template.yaml").read()
+    lib = c.Catalog.from_yaml(txt)
+    assert lib.to_dict() == c.Catalog().to_dict() and "Replace the numbers below" in txt
+S.check("shipped cost library template reloads into an identical catalog", cost_library_template)
+def piggyback_cost():
+    lay = demo(); lay.add_edge(n.Edge("CHEM1", "chem_line", "PLET_T", "PLET_H"))
+    alone = k.estimate(lay)
+    lay.edges["CHEM1"].attrs["piggyback_on"] = "FL1"
+    strapped = k.estimate(lay)
+    a = [l for l in alone["lines"] if l["element_id"] == "CHEM1"][0]
+    b = [l for l in strapped["lines"] if l["element_id"] == "CHEM1"][0]
+    assert b["piggyback"] and not a["piggyback"]
+    assert abs(b["offshore_days"] / a["offshore_days"] * (a["length_m"] / b["length_m"])
+               - k.CostSettings().piggyback_install_frac) < 1e-9
+    assert strapped["by_category"]["Installation"] < alone["by_category"]["Installation"]
+S.check("strapped line pays a share of lay time and no separate campaign", piggyback_cost)
+def piggyback_no_extra_mob():
+    lay = demo()
+    lay.add_edge(n.Edge("FIB1", "fibre_cable", "PLET_T", "PLET_H", phase=2, attrs={"piggyback_on": "FL1"}))
+    est = k.estimate(lay)
+    assert 2 not in est["mob_by_phase"]      # rides the carrier's campaign, no phase-2 mobilisation
+S.check("strapped line does not mobilise its own spread", piggyback_no_extra_mob)
 sys.exit(0 if S.report() else 1)

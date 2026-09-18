@@ -62,6 +62,8 @@ class LayoutSettings:
     datum: str = "WGS84"
     route_allowance_frac: float = 0.03
     end_allowance_m: float = 50.0
+    min_bend_radius_m: float = 400.0     # lay/installation minimum for rigid line routing
+    smooth_samples: int = 10             # points per span when a route is smoothed
 
 
 class Layout:
@@ -110,6 +112,26 @@ class Layout:
         a, b = self.nodes[e.from_node], self.nodes[e.to_node]
         return [(a.lat, a.lon), *[tuple(p) for p in e.route], (b.lat, b.lon)]
 
+    def carrier_of(self, e: Edge) -> Optional[Edge]:
+        """The line this one is strapped to, if any (attrs["piggyback_on"])."""
+        cid = e.attrs.get("piggyback_on")
+        c = self.edges.get(cid) if cid else None
+        return c if c is not None and c.edge_id != e.edge_id else None
+
+    def edge_shape(self, e: Edge) -> List[Tuple[float, float]]:
+        """As-laid geometry: the surveyed vertices, or a smooth curve through them
+        when the line is flagged `smooth` (attrs["smooth"] = True)."""
+        carrier = self.carrier_of(e)
+        if carrier is not None and not e.route:
+            cv = self.edge_shape(carrier)          # strapped lines follow the carrier's corridor
+            if (e.from_node, e.to_node) == (carrier.to_node, carrier.from_node):
+                cv = cv[::-1]
+            return cv
+        v = self.edge_vertices(e)
+        if e.attrs.get("smooth") and len(v) >= 3:
+            return tb_geo.catmull_rom(v, max(int(self.settings.smooth_samples), 1))
+        return v
+
     def edge_length(self, e: Edge) -> float:
         if e.length_m is not None:
             return float(e.length_m)
@@ -117,7 +139,7 @@ class Layout:
         if not it.is_linear:
             return 0.0
         s = self.settings
-        return tb_geo.route_length(self.edge_vertices(e), s.route_allowance_frac,
+        return tb_geo.route_length(self.edge_shape(e), s.route_allowance_frac,
                                    s.end_allowance_m, s.datum)
 
     # ── graph helpers ──
@@ -197,6 +219,38 @@ class Layout:
                                  e.edge_id))
             if it.is_linear and self.edge_length(e) < 1.0:
                 F.append(Finding("warning", "ZERO_LENGTH", "Linear element has ~zero length.", e.edge_id))
+            if it.category in ("flowline", "utility_line") and len(self.edge_vertices(e)) >= 3:
+                # measured on the curve the line would follow if laid through these points —
+                # the circumradius of raw vertices exaggerates a sharp corner between long legs
+                r = tb_geo.min_bend_radius(tb_geo.catmull_rom(self.edge_vertices(e),
+                                                              max(int(self.settings.smooth_samples), 1)))
+                if r < self.settings.min_bend_radius_m:
+                    F.append(Finding("warning", "BEND_RADIUS",
+                                     f"Route bend radius {r:,.0f} m is below the {self.settings.min_bend_radius_m:,.0f} m "
+                                     f"minimum — smooth the route or move the bend.", e.edge_id))
+
+        for e in self.edges.values():
+            cid = e.attrs.get("piggyback_on")
+            if not cid:
+                continue
+            c = self.edges.get(cid)
+            if c is None:
+                F.append(Finding("error", "PIGGYBACK_MISSING", f"Strapped to '{cid}', which does not exist.",
+                                 e.edge_id))
+            elif cid == e.edge_id:
+                F.append(Finding("error", "PIGGYBACK_SELF", "Line is strapped to itself.", e.edge_id))
+            elif c.attrs.get("piggyback_on"):
+                F.append(Finding("error", "PIGGYBACK_CHAIN",
+                                 f"'{cid}' is itself strapped to another line — strap to the carrier instead.",
+                                 e.edge_id))
+            elif cat.get(c.item_id).category not in ("flowline", "riser"):
+                F.append(Finding("warning", "PIGGYBACK_CARRIER",
+                                 f"Carrier '{cid}' is a {cat.get(c.item_id).category}; piggybacking is "
+                                 f"normally on a flowline or riser.", e.edge_id))
+            elif {e.from_node, e.to_node} != {c.from_node, c.to_node}:
+                F.append(Finding("warning", "PIGGYBACK_ENDS",
+                                 f"Runs between different points than carrier '{cid}' — check the routing.",
+                                 e.edge_id))
 
         for nid, d in degree.items():
             if d == 0:
@@ -213,6 +267,16 @@ class Layout:
                 if n_wells > it.slots:
                     F.append(Finding("error", "SLOTS_EXCEEDED",
                                      f"{n_wells} wells on {it.slots}-slot {it.category}.", nid))
+
+        # installation lift capacity
+        for nid in self.nodes:
+            it = cat.get(self.nodes[nid].item_id)
+            sp = cat.spreads.get(it.install_spread)
+            if sp and sp.lift_capacity_te > 0 and it.weight_te > sp.lift_capacity_te:
+                F.append(Finding("warning", "LIFT_CAPACITY",
+                                 f"{it.name} weighs {it.weight_te:,.0f} te — above the {sp.name} "
+                                 f"limit of {sp.lift_capacity_te:,.0f} te. Choose a larger spread or "
+                                 f"split the structure.", nid))
 
         # production connectivity + pressure rating along path
         rating_demand: Dict[str, float] = {}
@@ -272,14 +336,15 @@ class Layout:
             it = self.catalog.get(n.item_id)
             rows.append(dict(element_id=n.node_id, label=n.label or n.node_id, item_id=it.item_id,
                              item=it.name, category=it.category, basis="unit", quantity=1.0,
-                             length_m=0.0, diameter_in=0.0, phase=n.phase))
+                             length_m=0.0, diameter_in=0.0, phase=n.phase, piggyback_on=None))
         for e in self.edges.values():
             it = self.catalog.get(e.item_id)
             L = self.edge_length(e)
             rows.append(dict(element_id=e.edge_id, label=e.label or e.edge_id, item_id=it.item_id,
                              item=it.name, category=it.category,
                              basis=it.cost_basis, quantity=(L if it.is_linear else 1.0),
-                             length_m=L, diameter_in=e.diameter_in, phase=e.phase))
+                             length_m=L, diameter_in=e.diameter_in, phase=e.phase,
+                             piggyback_on=e.attrs.get("piggyback_on")))
         return rows
 
     # ── persistence ──

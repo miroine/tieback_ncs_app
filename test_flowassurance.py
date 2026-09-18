@@ -30,7 +30,7 @@ def independent_march():
     cat = c.Catalog(); lay = n.Layout(cat)
     lay.add_node(n.Node("H", "host_tiein", 60.6, 2.5)); lay.add_node(n.Node("W", "xt_vxt_10k", 60.55, 2.5, water_depth_m=100))
     lay.add_edge(n.Edge("F", "fl_rigid_cs", "W", "H", diameter_in=8, length_m=5000))
-    s = fa.FASettings(arrival_bara=40, seabed_temp_c=5, segment_length_m=500)
+    s = fa.FASettings(arrival_bara=40, seabed_temp_c=5, segment_length_m=500, include_jt=False)
     w = fa.WellFA(oil_sm3_d=800, water_cut=0.2, gor_sm3_sm3=150, wht_c=60, max_whp_bara=200)
     res = fa.solve(lay, s, {"W": w})
     L, theta = 5000.0, math.degrees(math.asin(100 / 5000))
@@ -67,8 +67,11 @@ def insulation():
 S.check("pipe-in-pipe arrives much warmer than bare CS", insulation)
 def u_override():
     lay = demo(); lay.edges["FL1"].attrs["u_w_m2k"] = 0.0
-    assert abs(fa.solve(lay).edges["FL1"].t_out_c - R.edges["FL1"].t_in_c) < 1e-9
-S.check("per-edge U override (U=0 → isothermal)", u_override)
+    no_jt = fa.solve(lay, fa.FASettings(include_jt=False))
+    assert abs(no_jt.edges["FL1"].t_out_c - no_jt.edges["FL1"].t_in_c) < 1e-9        # no heat loss
+    with_jt = fa.solve(lay, fa.FASettings(include_jt=True))
+    assert with_jt.edges["FL1"].t_out_c < with_jt.edges["FL1"].t_in_c                 # still cools by expansion
+S.check("per-edge U override: U=0 is isothermal without JT, and cools by expansion with it", u_override)
 def inhibitor():
     r2 = fa.solve(demo(), fa.FASettings(inhibitor="MEG", inhibitor_wt_pct=30))
     assert abs((r2.edges["FL1"].min_hydrate_margin_c - R.edges["FL1"].min_hydrate_margin_c)
@@ -109,6 +112,128 @@ def persist():
     _, lay2, _, _, fas = pj.project_from_yaml_full(txt)
     assert fa.well_inputs(lay2)["W1"].oil_sm3_d == 1234 and lay2.edges["FL1"].attrs["u_w_m2k"] == 2.5 and fas.arrival_bara == 25
 S.check("well inputs, U overrides and FA settings persist in project file", persist)
+def section():
+    sec = fa.path_section(demo(), R, "W1")
+    assert sec[0]["pipe_elev_m"] == -150.0 and sec[0]["kind"] == "jumper"
+    assert sec[-1]["kind"] == "riser" and sec[-1]["pipe_elev_m"] > sec[-1]["seabed_elev_m"]
+    assert all(a["distance_m"] <= b["distance_m"] for a, b in zip(sec, sec[1:]))
+    assert all(r["seabed_elev_m"] <= r["pipe_elev_m"] + 1e-9 for r in sec)
+    flow = [r for r in sec if r["kind"] == "flowline"]
+    assert all(abs(r["seabed_elev_m"] - r["pipe_elev_m"]) < 1e-9 for r in flow)   # lies on the seabed
+S.check("route section: distances increase, flowline on seabed, riser climbs above it", section)
+def section_marks():
+    ms = fa.section_nodes(demo(), R, "W1")
+    assert [m["node"] for m in ms] == ["W1", "TMPL_A", "PLET_T", "PLET_H", "RB1", "HOST_A"]
+    assert ms[0]["distance_m"] == 0 and ms[-1]["elev_m"] == 0 and ms[-1]["p_bara"] == 30.0
+S.check("section node markers follow the production path to the host", section_marks)
+S.check("section of a well with no path is empty",
+        lambda: fa.path_section(n.Layout(c.Catalog()), R, "W1") == [])
+def xsec():
+    cat = c.Catalog()
+    pip = fa.pipe_cross_section(cat.get("fl_pip"), 10)
+    names = [l["name"] for l in pip]
+    assert names[0] == "Bore (fluid)" and "Insulation" in names and names[-1] == "Outer carrier pipe"
+    assert pip[0]["outer_mm"] == 254.0 and abs(pip[1]["outer_mm"] - (254 + 2 * 0.63 * 25.4)) < 1e-9
+    assert all(a["outer_mm"] <= b["outer_mm"] for a, b in zip(pip, pip[1:]))
+    flex = fa.pipe_cross_section(cat.get("fl_flex"), 8)
+    assert "Flexible armour layers" in [l["name"] for l in flex]
+    assert "DEH piggyback cable" in [l["name"] for l in fa.pipe_cross_section(cat.get("fl_deh"), 10)]
+S.check("pipe cross-section build-up: bore, wall/armour, insulation, coating, carrier", xsec)
+def smooth_length():
+    lay = demo(); lay.edges["FL1"].attrs["smooth"] = True
+    r2 = fa.solve(lay)
+    assert r2.edges["FL1"].length_m > R.edges["FL1"].length_m
+    assert r2.wells[0]["required_whp_bara"] > R.wells[0]["required_whp_bara"]   # longer line, more ΔP
+S.check("smoothed routing feeds the longer as-laid length into hydraulics", smooth_length)
+def jt_cools():
+    hot = fa.solve(demo(), fa.FASettings(include_jt=False))
+    cold = fa.solve(demo(), fa.FASettings(include_jt=True))
+    assert cold.edges["FL1"].t_out_c < hot.edges["FL1"].t_out_c - 0.5      # cools over a 35 bar drop
+    assert cold.edges["FL1"].min_hydrate_margin_c < hot.edges["FL1"].min_hydrate_margin_c
+S.check("Joule-Thomson cooling lowers arrival temperature and hydrate margin", jt_cools)
+S.check("JT off makes the extra P/T passes irrelevant",
+        lambda: abs(fa.solve(demo(), fa.FASettings(include_jt=False, pt_iterations=1)).edges["FL1"].t_out_c
+                    - fa.solve(demo(), fa.FASettings(include_jt=False, pt_iterations=5)).edges["FL1"].t_out_c) < 1e-12)
+def jt_converges():
+    a = fa.solve(demo(), fa.FASettings(include_jt=True, pt_iterations=3)).edges["FL1"].t_out_c
+    b = fa.solve(demo(), fa.FASettings(include_jt=True, pt_iterations=6)).edges["FL1"].t_out_c
+    assert abs(a - b) < 0.05
+S.check("P/T coupling has converged by three passes", jt_converges)
+def inventory():
+    r = fa.solve(demo())
+    e = r.edges["FL1"]
+    import math as _m
+    vol = _m.pi * (e.d_in * 0.0254) ** 2 / 4 * e.length_m
+    assert 0 < e.liquid_inventory_m3 < vol and abs(e.liquid_inventory_m3 / vol - e.max_holdup) < 0.5
+S.check("liquid inventory is a sensible fraction of the pipe volume", inventory)
+def turndown():
+    rows = fa.rate_sensitivity(demo(), None, None, (1.0, 0.5, 0.3))
+    assert [r["fraction"] for r in rows] == [1.0, 0.5, 0.3]
+    assert rows[0]["surge_vs_design_m3"] == 0.0
+    assert all(a["arrival_t_c"] > b["arrival_t_c"] for a, b in zip(rows, rows[1:]))   # colder at lower rate
+    assert all(a["max_required_whp_bara"] > b["max_required_whp_bara"] for a, b in zip(rows, rows[1:]))
+    assert rows[-1]["min_hydrate_margin_c"] < rows[0]["min_hydrate_margin_c"]
+S.check("turndown: lower rates arrive colder with less back-pressure and thinner hydrate margin", turndown)
+S.check("scale_rates leaves the original inputs untouched",
+        lambda: (lambda ws: (fa.scale_rates(ws, 0.5), ws["W1"].oil_sm3_d == 1000.0)[-1])(fa.well_inputs(demo())))
+def slug_flag():
+    lay = demo()
+    for w_ in ("W1", "W2", "W3", "W4"):
+        fa.set_well_inputs(lay, w_, fa.WellFA(oil_sm3_d=120, gor_sm3_sm3=60))
+    r = fa.solve(lay)
+    assert r.edges["RISER1"].min_gas_velocity_m_s < 3.0 and r.edges["RISER1"].slug_risk
+    assert any("Severe slugging" in f[2] for f in r.findings)
+S.check("low gas velocity in the riser raises a severe slugging flag", slug_flag)
+def coupled():
+    import tb_well as tw
+    lay = demo()
+    iprs = {f"W{i}": tw.IPR("pi", 4500, 4.0) for i in range(1, 5)}
+    tubs = {f"W{i}": tw.Tubing(8500, 8000, 4.892, geothermal_f=175) for i in range(1, 5)}
+    res, rates, info = fa.solve_coupled(lay, None, None, iprs, tubs)
+    assert info["converged"] and all(q > 0 for q in rates.values())
+    # the solved rate must sit on both curves: network requirement == tubing deliverability
+    req = {w["well"]: w["required_whp_bara"] for w in res.wells}
+    for wid in rates:
+        q_stb = rates[wid] * fa.SM3_TO_STB
+        avail = tw.wellhead_pressure(fa.WellFA(oil_sm3_d=rates[wid]).fluid(), q_stb, q_stb * 0.1 / 0.9,
+                                     iprs[wid], tubs[wid])["whp_psia"] / fa.BARA_TO_PSIA
+        assert abs(avail - req[wid]) / req[wid] < 0.10
+S.check("coupled nodal solve lands on both the well and network curves", coupled)
+def coupled_weaker_reservoir():
+    import tb_well as tw
+    strong = fa.solve_coupled(demo(), None, None, {"W1": tw.IPR("pi", 5000, 4.0)}, {})[1]["W1"]
+    weak = fa.solve_coupled(demo(), None, None, {"W1": tw.IPR("pi", 3000, 4.0)}, {})[1]["W1"]
+    assert weak < strong
+S.check("lower reservoir pressure gives a lower solved rate", coupled_weaker_reservoir)
+S.check("no IPR given → rates unchanged",
+        lambda: fa.solve_coupled(demo())[2]["note"].startswith("No IPR"))
+def seabed_profile_routing():
+    import math as _m
+    lay = demo()
+    flat = fa.solve(lay).edges["FL1"]
+    prof = [150 - 18 * _m.sin(_m.pi * i / 39) + (6 if 20 < i < 26 else 0) for i in range(40)]
+    lay.edges["FL1"].attrs["seabed_profile"] = [round(x, 1) for x in prof]
+    rough = fa.solve(lay).edges["FL1"]
+    assert rough.uses_seabed_profile and not flat.uses_seabed_profile
+    assert rough.p_in_bara > flat.p_in_bara            # undulations cost extra back-pressure
+    assert len(rough.elevations) == len(rough.profile) + 1
+    assert min(r["elev_m"] for r in rough.profile) < -140 and max(r["elev_m"] for r in rough.profile) > -140
+    off = fa.solve(lay, fa.FASettings(use_seabed_profile=False)).edges["FL1"]
+    assert abs(off.p_in_bara - flat.p_in_bara) < 1e-9  # setting turns it back off
+S.check("stored seabed profile drives per-station inclination", seabed_profile_routing)
+def free_span_finding():
+    lay = demo()
+    prof = [150.0] * 40
+    for i in (18, 19, 20, 21):
+        prof[i] = 156.0                                # a 4-sample depression
+    lay.edges["FL1"].attrs["seabed_profile"] = prof
+    r = fa.solve(lay)
+    assert r.edges["FL1"].free_spans and any("free span" in f[2] for f in r.findings)
+S.check("seabed depression raises a free-span finding", free_span_finding)
+def section_reaches_host():
+    sec = fa.path_section(demo(), R, "W1")
+    assert abs(sec[-1]["pipe_elev_m"]) < 1e-9 and abs(sec[-1]["p_bara"] - 30.0) < 1e-9
+S.check("route section closes at the host at sea level", section_reaches_host)
 S.raises("unknown inhibitor raises", ValueError, lambda: fa.FASettings(inhibitor="Glycerol"))
 S.raises("bad water cut raises", ValueError, lambda: fa.WellFA(water_cut=1.2))
 def blend_check():

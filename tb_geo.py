@@ -300,6 +300,75 @@ def route_length(vertices: Sequence[tuple[float, float]], allowance_frac: float 
     return polyline_length(vertices, datum) * (1.0 + allowance_frac) + end_allowance_m
 
 
+# ───────────────────────── route smoothing / curvature ─────────────────────
+
+
+def _local_xy(points, lat0):
+    k = math.cos(math.radians(lat0))
+    return [((lon * 111320.0 * k), (lat * 110540.0)) for lat, lon in points]
+
+
+def _from_local_xy(xy, lat0):
+    k = math.cos(math.radians(lat0))
+    return [(y / 110540.0, x / (111320.0 * k)) for x, y in xy]
+
+
+def catmull_rom(points: Sequence[tuple[float, float]], samples: int = 10, alpha: float = 0.5):
+    """Centripetal Catmull-Rom spline through every (lat, lon) vertex.
+
+    Models a laid line: the route passes through the surveyed points but leaves
+    them as smooth curves rather than sharp corners. alpha=0.5 (centripetal)
+    avoids the cusps and self-intersections of the uniform form.
+    """
+    pts = [tuple(p) for p in points]
+    if len(pts) < 3 or samples < 1:
+        return pts
+    lat0 = sum(p[0] for p in pts) / len(pts)
+    P = _local_xy(pts, lat0)
+    P = [P[0]] + P + [P[-1]]                      # duplicate ends → curve starts/ends at the nodes
+    out = []
+    for i in range(len(P) - 3):
+        p0, p1, p2, p3 = P[i:i + 4]
+
+        def tj(ti, a, b):
+            d = math.dist(a, b)
+            return ti + (d ** alpha if d > 0 else 1e-9)
+
+        t0 = 0.0
+        t1, t2, t3 = tj(t0, p0, p1), 0.0, 0.0
+        t2 = tj(t1, p1, p2)
+        t3 = tj(t2, p2, p3)
+        for s_ in range(samples):
+            t = t1 + (t2 - t1) * s_ / samples
+            a1 = [(t1 - t) / (t1 - t0) * p0[k] + (t - t0) / (t1 - t0) * p1[k] for k in (0, 1)]
+            a2 = [(t2 - t) / (t2 - t1) * p1[k] + (t - t1) / (t2 - t1) * p2[k] for k in (0, 1)]
+            a3 = [(t3 - t) / (t3 - t2) * p2[k] + (t - t2) / (t3 - t2) * p3[k] for k in (0, 1)]
+            b1 = [(t2 - t) / (t2 - t0) * a1[k] + (t - t0) / (t2 - t0) * a2[k] for k in (0, 1)]
+            b2 = [(t3 - t) / (t3 - t1) * a2[k] + (t - t1) / (t3 - t1) * a3[k] for k in (0, 1)]
+            out.append(tuple((t2 - t) / (t2 - t1) * b1[k] + (t - t1) / (t2 - t1) * b2[k] for k in (0, 1)))
+    out.append(P[-2])
+    return _from_local_xy(out, lat0)
+
+
+def min_bend_radius(points: Sequence[tuple[float, float]]) -> float:
+    """Smallest circumradius (m) of consecutive vertex triples; inf if straight."""
+    pts = [tuple(p) for p in points]
+    if len(pts) < 3:
+        return math.inf
+    lat0 = sum(p[0] for p in pts) / len(pts)
+    P = _local_xy(pts, lat0)
+    best = math.inf
+    for (x1, y1), (x2, y2), (x3, y3) in zip(P[:-2], P[1:-1], P[2:]):
+        a = math.dist((x1, y1), (x2, y2))
+        b = math.dist((x2, y2), (x3, y3))
+        c = math.dist((x1, y1), (x3, y3))
+        area2 = abs((x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1))
+        if area2 < 1e-9 or a * b * c == 0:
+            continue                                   # collinear → infinite radius
+        best = min(best, a * b * c / (2.0 * area2))
+    return best
+
+
 def dms_to_deg(d: float, m: float = 0.0, s: float = 0.0) -> float:
     sign = -1.0 if d < 0 or (d == 0 and (m < 0 or s < 0)) else 1.0
     return sign * (abs(d) + abs(m) / 60.0 + abs(s) / 3600.0)

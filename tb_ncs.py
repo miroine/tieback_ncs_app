@@ -18,6 +18,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 SERVICE_URL = "https://factmaps.sodir.no/api/rest/services/Factmaps/FactMapsWGS84/MapServer"
 PAGE_SIZE = 1000  # service MaxRecordCount
+NCS_BBOX = (-1.0, 55.5, 37.0, 82.0)   # whole Norwegian Continental Shelf, lon/lat
+
+# Sodir picture-fill classes (hatched in FactMaps) mapped to pattern ids the map component draws
+PICTURE_FILL_PATTERNS = {"OIL/GAS": "oil_gas", "GAS/CONDENSATE": "gas_condensate"}
 
 
 @dataclass(frozen=True)
@@ -35,8 +39,10 @@ class NcsLayer:
 NCS_LAYERS: Dict[str, NcsLayer] = {l.key: l for l in (
     NcsLayer("fields", 502, "Fields", "polygon", ("fldName", "FIELDNAME", "fieldName"), "#9DBA00",
              r"^field by status$", True),
-    NcsLayer("discoveries", 503, "Discoveries (active)", "polygon", ("dscName", "DISCNAME", "discName"),
-             "#E9A23B", r"^discovery, active"),
+    NcsLayer("discoveries", 503, "Discoveries (active, by HC type)", "polygon",
+             ("dscName", "DISCNAME", "discName"), "#E9A23B", r"^discovery, active"),
+    NcsLayer("discoveries_all", 504, "Discoveries (all, by main HC type)", "polygon",
+             ("dscName", "DISCNAME", "discName"), "#E9A23B", r"^discovery, all"),
     NcsLayer("facilities", 304, "Facilities in place", "point", ("fclName", "FACNAME"), "#EB0037",
              r"^facilities, in place$", True),
     NcsLayer("pipelines", 311, "Pipelines", "line", ("pipName", "PIPENAME"), "#00243D",
@@ -166,7 +172,8 @@ def label_for(props: dict, layer: NcsLayer) -> str:
 
 
 def fetch_layer(key: str, bbox, session, max_features: int = 5000, simplify_deg: float = 0.0005,
-                decimals: int = 6, timeout: float = 30.0, layer_id: Optional[int] = None) -> dict:
+                decimals: int = 6, timeout: float = 30.0, layer_id: Optional[int] = None,
+                use_renderer: bool = True) -> dict:
     """Fetch one FactMaps layer inside bbox, paginating past MaxRecordCount.
 
     Returns a FeatureCollection with slim properties: _label, _layer, plus the
@@ -198,9 +205,83 @@ def fetch_layer(key: str, bbox, session, max_features: int = 5000, simplify_deg:
         if truncated or not exceeded or not page:
             break
         offset += len(page)
-    return {"type": "FeatureCollection", "features": features,
-            "layer": key, "title": layer.title, "color": layer.color,
-            "geometry": layer.geometry, "truncated": truncated}
+    fc = {"type": "FeatureCollection", "features": features,
+          "layer": key, "title": layer.title, "color": layer.color,
+          "geometry": layer.geometry, "truncated": truncated}
+    if use_renderer and features:
+        try:
+            fc["renderer"] = fetch_renderer(key, session, timeout, lid)
+            apply_renderer(fc, fc["renderer"], layer.color)
+        except Exception:      # noqa: BLE001 — symbology is optional; keep the data
+            fc["renderer"] = None
+    return fc
+
+
+def parse_renderer(layer_json: dict) -> dict:
+    """Read a layer's ArcGIS drawingInfo so overlays match FactMaps symbology.
+
+    Returns {"field": <attribute>, "values": {value: {fill, outline, pattern}},
+             "default": {...} | None}. Picture-fill classes (Sodir hatches oil/gas and
+    gas/condensate) carry a `pattern` key instead of a solid colour.
+    """
+    r = (layer_json.get("drawingInfo") or {}).get("renderer") or {}
+
+    def sym_style(sym, value=None):
+        if not isinstance(sym, dict):
+            return None
+        col = sym.get("color")
+        out = ((sym.get("outline") or {}).get("color")) or [130, 130, 130, 255]
+        style = {"outline": rgba_hex(out)}
+        if col:
+            style["fill"] = rgba_hex(col)
+        pat = PICTURE_FILL_PATTERNS.get(str(value).upper()) if value is not None else None
+        if sym.get("type") in ("esriPFS", "esriPMS") or (col is None and pat):
+            style["pattern"] = pat or "oil_gas"
+            style.setdefault("fill", "#9E9E9E")
+        return style
+
+    out = {"field": r.get("field1"), "values": {}, "default": sym_style(r.get("defaultSymbol"))}
+    for info in r.get("uniqueValueInfos", []) or []:
+        st = sym_style(info.get("symbol"), info.get("value"))
+        if st:
+            out["values"][str(info.get("value"))] = st
+    if r.get("type") == "simple":
+        out["default"] = sym_style(r.get("symbol")) or out["default"]
+    return out
+
+
+def rgba_hex(c) -> str:
+    if not c:
+        return "#808080"
+    r, g, b = int(c[0]), int(c[1]), int(c[2])
+    return f"#{r:02X}{g:02X}{b:02X}"
+
+
+def fetch_renderer(key: str, session, timeout: float = 30.0, layer_id=None) -> dict:
+    lid = NCS_LAYERS[key].layer_id if layer_id is None else layer_id
+    resp = session.get(f"{SERVICE_URL}/{lid}", params={"f": "json"}, timeout=timeout)
+    resp.raise_for_status()
+    return parse_renderer(resp.json())
+
+
+def apply_renderer(fc: dict, renderer: dict, fallback_color: str) -> dict:
+    """Tag each feature with _fill / _outline / _pattern from the service renderer."""
+    field = (renderer or {}).get("field")
+    for f in fc.get("features", []):
+        props = f["properties"]
+        st = None
+        if field:
+            val = props.get(field)
+            if val is None:
+                lower = {k.lower(): v for k, v in props.items()}
+                val = lower.get(str(field).lower())
+            st = (renderer.get("values") or {}).get(str(val))
+        st = st or (renderer or {}).get("default") or {}
+        props["_fill"] = st.get("fill", fallback_color)
+        props["_outline"] = st.get("outline", "#828282")
+        if st.get("pattern"):
+            props["_pattern"] = st["pattern"]
+    return fc
 
 
 def discover_layers(service_json: dict) -> Dict[str, int]:

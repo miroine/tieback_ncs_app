@@ -7,6 +7,7 @@ Run:  streamlit run tieback_app.py
 from __future__ import annotations
 
 import copy
+import dataclasses
 import datetime as dt
 import hashlib
 import io
@@ -22,8 +23,11 @@ import requests
 import streamlit as st
 import yaml
 
+import tb_bathymetry
+import tb_cases
 import tb_catalog
 import tb_cost
+import tb_costio
 import tb_flowassurance as tb_fa
 import tb_geo
 import tb_import
@@ -31,9 +35,11 @@ import tb_map
 import tb_ncs
 import tb_network
 import tb_project
+import tb_report
 import tb_schedule
+import tb_well
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.7.0"
 HERE = Path(__file__).parent
 DEMO_FILE = HERE / "test_fixtures" / "demo_field_a_tieback.yaml"
 
@@ -158,11 +164,15 @@ st.markdown(f"""<div class="tb-title"><h1>TieBack Studio</h1>
 
 # ─────────────────────── cached computations ───────────────────────
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def fetch_ncs_cached(key: str, bbox: tuple) -> dict:
+def _session():
     sess = requests.Session()
     sess.headers.update({"User-Agent": f"TieBackStudio/{APP_VERSION}"})
-    return tb_ncs.fetch_layer(key, bbox, sess)
+    return sess
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_ncs_cached(key: str, bbox: tuple, simplify: float = 0.0005, max_features: int = 5000) -> dict:
+    return tb_ncs.fetch_layer(key, bbox, _session(), max_features=max_features, simplify_deg=simplify)
 
 
 # ───────────────────────────── sidebar ─────────────────────────────
@@ -194,6 +204,26 @@ with st.sidebar:
         if st.button("Load demo"):
             set_project(*load_demo())
             st.rerun()
+    tpl_dir = HERE / "templates"
+    tpls = sorted(tpl_dir.glob("*.yaml")) if tpl_dir.exists() else []
+    if tpls:
+        names = {}
+        for f in tpls:
+            try:
+                names[f.name] = yaml.safe_load(f.read_text()).get("name", f.stem)
+            except Exception:  # noqa: BLE001
+                names[f.name] = f.stem
+        pick = st.selectbox("Start from a concept template", list(names), format_func=lambda k: names[k],
+                            key=f"tpl_{REV}")
+        if st.button("Load template"):
+            try:
+                lay = tb_network.Layout.from_dict(yaml.safe_load((tpl_dir / pick).read_text()), tb_catalog.Catalog())
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Template failed to load: {exc}")
+            else:
+                set_project(names[pick], lay, tb_cost.CostSettings(), tb_schedule.ScheduleSettings(),
+                            tb_fa.FASettings())
+                st.rerun()
     if st.button("New empty layout (keeps catalog)"):
         set_project("New tie-back", tb_network.Layout(CAT, copy.deepcopy(LAY.settings)),
                     S.cost_settings, S.sched_settings, S.fa_settings)
@@ -209,6 +239,10 @@ with st.sidebar:
                             key=f"endal_{REV}", help="Tie-in spools and overlength")
     wf = st.number_input("Offshore weather factor", 1.0, 3.0, float(S.weather_factor), 0.05, key=f"wf_{REV}",
                          help="Multiplies offshore durations in both cost and schedule")
+    minr = st.number_input("Minimum lay bend radius (m)", 0.0, 5000.0,
+                           float(LAY.settings.min_bend_radius_m), 50.0, key=f"minr_{REV}",
+                           help="Routes with tighter bends are flagged in the design checks")
+    LAY.settings.min_bend_radius_m = minr
     LAY.settings.datum, LAY.settings.route_allowance_frac, LAY.settings.end_allowance_m = d_sel, allow / 100, endal
     S.weather_factor = wf
     S.cost_settings.weather_factor = wf
@@ -230,8 +264,53 @@ with st.sidebar:
     view = S.map_state.get("view")
     load_view = b2.button("Load for map view", disabled=not view,
                           help="Pan or interact with the map first so its view is known")
+    load_all_disc = st.button("All NCS discoveries", help="Every discovery on the shelf, coloured by main "
+                                                          "hydrocarbon type as in FactMaps")
     if st.button("Clear NCS layers"):
         S.ncs_overlays = {}
+    if load_all_disc:
+        with st.spinner("Fetching all NCS discoveries…"):
+            try:
+                fc = fetch_ncs_cached("discoveries_all", tb_ncs.NCS_BBOX, 0.002, 4000)
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Discoveries: {exc}")
+            else:
+                S.ncs_overlays["discoveries_all"] = {**fc, "rev": "all-ncs"}
+                st.success(f"{len(fc['features'])} discoveries loaded")
+
+    st.subheader("Bathymetry")
+    st.caption("EMODnet DTM (~115 m grid, depths to LAT). Switch the bathymetry and depth-contour "
+               "overlays on in the map's layer control, top right.")
+    blank_only = st.checkbox("Only nodes with no depth", True)
+    if st.button("Fetch seabed profiles along routes"):
+        with st.spinner("Sampling the seabed along each line…"):
+            try:
+                got = tb_bathymetry.fetch_route_profiles(LAY, _session())
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Profile lookup failed: {exc}")
+            else:
+                ok = sum(1 for v in got.values() if v)
+                if ok:
+                    st.success(f"Seabed profile stored for {ok} of {len(got)} lines — flow assurance now "
+                               f"follows the real terrain")
+                    bump()
+                    st.rerun()
+                else:
+                    st.warning("No profiles returned for those routes")
+    if st.button("Fill water depths from EMODnet"):
+        with st.spinner("Sampling the EMODnet DTM…"):
+            try:
+                got = tb_bathymetry.fill_node_depths(LAY, _session(), only_blank=blank_only)
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Depth lookup failed: {exc}")
+            else:
+                ok = sum(1 for v in got.values() if v is not None)
+                if ok:
+                    st.success(f"Set depth on {ok} of {len(got)} nodes")
+                    bump()
+                    st.rerun()
+                else:
+                    st.warning("No depths returned for those positions")
     if load_layout_area or load_view:
         if load_view:
             bbox = tuple(round(v, 4) for v in view)
@@ -304,8 +383,8 @@ findings = LAY.validate()
 n_err = sum(f.severity == "error" for f in findings)
 n_warn = sum(f.severity == "warning" for f in findings)
 
-tab_layout, tab_cat, tab_cost, tab_sched, tab_fa, tab_exp = st.tabs(
-    ["Layout", "Equipment catalog", "Cost", "Schedule", "Flow assurance", "Export"])
+tab_layout, tab_cat, tab_cost, tab_sched, tab_fa, tab_cases, tab_exp = st.tabs(
+    ["Layout", "Equipment catalog", "Cost", "Schedule", "Flow assurance", "Cases", "Export"])
 
 # ═══════════════════════════════ LAYOUT ═══════════════════════════════
 with tab_layout:
@@ -359,10 +438,15 @@ with tab_layout:
                     n_ = cc[2].number_input("Northing (m)", 0.0, 10_000_000.0, round(n0, 2), format="%.2f")
                     utm_vals = (e_, n_, z)
                     lat, lon = node.lat, node.lon
-                cc = st.columns(3)
+                cc = st.columns(4)
                 depth = cc[0].number_input("Water depth (m)", 0.0, 4000.0, float(node.water_depth_m))
                 phase = cc[1].number_input("Phase", 1, 9, int(node.phase))
-                hipps = cc[2].checkbox("HIPPS", node.hipps, help="Protects everything downstream of this item")
+                heading = cc[2].number_input("Heading (° from north)", 0.0, 360.0,
+                                             float(node.attrs.get("heading_deg", 0.0) or 0.0), 5.0,
+                                             help=f"Rotates the true-scale footprint "
+                                                  f"({it.footprint_l_m:.0f} × {it.footprint_w_m:.0f} m), "
+                                                  f"visible when zoomed in")
+                hipps = cc[3].checkbox("HIPPS", node.hipps, help="Protects everything downstream of this item")
                 sitp = st.number_input("Shut-in tubing pressure (psi)", 0.0, 25000.0, float(node.sitp_psi),
                                        step=100.0) if it.category == "well" else node.sitp_psi
                 ok = st.form_submit_button("Apply changes", type="primary")
@@ -370,6 +454,7 @@ with tab_layout:
                 if utm_vals:
                     lat, lon = tb_geo.utm_to_geo(utm_vals[0], utm_vals[1], int(utm_vals[2]), "N", LAY.settings.datum)
                 node.label, node.item_id, node.water_depth_m = label, item_id, depth
+                node.attrs["heading_deg"] = float(heading)
                 node.phase, node.hipps, node.sitp_psi = int(phase), hipps, sitp
                 LAY.move_node(sel, float(lat), float(lon))
                 bump()
@@ -387,7 +472,7 @@ with tab_layout:
                 diam = cc[0].number_input("Internal diameter (in)", 0.0, 48.0, float(edge.diameter_in), 0.5)
                 phase = cc[1].number_input("Phase", 1, 9, int(edge.phase))
                 fixed = cc[2].checkbox("Fixed length", edge.length_m is not None)
-                calc_len = tb_geo.route_length(LAY.edge_vertices(edge), LAY.settings.route_allowance_frac,
+                calc_len = tb_geo.route_length(LAY.edge_shape(edge), LAY.settings.route_allowance_frac,
                                                LAY.settings.end_allowance_m, LAY.settings.datum)
                 length = st.number_input("Design length (m)", 0.0, 500_000.0,
                                          float(edge.length_m if edge.length_m is not None else round(calc_len, 1)),
@@ -396,16 +481,48 @@ with tab_layout:
                     pd.DataFrame({"lat": pd.Series(dtype=float), "lon": pd.Series(dtype=float)})
                 st.caption("Route bends (lat/lon, from start to end)")
                 route_new = st.data_editor(route_df, num_rows="dynamic", key=f"route_{sel}_{REV}", **STRETCH)
+                others = [e2.edge_id for e2 in LAY.edges.values() if e2.edge_id != sel and e2.route]
+                carriers = ["—"] + [e2.edge_id for e2 in LAY.edges.values()
+                                    if e2.edge_id != sel and CAT.get(e2.item_id).category in ("flowline", "riser")]
+                cur_carrier = edge.attrs.get("piggyback_on") or "—"
+                piggy = st.selectbox("Strapped to (piggyback)", carriers,
+                                     index=carriers.index(cur_carrier) if cur_carrier in carriers else 0,
+                                     key=f"piggy_{sel}_{REV}",
+                                     help="Laid with that line instead of its own campaign: it follows the "
+                                          "carrier's route and only adds a share of the lay time")
+                smooth = st.checkbox("Smooth the route (as-laid curve through the bends)",
+                                     bool(edge.attrs.get("smooth")),
+                                     help="Rigid lines are laid in curves, not sharp corners. Length and "
+                                          "flow assurance use the smoothed geometry; bends stay editable.")
+                copy_from = st.selectbox("Copy route from", ["—"] + others, key=f"cproute_{sel}_{REV}",
+                                         help="Run this line alongside an existing one (e.g. a chemical "
+                                              "line following the flowline)")
                 ok = st.form_submit_button("Apply changes", type="primary")
             if ok:
                 edge.label, edge.item_id, edge.diameter_in, edge.phase = label, item_id, diam, int(phase)
+                edge.attrs["smooth"] = bool(smooth)
+                if piggy == "—":
+                    edge.attrs.pop("piggyback_on", None)
+                else:
+                    edge.attrs["piggyback_on"] = piggy
                 edge.length_m = float(length) if fixed else None
-                rn = route_new.dropna()
-                edge.route = [(float(a), float(b)) for a, b in zip(rn["lat"], rn["lon"])]
+                if copy_from != "—":
+                    src = LAY.edges[copy_from]
+                    rt = list(src.route)
+                    if (src.from_node, src.to_node) == (edge.to_node, edge.from_node):
+                        rt = rt[::-1]      # same corridor, opposite direction
+                    edge.route = [tuple(v) for v in rt]
+                else:
+                    rn = route_new.dropna()
+                    edge.route = [(float(a), float(b)) for a, b in zip(rn["lat"], rn["lon"])]
                 bump()
                 st.rerun()
+            shape_n = len(LAY.edge_shape(edge))
+            r_min = tb_geo.min_bend_radius(LAY.edge_shape(edge))
             st.caption(f"Computed design length {calc_len:,.0f} m (geodesic × {1 + LAY.settings.route_allowance_frac:.2f}"
-                       f" + {LAY.settings.end_allowance_m:.0f} m)")
+                       f" + {LAY.settings.end_allowance_m:.0f} m)"
+                       + (f" · smoothed through {shape_n} points" if edge.attrs.get("smooth") else "")
+                       + (f" · tightest bend {r_min:,.0f} m" if r_min != float("inf") else ""))
 
     with right:
         st.markdown("#### Design checks")
@@ -521,10 +638,14 @@ with tab_cat:
         def unc(r):
             return (float(r.pop("unc_low")), float(r.pop("unc_ml")), float(r.pop("unc_high")))
         spreads = []
+        spread_fields = {f.name for f in dataclasses.fields(tb_catalog.VesselSpread)} - {"uncertainty"}
         for r in sdf.dropna(subset=["key"]).to_dict("records"):
             u = unc(r)
-            spreads.append(tb_catalog.VesselSpread(**{k: r[k] for k in ("key", "name", "day_rate_usd", "mob_demob_usd")},
-                                                   uncertainty=u))
+            vals = {k: r[k] for k in spread_fields if k in r}
+            for k, v in list(vals.items()):
+                if k != "key" and k != "name" and (v is None or (isinstance(v, float) and np.isnan(v))):
+                    vals[k] = 0.0
+            spreads.append(tb_catalog.VesselSpread(**vals, uncertainty=u))
         items = []
         num = {"procurement_usd", "fabrication_usd", "engineering_frac", "install_days", "lead_time_months",
                "rating_psi", "max_diameter_in", "min_diameter_in", "weight_te"}
@@ -558,13 +679,30 @@ with tab_cat:
             st.rerun()
     cc[1].download_button("Download cost library", CAT.to_yaml(), file_name="tieback_cost_library.yaml",
                           mime="text/yaml")
-    lib = cc[2].file_uploader("Load cost library (.yaml)", type=["yaml", "yml"], key="lib_upload")
-    if lib is not None and st.button("Replace catalog with this library"):
+    lib = cc[2].file_uploader("Load cost library (.yaml, .xlsx or .csv)",
+                              type=["yaml", "yml", "xlsx", "xlsm", "csv"], key="lib_upload")
+    st.download_button("Download cost catalog as Excel", tb_costio.catalog_to_workbook(CAT),
+                       file_name="tieback_cost_catalog.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       help="Sheets: items, spreads, notes. Edit the rates and load it straight back.")
+    spreads_csv = None
+    if lib is not None and lib.name.lower().endswith(".csv"):
+        spreads_csv = st.file_uploader("Vessel spreads CSV (optional)", type=["csv"], key="lib_spreads_upload")
+    if lib is not None and st.button("Replace catalog with this file"):
+        name = lib.name.lower()
         try:
-            _adopt_catalog(tb_catalog.Catalog.from_yaml(lib.getvalue().decode("utf-8")))
+            if name.endswith((".xlsx", ".xlsm")):
+                new_cat = tb_costio.catalog_from_workbook(lib.getvalue())
+            elif name.endswith(".csv"):
+                new_cat = tb_costio.catalog_from_csv(lib.getvalue(),
+                                                     spreads_csv.getvalue() if spreads_csv else None)
+            else:
+                new_cat = tb_catalog.Catalog.from_yaml(lib.getvalue().decode("utf-8"))
+            _adopt_catalog(new_cat)
         except Exception as exc:  # noqa: BLE001
-            st.error(f"Library not loaded: {exc}")
+            st.error(f"Catalog not loaded: {exc}")
         else:
+            st.success(f"Loaded {len(CAT.items)} items and {len(CAT.spreads)} vessel spreads from {lib.name}")
             st.rerun()
 
 # ═══════════════════════════ SCHEDULE (computed first; cost phasing needs it) ═══════════════════════════
@@ -760,6 +898,22 @@ with tab_fa:
             jd = cc[1].number_input("XT jumper ID (in)", 2.0, 16.0, float(fas.well_jumper_diameter_in), 0.5)
             rough = cc[2].number_input("Pipe roughness (mm)", 0.0, 2.0, float(fas.roughness_in) * 25.4, 0.005, format="%.3f")
             segl = cc[3].number_input("Calculation step (m)", 25.0, 2000.0, float(fas.segment_length_m), 25.0)
+            cc = st.columns(3)
+            jt = cc[0].checkbox("Joule-Thomson cooling", bool(fas.include_jt),
+                                help="Expansion cooling along the line; matters most for gas and "
+                                     "condensate systems with a large pressure drop")
+            npt = cc[1].number_input("Pressure/temperature passes", 1, 6, int(fas.pt_iterations),
+                                     help="JT couples the two marches; 3 passes is usually enough")
+            slugv = cc[2].number_input("Riser slugging gas velocity (m/s)", 0.5, 10.0,
+                                       float(fas.severe_slug_vsg_m_s), 0.5,
+                                       help="Below this superficial gas velocity in the riser, severe "
+                                            "slugging is flagged")
+            cc = st.columns(3)
+            usebed = cc[0].checkbox("Follow stored seabed profiles", bool(fas.use_seabed_profile),
+                                    help="Use the EMODnet terrain fetched in the sidebar instead of a "
+                                         "straight slope between end depths")
+            spangap = cc[1].number_input("Free-span clearance (m)", 0.1, 5.0, float(fas.free_span_gap_m), 0.1)
+            maxspan = cc[2].number_input("Report spans up to (m)", 50.0, 2000.0, float(fas.max_free_span_m), 50.0)
             if st.form_submit_button("Apply flow assurance settings", type="primary"):
                 try:
                     S.fa_settings = tb_fa.FASettings(arrival_bara=arr, seabed_temp_c=sbt, default_water_depth_m=ddep,
@@ -768,7 +922,10 @@ with tab_fa:
                                                      inhibitor_wt_pct=inhw, jumper_length_m=jl,
                                                      well_jumper_diameter_in=jd, roughness_in=rough / 25.4,
                                                      segment_length_m=segl, air_temp_c=fas.air_temp_c,
-                                                     erosional_c=fas.erosional_c)
+                                                     erosional_c=fas.erosional_c, include_jt=bool(jt),
+                                                     pt_iterations=int(npt), severe_slug_vsg_m_s=slugv,
+                                                     use_seabed_profile=bool(usebed), free_span_gap_m=spangap,
+                                                     max_free_span_m=maxspan)
                 except ValueError as exc:
                     st.error(str(exc))
                 else:
@@ -858,7 +1015,8 @@ with tab_fa:
                                  pattern=r.dominant_pattern, max_holdup=r.max_holdup,
                                  max_velocity_m_s=r.max_velocity_m_s, erosional_ratio=r.erosional_ratio,
                                  hydrate_margin_c=r.min_hydrate_margin_c,
-                                 cooldown_h=(np.nan if r.heated or math.isinf(r.cooldown_h) else r.cooldown_h))
+                                 cooldown_h=(np.nan if r.heated or math.isinf(r.cooldown_h) else r.cooldown_h),
+                                 seabed_profile=r.uses_seabed_profile, free_spans=len(r.free_spans))
                             for r in FA_RES.edges.values()])
         st.dataframe(ldf, hide_index=True, **STRETCH, column_config={
             c_: st.column_config.NumberColumn(format="%.1f") for c_ in
@@ -898,6 +1056,153 @@ with tab_fa:
                 fig.update_yaxes(title="°C")
                 cc[1].plotly_chart(eq_layout(fig, 320, title="Temperature vs hydrate curve"), **STRETCH)
 
+        if path:
+            sec = pd.DataFrame(tb_fa.path_section(LAY, FA_RES, pw, S.fa_settings))
+            if len(sec):
+                marks = pd.DataFrame(tb_fa.section_nodes(LAY, FA_RES, pw, S.fa_settings))
+                st.markdown("#### Route section (wellhead to host)")
+                fig = go.Figure()
+                floor = float(sec["seabed_elev_m"].min()) - 40
+                fig.add_trace(go.Scatter(x=sec["distance_m"] / 1000, y=sec["seabed_elev_m"], name="Seabed",
+                                         mode="lines", line=dict(color="#8C6D4F", width=1),
+                                         fill="tozeroy" if False else None))
+                fig.add_trace(go.Scatter(x=sec["distance_m"] / 1000, y=[floor] * len(sec), name="Seabed fill",
+                                         mode="lines", line=dict(width=0), fill="tonexty",
+                                         fillcolor="rgba(140,109,79,0.35)", showlegend=False, hoverinfo="skip"))
+                fig.add_trace(go.Scatter(x=sec["distance_m"] / 1000, y=sec["pipe_elev_m"], name="Line / riser",
+                                         mode="lines", line=dict(color=EQ["navy"], width=4),
+                                         customdata=np.stack([sec["p_bara"], sec["t_c"], sec["line"]], axis=-1),
+                                         hovertemplate="%{customdata[2]}<br>%{x:.2f} km<br>%{y:.0f} m<br>"
+                                                       "%{customdata[0]:.1f} bara · %{customdata[1]:.1f} °C<extra></extra>"))
+                fig.add_trace(go.Scatter(x=marks["distance_m"] / 1000, y=marks["elev_m"], mode="markers+text",
+                                         text=marks["label"], textposition="top center", name="Equipment",
+                                         marker=dict(symbol="square", size=9, color=EQ["torch"])))
+                fig.add_hline(y=0, line_color="#4A90C4", line_width=2)
+                fig.update_xaxes(title="Distance from wellhead (km)")
+                fig.update_yaxes(title="Elevation (m, sea level = 0)")
+                st.plotly_chart(eq_layout(fig, 360, title="Longitudinal section"), **STRETCH)
+
+                xs = st.columns([1, 1])
+                sec_lines = list(dict.fromkeys(sec["line"]))
+                xl = xs[0].selectbox("Cross-section of", sec_lines, key="fa_xsec_line",
+                                     format_func=lambda i: f"{i} · {CAT.get(LAY.edges[i].item_id).name}")
+                if xl:
+                    er = FA_RES.edges[xl]
+                    layers = tb_fa.pipe_cross_section(CAT.get(LAY.edges[xl].item_id), er.d_in)
+                    fig = go.Figure()
+                    for ly in reversed(layers):
+                        r_ = ly["outer_mm"] / 2
+                        fig.add_shape(type="circle", x0=-r_, y0=-r_, x1=r_, y1=r_, xref="x", yref="y",
+                                      line=dict(color="#FFFFFF", width=1), fillcolor=ly["color"], layer="below")
+                    outer = layers[-1]["outer_mm"] / 2
+                    fig.add_trace(go.Scatter(x=[0], y=[0], mode="text", text=[f'{er.d_in:g}" ID'],
+                                             textfont=dict(color="#00243D", size=13), showlegend=False))
+                    for i_, ly in enumerate(layers):
+                        fig.add_trace(go.Scatter(x=[outer * 1.15], y=[outer - i_ * outer / max(len(layers), 1) * 0.6],
+                                                 mode="markers+text", marker=dict(size=11, color=ly["color"]),
+                                                 text=[f"  {ly['name']} — {ly['note']}"], textposition="middle right",
+                                                 showlegend=False, hoverinfo="skip"))
+                    fig.update_xaxes(visible=False, range=[-outer * 1.2, outer * 3.4])
+                    fig.update_yaxes(visible=False, scaleanchor="x", scaleratio=1,
+                                     range=[-outer * 1.3, outer * 1.3])
+                    xs[0].plotly_chart(eq_layout(fig, 340, title=f"{xl} build-up "
+                                                                f"(OD {layers[-1]['outer_mm']:.0f} mm)"), **STRETCH)
+                    xs[1].dataframe(pd.DataFrame(layers)[["name", "outer_mm", "note"]], hide_index=True, **STRETCH,
+                                    column_config={"outer_mm": st.column_config.NumberColumn("outer Ø (mm)", format="%.0f")})
+                    xs[1].caption(f"U = {er.u_w_m2k:.1f} W/m²K · inclination {er.theta_deg:.1f}° · "
+                                  f"{er.length_m:,.0f} m · {er.dominant_pattern} flow")
+
+        st.markdown("#### Turndown and ramp-up")
+        cc = st.columns([2, 1])
+        fr_txt = cc[0].text_input("Rate fractions to check", "1.0, 0.7, 0.5, 0.3", key=f"td_{REV}")
+        if cc[1].button("Run turndown check"):
+            try:
+                fracs = [float(x) for x in fr_txt.replace(";", ",").split(",") if x.strip()]
+            except ValueError:
+                st.error("Fractions must be numbers, e.g. 1.0, 0.7, 0.5")
+            else:
+                S.turndown = dict(sig=md5(LAY.to_dict(), vars(S.fa_settings), fr_txt),
+                                  rows=tb_fa.rate_sensitivity(LAY, S.fa_settings, wells_in, fracs))
+        td = S.get("turndown")
+        if td and td["sig"] == md5(LAY.to_dict(), vars(S.fa_settings), fr_txt):
+            tdf = pd.DataFrame(td["rows"])
+            st.dataframe(tdf, hide_index=True, **STRETCH, column_config={
+                c_: st.column_config.NumberColumn(format="%.1f") for c_ in
+                ("arrival_t_c", "max_required_whp_bara", "min_hydrate_margin_c", "min_cooldown_h",
+                 "liquid_inventory_m3", "surge_vs_design_m3", "max_velocity_m_s")})
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=tdf["oil_sm3_d"], y=tdf["min_hydrate_margin_c"], mode="lines+markers",
+                                     name="Hydrate margin (°C)", line=dict(color=EQ["torch"], width=3)))
+            fig.add_trace(go.Scatter(x=tdf["oil_sm3_d"], y=tdf["arrival_t_c"], mode="lines+markers",
+                                     name="Arrival temperature (°C)", line=dict(color=EQ["navy"], width=3)))
+            fig.add_hline(y=0, line_dash="dash", line_color=EQ["slate"])
+            fig.update_xaxes(title="Field oil rate (Sm³/d)")
+            fig.update_yaxes(title="°C")
+            st.plotly_chart(eq_layout(fig, 300, title="Turndown: arrival temperature and hydrate margin"), **STRETCH)
+            bad = tdf[tdf["min_hydrate_margin_c"] < 0]
+            if len(bad):
+                st.warning(f"Hydrate margin is negative at and below {bad['fraction'].max():.0%} of design rate — "
+                           f"continuous inhibition or insulation is needed for turndown operation.")
+
+        st.markdown("#### Well deliverability (nodal)")
+        st.caption("Give a well an IPR and tubing below, then solve the rates from the intersection of "
+                   "inflow, tubing lift and the network back-pressure instead of typing them in.")
+        ipr_rows = []
+        for w_, v_ in wells_in.items():
+            d_ = LAY.nodes[w_].attrs.get("ipr") or {}
+            ipr_rows.append(dict(id=w_, label=LAY.nodes[w_].label or w_, use=bool(d_.get("use", False)),
+                                 kind=d_.get("kind", "pi"), reservoir_bara=float(d_.get("reservoir_bara", 350.0)),
+                                 pi_sm3_d_bar=float(d_.get("pi_sm3_d_bar", 12.0)),
+                                 bubble_bara=float(d_.get("bubble_bara", 200.0)),
+                                 md_m=float(d_.get("md_m", 2600.0)), tvd_m=float(d_.get("tvd_m", 2500.0)),
+                                 tubing_id_in=float(d_.get("tubing_id_in", 4.892)),
+                                 reservoir_t_c=float(d_.get("reservoir_t_c", 85.0))))
+        idf = pd.DataFrame(ipr_rows)
+        ied = st.data_editor(idf, hide_index=True, key=f"fa_ipr_{REV}", **STRETCH,
+                             disabled=["id", "label"], column_config={
+                                 "kind": st.column_config.SelectboxColumn(options=list(tb_well.IPR_KINDS)),
+                                 "reservoir_bara": st.column_config.NumberColumn("Res. P (bara)", format="%.0f"),
+                                 "pi_sm3_d_bar": st.column_config.NumberColumn("PI (Sm³/d/bar)", format="%.2f"),
+                                 "bubble_bara": st.column_config.NumberColumn("Pb (bara)", format="%.0f"),
+                                 "md_m": st.column_config.NumberColumn("Tubing MD (m)", format="%.0f"),
+                                 "tvd_m": st.column_config.NumberColumn("TVD (m)", format="%.0f"),
+                                 "reservoir_t_c": st.column_config.NumberColumn("Res. T (°C)", format="%.0f")})
+        cc = st.columns([1, 1, 2])
+        if cc[0].button("Save well IPR data"):
+            for r_ in ied.to_dict("records"):
+                LAY.nodes[r_["id"]].attrs["ipr"] = {k: r_[k] for k in r_ if k not in ("id", "label")}
+            bump()
+            st.rerun()
+        if cc[1].button("Solve rates from IPR", type="primary"):
+            iprs, tubs = {}, {}
+            for r_ in ied.to_dict("records"):
+                if not r_["use"]:
+                    continue
+                iprs[r_["id"]] = tb_well.IPR(kind=r_["kind"],
+                                             reservoir_pressure_psia=r_["reservoir_bara"] * tb_fa.BARA_TO_PSIA,
+                                             productivity_index=r_["pi_sm3_d_bar"] * tb_fa.SM3_TO_STB / tb_fa.BARA_TO_PSIA,
+                                             bubble_point_psia=r_["bubble_bara"] * tb_fa.BARA_TO_PSIA)
+                tubs[r_["id"]] = tb_well.Tubing(depth_ft=r_["md_m"] * 3.28084, tvd_ft=r_["tvd_m"] * 3.28084,
+                                                id_in=r_["tubing_id_in"],
+                                                geothermal_f=r_["reservoir_t_c"] * 1.8 + 32)
+            if not iprs:
+                st.warning("Tick 'use' for at least one well first.")
+            else:
+                with st.spinner("Solving inflow, tubing lift and network back-pressure…"):
+                    _, rates, info = tb_fa.solve_coupled(LAY, S.fa_settings, wells_in, iprs, tubs)
+                for w_, q_ in rates.items():
+                    v_ = wells_in[w_]
+                    v_.oil_sm3_d = q_
+                    tb_fa.set_well_inputs(LAY, w_, v_)
+                S.nodal_info = info
+                bump()
+                st.rerun()
+        if S.get("nodal_info"):
+            inf = S.nodal_info
+            (st.success if inf["converged"] else st.warning)(
+                f"Nodal solve {'converged' if inf['converged'] else 'did not converge'} "
+                f"after {inf['iterations']} iteration(s). {inf['note']}")
+
         sized = [e for e in fa_edges if CAT.get(e.item_id).category in ("flowline", "riser")]
         if sized:
             st.markdown("#### Line size sensitivity")
@@ -935,6 +1240,89 @@ with tab_fa:
 
         st.download_button("Download line results (CSV)", ldf.to_csv(index=False), "tieback_flow_assurance_lines.csv")
 
+# ═══════════════════════════════ CASES ═══════════════════════════════
+with tab_cases:
+    st.caption("Snapshot concepts and compare them on cost, schedule and flow assurance. A case stores the "
+               "whole project — layout, catalog and all settings — so loading one takes you back exactly.")
+    if "cases" not in S:
+        S.cases = []
+    cc = st.columns([2, 1, 1])
+    case_name = cc[0].text_input("Case name", S.project_name, key=f"case_name_{REV}")
+    case_note = cc[1].text_input("Note (optional)", "", key=f"case_note_{REV}")
+    if cc[2].button("Save current as case", type="primary"):
+        S.cases = [c_ for c_ in S.cases if c_["name"] != case_name]
+        S.cases.append(tb_cases.snapshot(case_name, LAY, S.cost_settings, S.sched_settings, S.fa_settings,
+                                         case_note))
+        S.case_rows = None
+        st.rerun()
+
+    if not S.cases:
+        st.info("No cases yet. Build a concept, then save it here and change something — a bigger flowline, "
+                "a different host, an extra phase — and save that too.")
+    else:
+        names = [c_["name"] for c_ in S.cases]
+        cc = st.columns([2, 1, 1, 1])
+        pick = cc[0].selectbox("Case", names, key=f"case_pick_{REV}")
+        if cc[1].button("Load into editor"):
+            set_project(*tb_cases.restore(next(c_ for c_ in S.cases if c_["name"] == pick)))
+            st.rerun()
+        if cc[2].button("Delete case"):
+            S.cases = [c_ for c_ in S.cases if c_["name"] != pick]
+            S.case_rows = None
+            st.rerun()
+        run_fa = cc[3].checkbox("Include flow assurance", True, key=f"case_fa_{REV}")
+        sig = md5([c_["project"] for c_ in S.cases], run_fa)
+        if st.button("Compare cases", type="primary") or (S.get("case_rows") and S.get("case_sig") == sig):
+            if S.get("case_sig") != sig:
+                with st.spinner("Costing, scheduling and solving each case…"):
+                    S.case_rows = tb_cases.compare(S.cases, run_fa)
+                    S.case_sig = sig
+            rows = S.case_rows
+            cdf = pd.DataFrame(rows)
+            st.dataframe(cdf, hide_index=True, **STRETCH, column_config={
+                c_: st.column_config.NumberColumn(format="%.1f") for c_ in cdf.columns
+                if cdf[c_].dtype.kind == "f"})
+            f_ = money_factor()
+            cc = st.columns(2)
+            fig = px.bar(cdf, x="case", y="capex_total_musd", color_discrete_sequence=[EQ["navy"]])
+            fig.update_yaxes(title="MUSD (incl. contingency)")
+            fig.update_xaxes(title=None)
+            cc[0].plotly_chart(eq_layout(fig, 300, title="CAPEX by case"), **STRETCH)
+            if "first_production" in cdf and cdf["first_production"].notna().any():
+                fp = cdf.dropna(subset=["first_production"]).copy()
+                fp["first_production"] = pd.to_datetime(fp["first_production"])
+                fig = px.scatter(fp, x="first_production", y="case", color_discrete_sequence=[EQ["torch"]])
+                fig.update_traces(marker=dict(size=14, symbol="diamond"))
+                fig.update_xaxes(title=None)
+                fig.update_yaxes(title=None)
+                cc[1].plotly_chart(eq_layout(fig, 300, title="First production"), **STRETCH)
+            if run_fa and "min_hydrate_margin_c" in cdf:
+                fig = go.Figure()
+                fig.add_trace(go.Bar(x=cdf["case"], y=cdf["min_hydrate_margin_c"], name="Hydrate margin (°C)",
+                                     marker_color=EQ["teal"]))
+                fig.add_trace(go.Bar(x=cdf["case"], y=cdf["min_whp_margin_bar"], name="Wellhead margin (bar)",
+                                     marker_color=EQ["amber"]))
+                fig.add_hline(y=0, line_color=EQ["torch"], line_dash="dash")
+                st.plotly_chart(eq_layout(fig, 300, title="Flow assurance margins (higher is safer)"), **STRETCH)
+            with st.expander("Differences against the first case"):
+                st.dataframe(pd.DataFrame(tb_cases.deltas(rows)), hide_index=True, **STRETCH)
+            st.download_button("Comparison (CSV)", cdf.to_csv(index=False), "tieback_case_comparison.csv")
+
+        cc = st.columns(2)
+        cc[0].download_button("Save case set (.yaml)", tb_cases.caseset_to_yaml(S.cases),
+                              "tieback_cases.yaml", "text/yaml")
+        up_cases = cc[1].file_uploader("Load case set (.yaml)", type=["yaml", "yml"], key="cases_upload")
+        if up_cases is not None and st.button("Add cases from file"):
+            try:
+                loaded = tb_cases.caseset_from_yaml(up_cases.getvalue().decode("utf-8"))
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Case set not loaded: {exc}")
+            else:
+                have = {c_["name"] for c_ in S.cases}
+                S.cases += [c_ for c_ in loaded if c_["name"] not in have]
+                S.case_rows = None
+                st.rerun()
+
 # ═══════════════════════════════ EXPORT ═══════════════════════════════
 with tab_exp:
     st.markdown("#### Downloads")
@@ -946,6 +1334,24 @@ with tab_exp:
                           "tieback_layout.geojson", "application/geo+json")
     cc[2].download_button("Quantities (CSV)", pd.DataFrame(LAY.quantities()).to_csv(index=False),
                           "tieback_quantities.csv", "text/csv")
+    st.markdown("#### Screening report")
+    cc = st.columns([2, 1, 1])
+    rep_author = cc[0].text_input("Prepared by", "", key=f"rep_author_{REV}")
+    rep_fa = cc[1].checkbox("Include flow assurance", True, key=f"rep_fa_{REV}")
+    if cc[2].button("Build report", type="primary"):
+        with st.spinner("Costing, scheduling, solving and writing the document…"):
+            try:
+                S.report_bytes = tb_report.build_report(S.project_name, LAY, S.cost_settings, S.sched_settings,
+                                                        S.fa_settings, rep_author, rep_fa)
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Report failed: {exc}")
+    if S.get("report_bytes"):
+        st.download_button("Download report (.docx)", S.report_bytes,
+                           f"{S.project_name.replace(' ', '_')}_screening_report.docx",
+                           "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        st.caption("Concept summary, design checks, quantities, CAPEX with charts, schedule milestones and "
+                   "critical path, flow assurance tables with the route section, and the basis and limits.")
+
     st.markdown("#### FieldVista hand-off")
     if SCH is not None:
         PH = tb_cost.phase_costs(EST, SCH, EMAP, S.cost_settings)

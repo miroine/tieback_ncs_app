@@ -44,4 +44,19 @@ S.raises("inhibitor 100 wt % raises", ValueError, lambda: T.hammerschmidt_depres
 S.check("margin: inhibitor adds its depression in °C",
         lambda: abs(T.hydrate_margin_c(15, 1500, 0.7, "Methanol", 20) - T.hydrate_margin_c(15, 1500, 0.7) - 18.2179 / 1.8) < 1e-3)
 S.check("°C/°F round trip", lambda: abs(T.f_to_c(T.c_to_f(12.3)) - 12.3) < 1e-12)
+# ── Joule-Thomson ──
+import tb_multiphase as MP
+S.check("gas JT coefficient in the expected 0.2–0.8 K/bar band (1500 psia, 120 °F, 0.7 SG)",
+        lambda: 0.2 < T.jt_coefficient_gas_k_per_bar(1500, 120, 0.7, MP.z_factor) < 0.8)
+S.check("JT cooling weakens as pressure rises",
+        lambda: T.jt_coefficient_gas_k_per_bar(500, 120, 0.7, MP.z_factor)
+        > T.jt_coefficient_gas_k_per_bar(4000, 120, 0.7, MP.z_factor))
+S.check("ideal gas (Z = 1 everywhere) has no JT effect",
+        lambda: abs(T.jt_coefficient_gas_k_per_bar(1500, 120, 0.7, lambda p, t, g: 1.0)) < 1e-12)
+S.check("mixture weights gas and liquid by mass",
+        lambda: abs(T.jt_coefficient_mixture_k_per_bar(1500, 120, 0.7, 0.25, MP.z_factor)
+                    - (0.25 * T.jt_coefficient_gas_k_per_bar(1500, 120, 0.7, MP.z_factor)
+                       + 0.75 * T.JT_LIQUID_K_PER_BAR)) < 1e-12)
+S.check("all-liquid stream warms slightly on expansion",
+        lambda: T.jt_coefficient_mixture_k_per_bar(1500, 120, 0.7, 0.0, MP.z_factor) < 0)
 sys.exit(0 if S.report() else 1)

@@ -25,7 +25,7 @@ NODE_KINDS = (
     "well", "template", "manifold", "plet", "plem", "ilt", "ssiv",
     "boosting", "compression", "separation", "riser_base", "host",
 )
-EDGE_KINDS = ("flowline", "umbilical", "jumper", "riser", "power_cable")
+EDGE_KINDS = ("flowline", "umbilical", "jumper", "riser", "power_cable", "utility_line")
 
 COST_BASIS = ("unit", "per_m", "per_inch_m")
 
@@ -34,6 +34,9 @@ COST_BASIS = ("unit", "per_m", "per_inch_m")
 PRODUCTION_EDGES = ("flowline", "jumper", "riser")
 CONTROL_EDGES = ("umbilical",)
 POWER_EDGES = ("power_cable", "umbilical")
+# Utility lines (chemical injection, gas lift, water injection, fibre, hydraulic) carry no
+# production and are excluded from the production-path checks and flow-assurance network.
+UTILITY_EDGES = ("utility_line",)
 
 _ANY_STRUCTURE = ("template", "manifold", "plet", "plem", "ilt", "ssiv",
                   "boosting", "compression", "separation", "riser_base", "host")
@@ -57,6 +60,7 @@ EDGE_RULES: Dict[str, Dict[str, tuple]] = {
     "umbilical": {k: NODE_KINDS for k in NODE_KINDS},
     "power_cable": {k: ("boosting", "compression", "separation", "host", "template", "manifold")
                     for k in ("boosting", "compression", "separation", "host", "template", "manifold")},
+    "utility_line": {k: NODE_KINDS for k in NODE_KINDS},
 }
 
 
@@ -79,6 +83,17 @@ class CatalogItem:
     weight_te: float = 0.0           # per unit or per km
     uncertainty: tuple = (0.9, 1.0, 1.3)  # triangular multipliers (low, ml, high)
     notes: str = ""
+    # presentation / layout geometry (no effect on cost or schedule)
+    symbol: str = ""              # map symbol: xt, template, manifold, plet, ssiv, pump, jacket,
+                                  # semisub, fpso, riser_base, ilt (blank = by category)
+    footprint_l_m: float = 0.0    # true-scale plan footprint, drawn when zoomed in
+    footprint_w_m: float = 0.0
+    line_color: str = ""          # line colour override (hex)
+    line_dash: str = ""           # SVG dash pattern, e.g. "8 6"
+    # pipe build-up (cross-section drawing only)
+    wall_thickness_in: float = 0.0
+    insulation_mm: float = 0.0
+    coating_mm: float = 0.0
 
     def __post_init__(self):
         if self.category not in NODE_KINDS + EDGE_KINDS:
@@ -107,94 +122,135 @@ class VesselSpread:
     day_rate_usd: float
     mob_demob_usd: float
     uncertainty: tuple = (0.85, 1.0, 1.4)
+    lift_capacity_te: float = 0.0      # main-hook subsea lift limit (0 = not checked)
 
 
 # ── Indicative defaults ──────────────────────────────────────────────────────
 DEFAULT_SPREADS = [
-    VesselSpread("csv", "Construction support vessel", 250_000, 1_500_000),
-    VesselSpread("plv", "Pipelay vessel (reel/S-lay)", 450_000, 4_000_000),
-    VesselSpread("hlv", "Heavy-lift vessel", 650_000, 5_000_000),
-    VesselSpread("rig", "Semi-sub rig (XT/completion ops)", 450_000, 3_000_000),
-    VesselSpread("ulv", "Umbilical/cable lay vessel", 300_000, 2_000_000),
-    VesselSpread("host", "Host platform campaign (topsides)", 120_000, 0),
+    VesselSpread("csv", "Construction support vessel", 250_000, 1_500_000, lift_capacity_te=250),
+    VesselSpread("plv", "Pipelay vessel (reel/S-lay)", 450_000, 4_000_000, lift_capacity_te=400),
+    VesselSpread("hlv", "Heavy-lift vessel", 650_000, 5_000_000, lift_capacity_te=4_000),
+    VesselSpread("rig", "Semi-sub rig (XT/completion ops)", 450_000, 3_000_000, lift_capacity_te=300),
+    VesselSpread("ulv", "Umbilical/cable lay vessel", 300_000, 2_000_000, lift_capacity_te=150),
+    VesselSpread("host", "Host platform campaign (topsides)", 120_000, 0, lift_capacity_te=0),
 ]
 
 DEFAULT_ITEMS = [
     # wells / trees
     CatalogItem("xt_vxt_10k", "Vertical XT 10k", "well", procurement_usd=5.5e6, fabrication_usd=0.5e6,
-                install_spread="rig", install_days=3, lead_time_months=18, rating_psi=10000, weight_te=35),
+                install_spread="rig", install_days=3, lead_time_months=18, rating_psi=10000, weight_te=35,
+                symbol="xt", footprint_l_m=5, footprint_w_m=5),
     CatalogItem("xt_hxt_10k", "Horizontal XT 10k", "well", procurement_usd=7.0e6, fabrication_usd=0.6e6,
-                install_spread="rig", install_days=3, lead_time_months=20, rating_psi=10000, weight_te=45),
+                install_spread="rig", install_days=3, lead_time_months=20, rating_psi=10000, weight_te=45,
+                symbol="xt", footprint_l_m=5, footprint_w_m=5),
     CatalogItem("xt_hxt_15k", "Horizontal XT 15k HPHT", "well", procurement_usd=10.5e6, fabrication_usd=0.8e6,
                 install_spread="rig", install_days=4, lead_time_months=24, rating_psi=15000, weight_te=60,
-                uncertainty=(0.9, 1.0, 1.4)),
+                uncertainty=(0.9, 1.0, 1.4), symbol="xt", footprint_l_m=5, footprint_w_m=5),
     # structures
     CatalogItem("tmpl_4slot", "4-slot template + protection", "template", procurement_usd=12e6,
                 fabrication_usd=8e6, install_spread="hlv", install_days=4, lead_time_months=18,
-                slots=4, weight_te=400),
+                slots=4, weight_te=400, symbol="template", footprint_l_m=32, footprint_w_m=22),
     CatalogItem("tmpl_6slot", "6-slot template + protection", "template", procurement_usd=16e6,
                 fabrication_usd=11e6, install_spread="hlv", install_days=5, lead_time_months=20,
-                slots=6, weight_te=600),
+                slots=6, weight_te=600, symbol="template", footprint_l_m=42, footprint_w_m=24),
     CatalogItem("mfld_4slot", "4-slot production manifold", "manifold", procurement_usd=14e6,
                 fabrication_usd=5e6, install_spread="hlv", install_days=3, lead_time_months=18,
-                slots=4, weight_te=250),
+                slots=4, weight_te=250, symbol="manifold", footprint_l_m=20, footprint_w_m=14),
     CatalogItem("plet_std", "PLET (single hub)", "plet", procurement_usd=2.0e6, fabrication_usd=1.0e6,
-                install_spread="plv", install_days=1, lead_time_months=12, weight_te=30),
+                install_spread="plv", install_days=1, lead_time_months=12, weight_te=30,
+                symbol="plet", footprint_l_m=12, footprint_w_m=6),
     CatalogItem("plem_std", "PLEM (multi hub)", "plem", procurement_usd=4.0e6, fabrication_usd=2.0e6,
-                install_spread="csv", install_days=2, lead_time_months=14, weight_te=80),
+                install_spread="csv", install_days=2, lead_time_months=14, weight_te=80,
+                symbol="plet", footprint_l_m=16, footprint_w_m=10),
     CatalogItem("ilt_std", "In-line tee", "ilt", procurement_usd=2.5e6, fabrication_usd=1.0e6,
-                install_spread="plv", install_days=1, lead_time_months=12, weight_te=25),
+                install_spread="plv", install_days=1, lead_time_months=12, weight_te=25, symbol="ilt"),
     CatalogItem("ssiv_std", "Subsea isolation valve", "ssiv", procurement_usd=6.0e6, fabrication_usd=1.5e6,
-                install_spread="csv", install_days=2, lead_time_months=16, weight_te=60),
+                install_spread="csv", install_days=2, lead_time_months=16, weight_te=60, symbol="ssiv"),
     CatalogItem("mpp_2x", "Multiphase boosting station (2 pumps)", "boosting", procurement_usd=90e6,
                 fabrication_usd=25e6, install_spread="hlv", install_days=6, lead_time_months=30,
-                weight_te=350, uncertainty=(0.9, 1.0, 1.5)),
+                weight_te=350, uncertainty=(0.9, 1.0, 1.5), symbol="pump",
+                footprint_l_m=24, footprint_w_m=16),
     CatalogItem("comp_station", "Subsea compression station", "compression", procurement_usd=450e6,
                 fabrication_usd=150e6, install_spread="hlv", install_days=15, lead_time_months=42,
-                weight_te=1500, uncertainty=(0.85, 1.0, 1.6)),
+                weight_te=1500, uncertainty=(0.85, 1.0, 1.6), symbol="pump",
+                footprint_l_m=60, footprint_w_m=30),
     CatalogItem("sep_station", "Subsea separation + water reinjection", "separation", procurement_usd=180e6,
                 fabrication_usd=70e6, install_spread="hlv", install_days=10, lead_time_months=36,
-                weight_te=900, uncertainty=(0.85, 1.0, 1.6)),
+                weight_te=900, uncertainty=(0.85, 1.0, 1.6), symbol="pump",
+                footprint_l_m=45, footprint_w_m=25),
     CatalogItem("riser_base", "Riser base", "riser_base", procurement_usd=3.0e6, fabrication_usd=2.0e6,
-                install_spread="csv", install_days=2, lead_time_months=14, weight_te=120),
+                install_spread="csv", install_days=2, lead_time_months=14, weight_te=120, symbol="riser_base",
+                footprint_l_m=14, footprint_w_m=14),
     CatalogItem("host_tiein", "Host tie-in modification (topsides)", "host", procurement_usd=25e6,
                 fabrication_usd=15e6, engineering_frac=0.20, install_spread="host", install_days=60,
                 lead_time_months=24, weight_te=300, uncertainty=(0.9, 1.0, 1.6),
-                notes="Receiving facilities, pig receiver, control/HPU, chemical injection"),
+                notes="Receiving facilities, pig receiver, control/HPU, chemical injection",
+                symbol="jacket", footprint_l_m=60, footprint_w_m=45),
+    CatalogItem("host_semi", "Host tie-in — semi-submersible", "host", procurement_usd=30e6,
+                fabrication_usd=18e6, engineering_frac=0.20, install_spread="host", install_days=70,
+                lead_time_months=26, weight_te=350, uncertainty=(0.9, 1.0, 1.6), symbol="semisub",
+                footprint_l_m=110, footprint_w_m=80,
+                notes="Floater tie-in: riser porch/pull-in, receiving facilities, utilities"),
+    CatalogItem("host_fpso", "Host tie-in — FPSO", "host", procurement_usd=35e6, fabrication_usd=20e6,
+                engineering_frac=0.22, install_spread="host", install_days=80, lead_time_months=28,
+                weight_te=400, uncertainty=(0.9, 1.0, 1.7), symbol="fpso", footprint_l_m=280,
+                footprint_w_m=50, notes="Turret/swivel slot, riser pull-in, topsides tie-in"),
     # linear
     CatalogItem("fl_rigid_cs", "Rigid CS flowline (coated)", "flowline", cost_basis="per_inch_m",
                 procurement_usd=95, fabrication_usd=45, install_spread="plv", install_days=0.35,
-                lead_time_months=12, min_diameter_in=4, max_diameter_in=20, weight_te=90),
+                lead_time_months=12, min_diameter_in=4, max_diameter_in=20, weight_te=90, line_color="#00243D", line_dash="", wall_thickness_in=0.75, insulation_mm=0.0, coating_mm=45.0),
     CatalogItem("fl_rigid_cra", "Rigid CRA-lined flowline", "flowline", cost_basis="per_inch_m",
                 procurement_usd=260, fabrication_usd=70, install_spread="plv", install_days=0.4,
-                lead_time_months=16, min_diameter_in=4, max_diameter_in=16, weight_te=95),
+                lead_time_months=16, min_diameter_in=4, max_diameter_in=16, weight_te=95, line_color="#004B6B", line_dash="", wall_thickness_in=0.75, insulation_mm=0.0, coating_mm=45.0),
     CatalogItem("fl_pip", "Pipe-in-pipe insulated flowline", "flowline", cost_basis="per_inch_m",
                 procurement_usd=240, fabrication_usd=110, install_spread="plv", install_days=0.5,
-                lead_time_months=16, min_diameter_in=6, max_diameter_in=14, weight_te=160),
+                lead_time_months=16, min_diameter_in=6, max_diameter_in=14, weight_te=160, line_color="#0F7A8A", line_dash="", wall_thickness_in=0.63, insulation_mm=50.0, coating_mm=6.0),
     CatalogItem("fl_deh", "DEH heated rigid flowline", "flowline", cost_basis="per_inch_m",
                 procurement_usd=220, fabrication_usd=90, install_spread="plv", install_days=0.5,
                 lead_time_months=18, min_diameter_in=6, max_diameter_in=14, weight_te=110,
-                notes="Includes piggyback cable; topside power supply costed separately"),
+                notes="Includes piggyback cable; topside power supply costed separately", line_color="#C4561B", line_dash="", wall_thickness_in=0.75, insulation_mm=50.0, coating_mm=6.0),
     CatalogItem("fl_flex", "Flexible flowline", "flowline", cost_basis="per_inch_m",
                 procurement_usd=210, fabrication_usd=0, install_spread="csv", install_days=0.3,
                 lead_time_months=14, min_diameter_in=2, max_diameter_in=16, weight_te=70,
-                rating_psi=7500),
+                rating_psi=7500, line_color="#3E8A91", line_dash="", wall_thickness_in=0.0, insulation_mm=25.0, coating_mm=8.0),
     CatalogItem("umb_static", "Static steel-tube umbilical", "umbilical", cost_basis="per_m",
                 procurement_usd=900, fabrication_usd=0, install_spread="ulv", install_days=0.25,
-                lead_time_months=18, weight_te=25),
+                lead_time_months=18, weight_te=25, line_color="#E9A23B", line_dash="8 6"),
     CatalogItem("umb_dynamic", "Dynamic umbilical", "umbilical", cost_basis="per_m",
                 procurement_usd=2500, fabrication_usd=0, install_spread="ulv", install_days=0.5,
-                lead_time_months=20, weight_te=30),
+                lead_time_months=20, weight_te=30, line_color="#C98A1F", line_dash="8 6"),
     CatalogItem("jumper_rigid", "Rigid spool/jumper", "jumper", cost_basis="unit",
                 procurement_usd=0.8e6, fabrication_usd=0.7e6, install_spread="csv", install_days=1.5,
                 lead_time_months=6, weight_te=15,
-                notes="Fabricated after metrology; lead time from metrology"),
+                notes="Fabricated after metrology; lead time from metrology", wall_thickness_in=0.63, insulation_mm=0.0, coating_mm=6.0),
     CatalogItem("riser_flex", "Flexible dynamic riser", "riser", cost_basis="per_inch_m",
                 procurement_usd=420, fabrication_usd=0, install_spread="csv", install_days=2.0,
-                lead_time_months=18, min_diameter_in=4, max_diameter_in=16, weight_te=120),
+                lead_time_months=18, min_diameter_in=4, max_diameter_in=16, weight_te=120, line_color="#7D4EBF", line_dash="", wall_thickness_in=0.0, insulation_mm=30.0, coating_mm=8.0),
+    CatalogItem("umb_power", "Electro-hydraulic umbilical with power cores", "umbilical",
+                cost_basis="per_m", procurement_usd=1500, install_spread="ulv", install_days=0.3,
+                lead_time_months=22, weight_te=32, line_color="#B3801A", line_dash="8 6",
+                notes="Control, chemical and LV/MV power in one umbilical"),
+    CatalogItem("chem_line", "Chemical injection line (MEG/methanol)", "utility_line", cost_basis="per_m",
+                procurement_usd=260, install_spread="ulv", install_days=0.2, lead_time_months=14,
+                weight_te=12, rating_psi=10000, line_color="#9DBA00", line_dash="4 4",
+                notes="Stand-alone bulk chemical line; often piggybacked on the flowline"),
+    CatalogItem("gaslift_line", "Gas lift line", "utility_line", cost_basis="per_inch_m",
+                procurement_usd=95, fabrication_usd=45, install_spread="plv", install_days=0.35,
+                lead_time_months=12, min_diameter_in=3, max_diameter_in=10, weight_te=70,
+                line_color="#5B8FB9", line_dash="10 4", wall_thickness_in=0.5, insulation_mm=0.0, coating_mm=40.0),
+    CatalogItem("winj_line", "Water injection flowline", "utility_line", cost_basis="per_inch_m",
+                procurement_usd=90, fabrication_usd=42, install_spread="plv", install_days=0.35,
+                lead_time_months=12, min_diameter_in=4, max_diameter_in=16, weight_te=80,
+                line_color="#2E86AB", line_dash="", wall_thickness_in=0.5, insulation_mm=0.0, coating_mm=40.0),
+    CatalogItem("service_line", "Hydraulic/service line", "utility_line", cost_basis="per_m",
+                procurement_usd=180, install_spread="ulv", install_days=0.2, lead_time_months=12,
+                weight_te=8, line_color="#8C6D1F", line_dash="3 5"),
+    CatalogItem("fibre_cable", "Fibre-optic cable", "utility_line", cost_basis="per_m",
+                procurement_usd=120, install_spread="ulv", install_days=0.2, lead_time_months=12,
+                weight_te=5, line_color="#6F6F6F", line_dash="1 5"),
     CatalogItem("pwr_cable", "Subsea power cable (HV)", "power_cable", cost_basis="per_m",
                 procurement_usd=1600, fabrication_usd=0, install_spread="ulv", install_days=0.3,
-                lead_time_months=24, weight_te=40),
+                lead_time_months=24, weight_te=40, line_color="#C4561B", line_dash="2 6"),
 ]
 
 
