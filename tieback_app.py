@@ -41,7 +41,7 @@ import tb_schedule
 import tb_tiein
 import tb_well
 
-APP_VERSION = "0.9.0"
+APP_VERSION = "0.9.1"
 HERE = Path(__file__).parent
 DEMO_FILE = HERE / "test_fixtures" / "demo_field_a_tieback.yaml"
 
@@ -99,14 +99,27 @@ def bump():
     st.session_state.rev += 1
 
 
+def empty_project():
+    return ("New tie-back", tb_network.Layout(tb_catalog.Catalog()), tb_cost.CostSettings(),
+            tb_schedule.ScheduleSettings(), tb_fa.FASettings(), tb_map.DisplaySettings())
+
+
 def load_demo():
-    txt = DEMO_FILE.read_text() if DEMO_FILE.exists() else ""
-    if txt:
+    """The demo project, or an empty one if the file is missing or unreadable.
+
+    A broken demo file must never stop the app from starting — the reason is
+    reported in the sidebar diagnostics instead.
+    """
+    if not DEMO_FILE.exists():
+        st.session_state.demo_error = f"{DEMO_FILE} is not in the deployment"
+        return empty_project()
+    try:
+        txt = DEMO_FILE.read_text(encoding="utf-8-sig")
         _, lay, cs, ss, fas, disp = tb_project.project_from_yaml_full(txt)
-        return "Field A tie-back (demo)", lay, cs, ss, fas, disp
-    else:
-        lay, cs, ss = tb_network.Layout(tb_catalog.Catalog()), tb_cost.CostSettings(), tb_schedule.ScheduleSettings()
-        fas, disp = tb_fa.FASettings(), tb_map.DisplaySettings()
+    except Exception as exc:  # noqa: BLE001 — start anyway and explain
+        st.session_state.demo_error = f"{DEMO_FILE.name}: {exc}"
+        return empty_project()
+    st.session_state.demo_error = ""
     return "Field A tie-back (demo)", lay, cs, ss, fas, disp
 
 
@@ -195,7 +208,7 @@ with st.sidebar:
         if sig != S.last_upload:
             S.last_upload = sig
             try:
-                loaded = tb_project.project_from_yaml_full(data.decode("utf-8"))
+                loaded = tb_project.project_from_yaml_full(data.decode("utf-8-sig"))
             except Exception as exc:  # noqa: BLE001 — show any parse problem to the user
                 st.error(f"Could not open project: {exc}")
             else:
@@ -421,6 +434,36 @@ with st.sidebar:
                 bump()
                 S.fit_token += 1
                 st.rerun()
+
+    if S.get("demo_error"):
+        st.warning(f"Demo project not loaded — {S.demo_error}. The app started with an empty layout; "
+                   f"open a project, load a template, or fix the file in the repository.")
+    with st.expander("Diagnostics"):
+        import platform
+        rows = [("App version", APP_VERSION), ("Python", platform.python_version()),
+                ("Streamlit", st.__version__), ("App folder", str(HERE)),
+                ("Demo file", f"{DEMO_FILE.name}: "
+                              + (f"{DEMO_FILE.stat().st_size:,} bytes" if DEMO_FILE.exists() else "MISSING"))]
+        if DEMO_FILE.exists():
+            try:
+                first = DEMO_FILE.read_text(encoding="utf-8-sig").strip().splitlines()[0][:60]
+            except Exception as exc:  # noqa: BLE001
+                first = f"unreadable: {exc}"
+            rows.append(("Demo file first line", first))
+        tpl_n = len(list((HERE / "templates").glob("*.yaml"))) if (HERE / "templates").exists() else 0
+        rows.append(("Templates found", str(tpl_n)))
+        expected = {"tb_project": "project_from_yaml_full", "tb_map": "DisplaySettings",
+                    "tb_network": "place_at", "tb_flowassurance": "solve_coupled", "tb_tiein": "screen",
+                    "tb_basis": "design_basis", "tb_cases": "snapshot", "tb_report": "build_report"}
+        stale = []
+        for mod_name, attr in expected.items():
+            mod = globals().get(mod_name if mod_name != "tb_flowassurance" else "tb_fa")
+            target = mod if attr[0].isupper() or not hasattr(tb_network.Layout, attr) else tb_network.Layout
+            if mod is None or not (hasattr(mod, attr) or hasattr(tb_network.Layout, attr)):
+                stale.append(mod_name)
+        rows.append(("Module check", "all modules current" if not stale
+                     else f"older than the app: {', '.join(stale)} — re-upload those files"))
+        st.dataframe(pd.DataFrame(rows, columns=["Item", "Value"]), hide_index=True, **STRETCH)
 
     st.markdown('<div class="tb-foot">Screening tool for engineering concept work. Default cost rates are '
                 'indicative placeholders. Not affiliated with or endorsed by Equinor or Sodir. '
@@ -829,7 +872,7 @@ with tab_cat:
                 new_cat = tb_costio.catalog_from_csv(lib.getvalue(),
                                                      spreads_csv.getvalue() if spreads_csv else None)
             else:
-                new_cat = tb_catalog.Catalog.from_yaml(lib.getvalue().decode("utf-8"))
+                new_cat = tb_catalog.Catalog.from_yaml(lib.getvalue().decode("utf-8-sig"))
             _adopt_catalog(new_cat)
         except Exception as exc:  # noqa: BLE001
             st.error(f"Catalog not loaded: {exc}")
@@ -1480,7 +1523,7 @@ with tab_cases:
         up_cases = cc[1].file_uploader("Load case set (.yaml)", type=["yaml", "yml"], key="cases_upload")
         if up_cases is not None and st.button("Add cases from file"):
             try:
-                loaded = tb_cases.caseset_from_yaml(up_cases.getvalue().decode("utf-8"))
+                loaded = tb_cases.caseset_from_yaml(up_cases.getvalue().decode("utf-8-sig"))
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Case set not loaded: {exc}")
             else:

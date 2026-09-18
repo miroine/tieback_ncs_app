@@ -84,16 +84,30 @@ def project_from_yaml(text: str):
 
 
 def project_from_yaml_full(text: str):
-    """Returns (name, layout, cost_settings, schedule_settings, fa_settings, display_settings)."""
-    doc = yaml.safe_load(text)
+    """Returns (name, layout, cost_settings, schedule_settings, fa_settings, display_settings).
+
+    Accepts a project file, a bare layout file, and files whose `schema` line has
+    been lost in editing — the shape of the document is used as a fallback.
+    """
+    try:
+        doc = yaml.safe_load(text.lstrip("\ufeff \t\r\n") if isinstance(text, str) else text)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"file is not valid YAML: {str(exc).splitlines()[0]}") from None
     if not isinstance(doc, dict):
-        raise ValueError("not a project file")
-    if doc.get("schema") == "tieback_layout/1":          # bare layout file → default catalog
+        head = (text or "").strip().splitlines()[:1]
+        raise ValueError("not a TieBack Studio project or layout file"
+                         + (f" — it starts with: {head[0][:60]!r}" if head else " — the file is empty"))
+    schema = doc.get("schema")
+    looks_like_layout = schema == "tieback_layout/1" or ("nodes" in doc and "edges" in doc and "layout" not in doc)
+    looks_like_project = schema == SCHEMA or ("layout" in doc and "catalog" in doc)
+    if looks_like_layout and not looks_like_project:     # bare layout file → default catalog
         cat = Catalog()
-        return ("Imported layout", Layout.from_dict(doc, cat), CostSettings(), ScheduleSettings(),
-                fa.FASettings(), tb_map.DisplaySettings())
-    if doc.get("schema") != SCHEMA:
-        raise ValueError(f"unsupported project schema '{doc.get('schema')}'")
+        return ("Imported layout", Layout.from_dict({**doc, "schema": "tieback_layout/1"}, cat),
+                CostSettings(), ScheduleSettings(), fa.FASettings(), tb_map.DisplaySettings())
+    if not looks_like_project:
+        raise ValueError(f"unsupported schema '{schema}' — top-level keys are "
+                         f"{sorted(doc)[:8]}; expected a project or a layout file")
+    doc = {**doc, "schema": SCHEMA}
     cat = Catalog.from_dict(doc["catalog"])
     layout = Layout.from_dict(doc["layout"], cat)
     return (doc.get("name", "Untitled"), layout, cost_settings_from_dict(doc.get("cost_settings")),

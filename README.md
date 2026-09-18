@@ -100,6 +100,17 @@ builds the chosen tie-back (host, riser base, PLETs, riser, flowline, umbilical)
 If an NCS layer comes back empty the app now says so: a layout near the median line often has no
 Norwegian facility inside the default 40 km radius.
 
+## If the app fails to start
+The sidebar has a **Diagnostics** panel: app version, Python and Streamlit versions, whether the demo
+file is present and what its first line is, how many templates were found, and whether any module is
+older than the app. A demo file that cannot be parsed no longer stops start-up — the app opens with an
+empty layout and explains why. Project, layout, catalog and case-set files load even if the `schema:`
+line has been lost, if the file has a byte-order mark, or if it uses Windows line endings.
+
+When deploying to Streamlit Community Cloud, upload the whole folder — `test_fixtures/`, `templates/`,
+`library/` and `tb_map_component/` included — and make sure `requirements.txt` is the current one
+(openpyxl, python-docx and matplotlib were added in v0.7).
+
 ## Tests
 `python run_tests.py` (needs `scipy` for reference integrals and Node ≥ 18 for the JS suites)
 

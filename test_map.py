@@ -200,4 +200,30 @@ def project_rt():
 S.check("project bundle round-trip (catalog override, settings, estimate identical)", project_rt)
 S.check("bare layout YAML loads as project", lambda: p.project_from_yaml(open("test_fixtures/demo_field_a_tieback.yaml").read())[1].nodes["W1"].sitp_psi == 4500)
 S.raises("wrong schema raises", ValueError, lambda: p.project_from_yaml("schema: other\n"))
+def tolerant_loader():
+    txt = open("test_fixtures/demo_field_a_tieback.yaml").read()
+    no_schema = "\n".join(l for l in txt.splitlines() if not l.startswith("schema:"))
+    assert len(p.project_from_yaml_full(no_schema)[1].nodes) == 9      # recognised by its shape
+    assert len(p.project_from_yaml_full("\ufeff" + txt)[1].nodes) == 9  # byte-order mark
+    assert len(p.project_from_yaml_full(txt.replace("\n", "\r\n"))[1].nodes) == 9   # Windows line endings
+S.check("layout file still loads without its schema line, with a BOM or CRLF", tolerant_loader)
+def helpful_errors():
+    for text, fragment in (("<!DOCTYPE html>", "starts with"),
+                           ("version https://git-lfs.github.com/spec/v1\noid sha256:ab\n", "git-lfs"),
+                           ("", "file is empty"),
+                           ("a: [1,\n", "not valid YAML"),
+                           ("schema: other\nfoo: 1\n", "top-level keys")):
+        try:
+            p.project_from_yaml_full(text)
+            raise AssertionError(f"should have failed: {text[:20]}")
+        except ValueError as exc:
+            assert fragment in str(exc), (text[:20], str(exc))
+S.check("unreadable files explain what was found instead", helpful_errors)
+def project_without_schema_line():
+    lay = demo()
+    txt = p.project_to_yaml("X", lay, k.CostSettings(), s.ScheduleSettings())
+    stripped = "\n".join(l for l in txt.splitlines() if not l.startswith("schema:"))
+    name, lay2, _, _, _, _ = p.project_from_yaml_full(stripped)
+    assert lay2.quantities() == lay.quantities()
+S.check("project file recognised by its shape when the schema line is gone", project_without_schema_line)
 sys.exit(0 if S.report() else 1)
