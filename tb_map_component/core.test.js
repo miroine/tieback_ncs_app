@@ -119,6 +119,28 @@ check("rasterBbox with nothing to frame returns null", () => {
   return C.rasterBbox([]) === null && C.rasterBbox(undefined) === null && C.rasterBbox([{}]) === null;
 });
 
+check("host symbols read as platforms, not boxes", () => {
+  const jacket = C.nodeSvg("jacket", "", false, 1).html;
+  const semi = C.nodeSvg("semisub", "", false, 1).html;
+  const fpso = C.nodeSvg("fpso", "", false, 1).html;
+  // jacket: deck, modules, four legs and a helideck with an H
+  const legs = (jacket.match(/<circle/g) || []).length;
+  const hBars = (jacket.match(/<line/g) || []).length;
+  return legs >= 5 && hBars >= 3
+    // semi-sub: two pontoons + deck box, four columns
+    && (semi.match(/<rect/g) || []).length >= 5 && (semi.match(/<circle/g) || []).length >= 5
+    // FPSO: a hull outline with a bow, plus turret
+    && fpso.indexOf("<path") >= 0 && fpso.indexOf("Q") >= 0 && (fpso.match(/<circle/g) || []).length >= 2;
+});
+check("deck markings are drawn in ink, not the white outline stroke", () => {
+  // an H drawn with the symbol's own white stroke is invisible on a white deck
+  return C.nodeSvg("jacket", "", false, 1).html.indexOf('stroke="#00243D"') >= 0
+    && C.nodeSvg("semisub", "", false, 1).html.indexOf('stroke="#00243D"') >= 0;
+});
+check("a host with no specific symbol still draws as a platform", () => {
+  return C.nodeSvg("host", "", false, 1).html === C.nodeSvg("jacket", "", false, 1).html;
+});
+
 console.log("core.test.js: " + pass + " passed, " + fail.length + " failed");
 fail.forEach((f) => console.log("  FAIL " + f));
 process.exit(fail.length ? 1 : 0);

@@ -297,6 +297,47 @@ check("with nothing drawn yet the map frames the imported grid", () => {
   return !!mapObj.fitted && mapObj.fitted[0][0] === 59.5 && mapObj.fitted[1][1] === 3.5;
 });
 
+check("a saved concept is drawn in its own pane, dashed, over the active routes", () => {
+  L._geo = [];
+  render({ payload, palette, rules, selected: null, height: 500, rev: "rconc1", fit_token: 0,
+    overlays: [{ type: "FeatureCollection", title: "Concept: B", color: "#7D4EBF", kind: "concept",
+      geometry: "line", dash: "6 5", weight: 3, point_radius: 5,
+      features: [{ type: "Feature", geometry: { type: "LineString", coordinates: [[2.6, 60.5], [2.7, 60.6]] },
+                   properties: { _fill: "#7D4EBF", _label: "FL1 — B" } },
+                 { type: "Feature", geometry: { type: "Point", coordinates: [2.6, 60.5] },
+                   properties: { _fill: "#7D4EBF", _label: "W1 — B" } }] }] });
+  const g = L._geo[L._geo.length - 1];
+  const st = g.o.style(g.fc.features[0]);
+  return g.o.pane === "concepts" && st.dashArray === "6 5" && st.weight === 3
+    && st.color === "#7D4EBF" && st.fillOpacity === 0;
+});
+check("an ordinary imported layer keeps the overlays pane and no dash", () => {
+  L._geo = [];
+  render({ payload, palette, rules, selected: null, height: 500, rev: "rconc2", fit_token: 0,
+    overlays: [{ type: "FeatureCollection", title: "Blocks", color: "#4A6B82", geometry: "polygon",
+      features: [{ type: "Feature", geometry: { type: "Polygon", coordinates: [[[2, 60], [2, 61], [3, 61], [2, 60]]] },
+                   properties: {} }] }] });
+  const g = L._geo[L._geo.length - 1];
+  const st = g.o.style(g.fc.features[0]);
+  return g.o.pane === "overlays" && !st.dashArray && st.weight === 1;
+});
+check("concept points are drawn bigger than ordinary layer points", () => {
+  let big = null, small = null;
+  L.circleMarker = (ll, o) => { big = o; return {}; };
+  render({ payload, palette, rules, selected: null, height: 500, rev: "rconc3", fit_token: 0,
+    overlays: [{ type: "FeatureCollection", title: "C", kind: "concept", point_radius: 5, features: [] }] });
+  const g1 = L._geo[L._geo.length - 1];
+  g1.o.pointToLayer({ properties: {} }, [60, 2]);
+  const concept = big;
+  render({ payload, palette, rules, selected: null, height: 500, rev: "rconc4", fit_token: 0,
+    overlays: [{ type: "FeatureCollection", title: "L", features: [] }] });
+  const g2 = L._geo[L._geo.length - 1];
+  g2.o.pointToLayer({ properties: {} }, [60, 2]);
+  small = big;
+  return concept.radius === 5 && concept.pane === "concepts"
+    && small.radius === 4 && small.pane === "overlays";
+});
+
 console.log("protocol.test.js: " + pass + " passed, " + fail.length + " failed");
 fail.forEach((f) => console.log("  FAIL " + f));
 process.exit(fail.length ? 1 : 0);

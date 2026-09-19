@@ -140,6 +140,10 @@
   map.createPane("rasters").style.zIndex = 300;   // imported grids: over the basemap, under vectors
   map.createPane("overlays").style.zIndex = 350;
   map.createPane("footprints").style.zIndex = 400;
+  // Saved concepts drawn for comparison: above the routes of the concept being
+  // edited (420 below) so they are not buried, below its equipment symbols (600)
+  // so the layout you are working on still reads as the primary one.
+  map.createPane("concepts").style.zIndex = 430;
   map.createPane("edges").style.zIndex = 420;
   map.createPane("vertices").style.zIndex = 640;
 
@@ -548,18 +552,21 @@
     (args.overlays || []).forEach((fc, i) => {
       const color = fc.color || "#4A6B82";
       const title = fc.title || ("Layer " + (i + 1));
+      const pane = fc.kind === "concept" ? "concepts" : "overlays";
+      const radius = fc.point_radius || 4;
       const g = L.geoJSON(fc, {
-        pane: "overlays",
+        pane: pane,
         style: (f) => {
           const p = (f && f.properties) || {};
           const fill = p._fill || color;
-          const st = { color: p._outline || "#828282", weight: fc.geometry === "line" ? 2 : 1,
+          const st = { color: p._outline || "#828282", weight: fc.weight || (fc.geometry === "line" ? 2 : 1),
                        fillColor: fill, fillOpacity: fc.geometry === "polygon" ? 0.55 : 0.12, opacity: 0.9 };
           if (fc.geometry === "line") { st.color = fill; st.fillOpacity = 0; }
+          if (fc.dash) st.dashArray = fc.dash;
           if (p._pattern) st.className = "hatch-" + p._pattern;      // CSS fill: url(#...)
           return st;
         },
-        pointToLayer: (f, latlng) => L.circleMarker(latlng, { pane: "overlays", radius: 4, color: "#fff", weight: 1,
+        pointToLayer: (f, latlng) => L.circleMarker(latlng, { pane: pane, radius: radius, color: "#fff", weight: 1.5,
           fillColor: ((f && f.properties) || {})._fill || color, fillOpacity: 0.95 }),
         onEachFeature: (f, lyr) => {
           const p = f.properties || {};

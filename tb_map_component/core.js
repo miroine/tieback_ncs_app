@@ -26,10 +26,10 @@
     compression: { color: "#C4561B", size: 30 },
     separation:  { color: "#8C6D1F", size: 30 },
     riser_base:  { color: "#6F6F6F", size: 18 },
-    jacket:      { color: "#EB0037", size: 30 },
-    semisub:     { color: "#EB0037", size: 32 },
-    fpso:        { color: "#EB0037", size: 34 },
-    host:        { color: "#EB0037", size: 30 },
+    jacket:      { color: "#EB0037", size: 34 },
+    semisub:     { color: "#EB0037", size: 36 },
+    fpso:        { color: "#EB0037", size: 38 },
+    host:        { color: "#EB0037", size: 34 },
   };
   const EDGE_STYLE = {
     flowline:     { color: "#00243D", dash: null,   base: 3 },
@@ -212,17 +212,65 @@
       '<circle cx="' + (c + z * 0.18) + '" cy="' + c + '" r="' + z * 0.17 + '" fill="#fff"/>';
     S.riser_base = '<rect x="' + p + '" y="' + p + '" width="' + z + '" height="' + z + '" rx="2"/>' +
       '<circle cx="' + c + '" cy="' + c + '" r="' + z * 0.22 + '" fill="#fff"/>';
-    S.jacket = '<rect x="' + p + '" y="' + p + '" width="' + z + '" height="' + z + '" rx="1"/>' +
-      '<g stroke="#fff" stroke-width="1.4" fill="none"><line x1="' + p + '" y1="' + p + '" x2="' + (W - p) + '" y2="' + (W - p) +
-      '"/><line x1="' + (W - p) + '" y1="' + p + '" x2="' + p + '" y2="' + (W - p) + '"/></g>';
-    S.semisub = '<rect x="' + p + '" y="' + (c - z * 0.34) + '" width="' + z + '" height="' + z * 0.68 + '" rx="2"/>' +
-      '<g fill="#fff"><rect x="' + (p + z * 0.12) + '" y="' + (c - z * 0.22) + '" width="' + z * 0.16 + '" height="' + z * 0.16 + '"/>' +
-      '<rect x="' + (p + z * 0.72) + '" y="' + (c - z * 0.22) + '" width="' + z * 0.16 + '" height="' + z * 0.16 + '"/>' +
-      '<rect x="' + (p + z * 0.12) + '" y="' + (c + z * 0.06) + '" width="' + z * 0.16 + '" height="' + z * 0.16 + '"/>' +
-      '<rect x="' + (p + z * 0.72) + '" y="' + (c + z * 0.06) + '" width="' + z * 0.16 + '" height="' + z * 0.16 + '"/></g>';
-    S.fpso = '<path d="M ' + p + ' ' + (c - z * 0.22) + ' L ' + (p + z * 0.72) + ' ' + (c - z * 0.22) + ' L ' + (W - p) + ' ' + c +
-      ' L ' + (p + z * 0.72) + ' ' + (c + z * 0.22) + ' L ' + p + ' ' + (c + z * 0.22) + ' Z"/>' +
-      '<circle cx="' + (p + z * 0.22) + '" cy="' + c + '" r="' + z * 0.1 + '" fill="#fff"/>';
+    // Markings that sit on a white deck need their own dark ink — inheriting the
+    // symbol's white stroke would make them invisible.
+    const ink = "#00243D";
+    // Fixed steel jacket in plan: deck outline, process modules, the four jacket
+    // legs as rings, and the helideck on the corner.
+    S.jacket = '<rect x="' + (p + z * 0.06) + '" y="' + (p + z * 0.1) + '" width="' + (z * 0.76) +
+      '" height="' + (z * 0.8) + '" rx="' + (z * 0.05) + '"/>' +
+      '<g fill="#fff">' +
+      '<rect x="' + (p + z * 0.14) + '" y="' + (p + z * 0.2) + '" width="' + (z * 0.26) + '" height="' + (z * 0.22) + '"/>' +
+      '<rect x="' + (p + z * 0.14) + '" y="' + (p + z * 0.5) + '" width="' + (z * 0.26) + '" height="' + (z * 0.22) + '"/>' +
+      '<rect x="' + (p + z * 0.48) + '" y="' + (p + z * 0.2) + '" width="' + (z * 0.22) + '" height="' + (z * 0.52) + '"/></g>' +
+      '<g fill="none" stroke="' + ink + '" stroke-width="' + Math.max(z * 0.045, 1) + '">' +
+      '<circle cx="' + (p + z * 0.17) + '" cy="' + (p + z * 0.21) + '" r="' + (z * 0.055) + '"/>' +
+      '<circle cx="' + (p + z * 0.71) + '" cy="' + (p + z * 0.21) + '" r="' + (z * 0.055) + '"/>' +
+      '<circle cx="' + (p + z * 0.17) + '" cy="' + (p + z * 0.79) + '" r="' + (z * 0.055) + '"/>' +
+      '<circle cx="' + (p + z * 0.71) + '" cy="' + (p + z * 0.79) + '" r="' + (z * 0.055) + '"/></g>' +
+      '<circle cx="' + (p + z * 0.84) + '" cy="' + (p + z * 0.74) + '" r="' + (z * 0.16) + '" fill="#fff" stroke="' + ink +
+      '" stroke-width="' + Math.max(z * 0.035, 0.9) + '"/>' +
+      '<g stroke="' + ink + '" stroke-width="' + Math.max(z * 0.045, 1) + '" stroke-linecap="round">' +
+      '<line x1="' + (p + z * 0.79) + '" y1="' + (p + z * 0.68) + '" x2="' + (p + z * 0.79) + '" y2="' + (p + z * 0.8) + '"/>' +
+      '<line x1="' + (p + z * 0.89) + '" y1="' + (p + z * 0.68) + '" x2="' + (p + z * 0.89) + '" y2="' + (p + z * 0.8) + '"/>' +
+      '<line x1="' + (p + z * 0.79) + '" y1="' + (p + z * 0.74) + '" x2="' + (p + z * 0.89) + '" y2="' + (p + z * 0.74) + '"/></g>';
+    // Semi-submersible in plan: two pontoons, four columns showing through the
+    // deck box, process modules and the helideck forward.
+    {
+      const pw = z * 0.16, py1 = p + z * 0.05, py2 = p + z * 0.79;
+      let cols = "";
+      [[0.26, 0.13], [0.72, 0.13], [0.26, 0.87], [0.72, 0.87]].forEach(function (o) {
+        cols += '<circle cx="' + (p + o[0] * z) + '" cy="' + (p + o[1] * z) + '" r="' + (z * 0.1) +
+          '" fill="#fff" stroke="' + ink + '" stroke-width="' + Math.max(z * 0.035, 0.9) + '"/>';
+      });
+      S.semisub = '<rect x="' + (p + z * 0.08) + '" y="' + py1 + '" width="' + (z * 0.84) + '" height="' + pw + '" rx="' + (pw / 2) + '"/>' +
+        '<rect x="' + (p + z * 0.08) + '" y="' + py2 + '" width="' + (z * 0.84) + '" height="' + pw + '" rx="' + (pw / 2) + '"/>' +
+        '<rect x="' + (p + z * 0.14) + '" y="' + (p + z * 0.28) + '" width="' + (z * 0.72) + '" height="' + (z * 0.44) + '" rx="' + (z * 0.04) + '"/>' +
+        cols +
+        '<g fill="#fff"><rect x="' + (p + z * 0.2) + '" y="' + (p + z * 0.35) + '" width="' + (z * 0.16) + '" height="' + (z * 0.3) + '"/>' +
+        '<rect x="' + (p + z * 0.4) + '" y="' + (p + z * 0.35) + '" width="' + (z * 0.12) + '" height="' + (z * 0.3) + '"/></g>' +
+        '<circle cx="' + (p + z * 0.71) + '" cy="' + c + '" r="' + (z * 0.13) + '" fill="#fff" stroke="' + ink +
+        '" stroke-width="' + Math.max(z * 0.035, 0.9) + '"/>' +
+        '<g stroke="' + ink + '" stroke-width="' + Math.max(z * 0.04, 1) + '" stroke-linecap="round">' +
+        '<line x1="' + (p + z * 0.666) + '" y1="' + (c - z * 0.055) + '" x2="' + (p + z * 0.666) + '" y2="' + (c + z * 0.055) + '"/>' +
+        '<line x1="' + (p + z * 0.754) + '" y1="' + (c - z * 0.055) + '" x2="' + (p + z * 0.754) + '" y2="' + (c + z * 0.055) + '"/>' +
+        '<line x1="' + (p + z * 0.666) + '" y1="' + c + '" x2="' + (p + z * 0.754) + '" y2="' + c + '"/></g>';
+    }
+    // FPSO in plan: hull with the bow to the right, turret and helideck forward,
+    // process modules across the deck, flare stack aft.
+    S.fpso = '<path d="M ' + (p + z * 0.02) + ' ' + (c - z * 0.21) + ' L ' + (p + z * 0.6) + ' ' + (c - z * 0.21) +
+      ' Q ' + (W - p) + ' ' + c + ' ' + (p + z * 0.6) + ' ' + (c + z * 0.21) + ' L ' + (p + z * 0.02) + ' ' + (c + z * 0.21) + ' Z"/>' +
+      '<g fill="#fff">' +
+      '<rect x="' + (p + z * 0.22) + '" y="' + (c - z * 0.155) + '" width="' + (z * 0.075) + '" height="' + (z * 0.31) + '"/>' +
+      '<rect x="' + (p + z * 0.33) + '" y="' + (c - z * 0.155) + '" width="' + (z * 0.075) + '" height="' + (z * 0.31) + '"/>' +
+      '<rect x="' + (p + z * 0.44) + '" y="' + (c - z * 0.155) + '" width="' + (z * 0.075) + '" height="' + (z * 0.31) + '"/></g>' +
+      '<circle cx="' + (p + z * 0.63) + '" cy="' + c + '" r="' + (z * 0.105) + '" fill="#fff" stroke="' + ink +
+      '" stroke-width="' + Math.max(z * 0.035, 0.9) + '"/>' +
+      '<circle cx="' + (p + z * 0.63) + '" cy="' + c + '" r="' + (z * 0.04) + '" fill="' + ink + '"/>' +
+      '<rect x="' + (p + z * 0.05) + '" y="' + (c - z * 0.115) + '" width="' + (z * 0.11) + '" height="' + (z * 0.23) + '" fill="#fff"/>' +
+      '<polygon fill="' + ink + '" points="' + (p + z * 0.105) + ',' + (c - z * 0.095) + ' ' +
+      (p + z * 0.135) + ',' + (c + z * 0.075) + ' ' + (p + z * 0.075) + ',' + (c + z * 0.075) + '"/>';
+    S.host = S.jacket;          // a host with no specific symbol is still a platform
     return S[symbol] || S.plet;
   }
 
