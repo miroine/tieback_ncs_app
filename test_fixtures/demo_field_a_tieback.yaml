@@ -1,0 +1,24 @@
+schema: tieback_layout/1
+# Fictional anonymised demo: "Field A" 4-well satellite tied back to "Host A".
+# Coordinates are illustrative only.
+settings: {datum: WGS84, route_allowance_frac: 0.03, end_allowance_m: 50.0}
+nodes:
+  - {node_id: HOST_A, item_id: host_tiein, lat: 60.600, lon: 2.500, label: Host A, water_depth_m: 140, phase: 1}
+  - {node_id: RB1, item_id: riser_base, lat: 60.5985, lon: 2.5020, label: Riser base, water_depth_m: 140, phase: 1}
+  - {node_id: PLET_H, item_id: plet_std, lat: 60.5975, lon: 2.5035, label: PLET host end, water_depth_m: 140, phase: 1}
+  - {node_id: PLET_T, item_id: plet_std, lat: 60.5020, lon: 2.6660, label: PLET template end, water_depth_m: 150, phase: 1}
+  - {node_id: TMPL_A, item_id: tmpl_4slot, lat: 60.5010, lon: 2.6680, label: Template A, water_depth_m: 150, phase: 1}
+  - {node_id: W1, item_id: xt_hxt_10k, lat: 60.5012, lon: 2.6676, label: A-1, sitp_psi: 4500, phase: 1}
+  - {node_id: W2, item_id: xt_hxt_10k, lat: 60.5012, lon: 2.6684, label: A-2, sitp_psi: 4500, phase: 1}
+  - {node_id: W3, item_id: xt_hxt_10k, lat: 60.5008, lon: 2.6676, label: A-3, sitp_psi: 4500, phase: 1}
+  - {node_id: W4, item_id: xt_hxt_10k, lat: 60.5008, lon: 2.6684, label: A-4, sitp_psi: 4500, phase: 1}
+edges:
+  - {edge_id: RISER1, item_id: riser_flex, from_node: RB1, to_node: HOST_A, diameter_in: 10, length_m: 350, phase: 1}
+  - {edge_id: J_RB, item_id: jumper_rigid, from_node: PLET_H, to_node: RB1, phase: 1}
+  - {edge_id: FL1, item_id: fl_rigid_cs, from_node: PLET_T, to_node: PLET_H, diameter_in: 10, route: [[60.55, 2.60]], phase: 1}
+  - {edge_id: J_T, item_id: jumper_rigid, from_node: TMPL_A, to_node: PLET_T, phase: 1}
+  - {edge_id: J_W1, item_id: jumper_rigid, from_node: W1, to_node: TMPL_A, phase: 1}
+  - {edge_id: J_W2, item_id: jumper_rigid, from_node: W2, to_node: TMPL_A, phase: 1}
+  - {edge_id: J_W3, item_id: jumper_rigid, from_node: W3, to_node: TMPL_A, phase: 1}
+  - {edge_id: J_W4, item_id: jumper_rigid, from_node: W4, to_node: TMPL_A, phase: 1}
+  - {edge_id: UMB1, item_id: umb_static, from_node: HOST_A, to_node: TMPL_A, route: [[60.55, 2.601]], phase: 1}

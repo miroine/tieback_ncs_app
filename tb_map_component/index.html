@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>TieBack Studio map</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<style>
+  :root {
+    --navy: #00243D; --torch: #EB0037; --karry: #FFE7D6; --pistachio: #9DBA00;
+    --slate: #243746; --mist: #EAF0F4; --line: #C3CDD5; --amber: #E9A23B;
+    --font: "Equinor", "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
+  }
+  html, body { margin: 0; padding: 0; height: 100%; font-family: var(--font); color: var(--navy); }
+  #wrap { position: relative; width: 100%; height: 620px; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  #map { position: absolute; inset: 0; background: #DCE6EC; }
+  #toolbar {
+    position: absolute; top: 10px; left: 56px; z-index: 1000; display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    background: rgba(255,255,255,0.96); border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; max-width: calc(100% - 180px);
+    box-shadow: 0 1px 3px rgba(0,36,61,0.18);
+  }
+  #toolbar .group { display: flex; gap: 4px; align-items: center; padding-right: 8px; border-right: 1px solid var(--line); }
+  #toolbar .group:last-child { border-right: 0; padding-right: 0; }
+  button.tool {
+    font: 500 13px var(--font); color: var(--navy); background: #fff; border: 1px solid var(--line);
+    border-radius: 3px; padding: 5px 9px; cursor: pointer; line-height: 1.1;
+  }
+  button.tool:hover { background: var(--mist); }
+  button.tool[aria-pressed="true"] { background: var(--navy); color: #fff; border-color: var(--navy); }
+  button.tool:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--torch); outline-offset: 1px; }
+  button.tool.danger { color: var(--torch); border-color: #F3B4C2; }
+  button.tool:disabled { opacity: 0.45; cursor: default; }
+  select, input[type=number] { font: 13px var(--font); color: var(--navy); border: 1px solid var(--line); border-radius: 3px; padding: 4px 5px; background: #fff; }
+  select { max-width: 210px; }
+  input[type=number] { width: 54px; }
+  label.small { font-size: 12px; color: var(--slate); }
+  #status {
+    position: absolute; left: 0; right: 0; bottom: 0; z-index: 1000; display: flex; justify-content: space-between; gap: 12px;
+    background: rgba(0,36,61,0.92); color: #fff; font-size: 12px; padding: 4px 10px;
+  }
+  #hint { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #coords { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #toast {
+    position: absolute; left: 50%; bottom: 34px; transform: translateX(-50%); z-index: 1100; display: none;
+    background: #fff; border-left: 4px solid var(--torch); color: var(--navy); font-size: 13px; padding: 7px 12px;
+    box-shadow: 0 2px 6px rgba(0,36,61,0.25); border-radius: 3px; max-width: 80%;
+  }
+  #toast.ok { border-left-color: var(--pistachio); }
+  .tb-node { background: transparent; border: 0; }
+  .hatch-oil_gas path, path.hatch-oil_gas { fill: url(#tb-oilgas) !important; }
+  .hatch-gas_condensate path, path.hatch-gas_condensate { fill: url(#tb-gascond) !important; }
+  .tb-node svg { display: block; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.35)); }
+  .tb-vertex { background: #fff; border: 2px solid var(--torch); border-radius: 50%; }
+  .tb-label { background: rgba(255,255,255,0.85); border: 0; box-shadow: none; color: var(--navy); font: 600 11px var(--font); padding: 0 3px; }
+  .tb-label::before { display: none; }
+  .leaflet-container.mode-add, .leaflet-container.mode-connect { cursor: crosshair; }
+  #empty { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; z-index: 900; pointer-events: none; }
+  #empty div { background: rgba(255,255,255,0.92); padding: 10px 14px; border-radius: 4px; font-size: 14px; }
+  @media (prefers-reduced-motion: reduce) { .leaflet-fade-anim .leaflet-tile, .leaflet-zoom-anim .leaflet-zoom-animated { transition: none !important; } }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <pattern id="tb-oilgas" patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(45)">
+    <rect width="8" height="8" fill="#0BBE00" fill-opacity="0.65"/><rect width="4" height="8" fill="#FF0000" fill-opacity="0.65"/>
+  </pattern>
+  <pattern id="tb-gascond" patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(45)">
+    <rect width="8" height="8" fill="#FF0000" fill-opacity="0.6"/><rect width="4" height="8" fill="#FFC000" fill-opacity="0.75"/>
+  </pattern>
+</defs></svg>
+<div id="wrap">
+  <div id="map" role="application" aria-label="Subsea layout map"></div>
+  <div id="toolbar" role="toolbar" aria-label="Layout tools">
+    <div class="group">
+      <button class="tool" data-mode="select" aria-pressed="true" title="Click to select (Esc)">Select</button>
+      <button class="tool" data-mode="move" aria-pressed="false" title="Drag equipment to reposition it">Move</button>
+      <label class="small" title="Wells and modules jumpered to a structure move with it"><input type="checkbox" id="grp" checked /> with wells</label>
+      <button class="tool" data-mode="route" aria-pressed="false" title="Edit the selected line: click line to add a bend, drag bends, right-click a bend to remove">Edit route</button>
+    </div>
+    <div class="group">
+      <button class="tool" data-mode="add" aria-pressed="false" title="Click the map to place equipment">Place</button>
+      <select id="nodeItem" aria-label="Equipment to place"></select>
+    </div>
+    <div class="group">
+      <button class="tool" data-mode="connect" aria-pressed="false" title="Click two items to connect them">Connect</button>
+      <select id="edgeItem" aria-label="Connection type"></select>
+      <label class="small" for="diam">ID in</label>
+      <input id="diam" type="number" min="0" max="48" step="0.5" value="10" />
+    </div>
+    <div class="group">
+      <label class="small" for="symScale" title="Equipment symbol size">Size</label>
+      <input id="symScale" type="range" min="0.4" max="3" step="0.1" value="1" style="width:74px" aria-label="Symbol size" />
+      <label class="small" for="lineScale" title="Line thickness">Lines</label>
+      <input id="lineScale" type="range" min="0.4" max="3" step="0.1" value="1" style="width:74px" aria-label="Line thickness" />
+    </div>
+    <div class="group">
+      <button class="tool" data-mode="pick" aria-pressed="false" title="Click the map to set the point a concept template is placed at">Pick point</button>
+      <button class="tool danger" id="btnDelete" disabled title="Delete selected (Del)">Delete</button>
+      <button class="tool" id="btnFit" title="Zoom to layout">Zoom to layout</button>
+    </div>
+  </div>
+  <div id="empty"><div>Choose equipment, press Place, then click the map.</div></div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <div id="status"><span id="hint">Loading map…</span><span id="selCount"></span><span id="coords"></span></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="./core.js"></script>
+<script>
+(function () {
+  "use strict";
+  const C = window.TBCore;
+
+  // ── Streamlit component protocol (v1, same messages as streamlit-component-lib) ──
+  function sendToStreamlit(type, data) {
+    window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data || {}), "*");
+  }
+  function setFrameHeight(h) { sendToStreamlit("streamlit:setFrameHeight", { height: h }); }
+  const nonce = C.makeNonce();
+  const nextEvent = C.eventFactory(nonce);
+
+  // ── state ──
+  let args = { payload: { nodes: [], edges: [] }, palette: { node_items: [], edge_items: [] }, rules: {}, overlays: [], rasters: [] };
+  let lastRev = null, lastFit = null, firstRender = true;
+  let mode = "select", selected = null, connectFrom = null;
+  let nodeMarkers = {}, edgeLines = {}, labelLayer = null, vertexLayer = null, offsets = {};
+  let dragStart = { lat: 0, lon: 0 }, dragGroup = [], pickMarker = null, multi = [];
+  let overlayGroups = {}, rasterLayers = {};
+
+  if (typeof L === "undefined") {
+    document.getElementById("hint").textContent = "Map library failed to load — check network access to cdnjs.cloudflare.com";
+    sendToStreamlit("streamlit:componentReady", { apiVersion: 1 });
+    return;
+  }
+
+  // maxZoom on the map, maxNativeZoom on each source: tiles are upscaled past their native
+  // level instead of capping how far you can zoom in (the Ocean base only has tiles to z13).
+  const map = L.map("map", { zoomControl: true, preferCanvas: false, doubleClickZoom: false, boxZoom: true,
+                             maxZoom: 19 }).setView([60.5, 3.0], 7);
+  map.createPane("bathymetry").style.zIndex = 250;
+  map.createPane("rasters").style.zIndex = 300;   // imported grids: over the basemap, under vectors
+  map.createPane("overlays").style.zIndex = 350;
+  map.createPane("footprints").style.zIndex = 400;
+  // Saved concepts drawn for comparison: above the routes of the concept being
+  // edited (420 below) so they are not buried, below its equipment symbols (600)
+  // so the layout you are working on still reads as the primary one.
+  map.createPane("concepts").style.zIndex = 430;
+  map.createPane("edges").style.zIndex = 420;
+  map.createPane("vertices").style.zIndex = 640;
+
+  const basemaps = {
+    "Ocean (Esri)": L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}",
+      { maxNativeZoom: 13, maxZoom: 19, attribution: "Tiles © Esri — GEBCO, NOAA, Garmin, HERE" }),
+    "OpenStreetMap": L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+      { maxNativeZoom: 19, maxZoom: 19, attribution: "© OpenStreetMap contributors" }),
+    "Satellite (Esri)": L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+      { maxNativeZoom: 18, maxZoom: 19, attribution: "Tiles © Esri" }),
+  };
+  basemaps["Ocean (Esri)"].addTo(map);
+  // EMODnet Bathymetry (DTM ~115 m grid, depths to LAT)
+  const bathy = {
+    "Bathymetry (EMODnet)": L.tileLayer.wms("https://ows.emodnet-bathymetry.eu/wms", {
+      layers: "mean_multicolour", format: "image/png", transparent: true, opacity: 0.65, pane: "bathymetry", maxZoom: 19,
+      attribution: "Bathymetry © EMODnet Bathymetry Consortium" }),
+    "Depth contours (EMODnet)": L.tileLayer.wms("https://ows.emodnet-bathymetry.eu/wms", {
+      layers: "contours", format: "image/png", transparent: true, opacity: 0.9, pane: "bathymetry", maxZoom: 19,
+      attribution: "Bathymetry © EMODnet Bathymetry Consortium" }),
+  };
+  const layerControl = L.control.layers(basemaps, bathy, { position: "topright", collapsed: true }).addTo(map);
+  L.control.scale({ metric: true, imperial: false, position: "bottomright" }).addTo(map);
+  const edgeGroup = L.layerGroup().addTo(map);
+  const nodeGroup = L.layerGroup().addTo(map);
+  const footprintGroup = L.layerGroup().addTo(map);
+  labelLayer = L.layerGroup().addTo(map);
+  vertexLayer = L.layerGroup().addTo(map);
+
+  // ── UI helpers ──
+  const $ = (id) => document.getElementById(id);
+  let toastTimer = null;
+  function toast(msg, ok) {
+    const t = $("toast");
+    t.textContent = msg; t.className = ok ? "ok" : ""; t.style.display = "block";
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.style.display = "none"; }, 3500);
+  }
+  function viewBox() {
+    const b = map.getBounds();
+    return [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
+  }
+  function emit(type, payload) {
+    sendToStreamlit("streamlit:setComponentValue", { value: nextEvent(type, payload, viewBox()), dataType: "json" });
+  }
+  const HINTS = {
+    select: "Click equipment to select it. Drag to move. Del removes the selection.",
+    move: "Drag any item to reposition it. A structure carries its jumpered wells unless you untick 'with wells'.",
+    pick: "Click the map to set the placement point for a concept template.",
+    route: "Select a line, then click it to add a bend. Drag bends to reshape; right-click a bend to remove it.",
+    add: "Click the map to place the chosen equipment.",
+    connect: "Click the first item, then the second, to connect them.",
+  };
+  function setMode(m) {
+    mode = m; connectFrom = null;
+    document.querySelectorAll("button[data-mode]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === m)));
+    const cont = map.getContainer();
+    cont.classList.remove("mode-add", "mode-connect");
+    if (m === "add") cont.classList.add("mode-add");
+    if (m === "connect" || m === "pick") cont.classList.add("mode-connect");
+    $("hint").textContent = HINTS[m];
+    const canDrag = (m === "select" || m === "move");
+    Object.values(nodeMarkers).forEach((mk) => { if (mk.dragging) { canDrag ? mk.dragging.enable() : mk.dragging.disable(); } });
+    drawVertices();
+    refreshSelectionStyles();
+  }
+  document.querySelectorAll("button[data-mode]").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode)));
+  $("btnFit").addEventListener("click", fitLayout);
+  $("btnDelete").addEventListener("click", deleteSelected);
+  $("edgeItem").addEventListener("change", syncDiameter);
+  ["symScale", "lineScale"].forEach((id) => {
+    $(id).addEventListener("input", () => { drawLayout(); });                 // instant, local
+    $(id).addEventListener("change", () => {                                  // persist on release
+      emit("display", { symbol_scale: Number($("symScale").value), line_scale: Number($("lineScale").value) });
+    });
+  });
+  document.addEventListener("keydown", (ev) => {
+    const tag = (ev.target.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "select") return;
+    if (ev.key === "Escape") { multi = []; setMode("select"); }
+    if ((ev.key === "Delete" || ev.key === "Backspace") && selected) { ev.preventDefault(); deleteSelected(); }
+  });
+  map.on("mousemove", (e) => { $("coords").textContent = e.latlng.lat.toFixed(5) + "°N  " + e.latlng.lng.toFixed(5) + "°E  (WGS84)"; });
+
+  function fillSelect(sel, items, keep) {
+    const prev = keep ? sel.value : null;
+    const groups = {};
+    items.forEach((it) => { (groups[it.kind] = groups[it.kind] || []).push(it); });
+    sel.innerHTML = "";
+    Object.keys(groups).forEach((k) => {
+      const og = document.createElement("optgroup");
+      og.label = k.replace("_", " ");
+      groups[k].forEach((it) => {
+        const o = document.createElement("option");
+        o.value = it.id; o.textContent = it.name; o.dataset.kind = it.kind;
+        o.dataset.min = it.min_d || 0; o.dataset.max = it.max_d || 0;
+        og.appendChild(o);
+      });
+      sel.appendChild(og);
+    });
+    if (prev && items.some((i) => i.id === prev)) sel.value = prev;
+  }
+  function syncDiameter() {
+    const o = $("edgeItem").selectedOptions[0];
+    if (!o) return;
+    const mx = Number(o.dataset.max), mn = Number(o.dataset.min), d = $("diam");
+    d.disabled = !(mx > 0);
+    if (mx > 0) { d.min = mn; d.max = mx; const v = Number(d.value); if (!(v >= mn && v <= mx)) d.value = Math.min(Math.max(10, mn), mx); }
+  }
+
+  // ── drawing ──
+  function displayOpts() {
+    const d = args.payload.display || {};
+    return { line_scale: Number($("lineScale").value) || 1,
+             thickness_by_diameter: d.thickness_by_diameter !== false };
+  }
+
+  function byId() { return C.nodesById(args.payload); }
+  function edgeById(id) { return (args.payload.edges || []).find((e) => e.id === id); }
+  function nodeById(id) { return (args.payload.nodes || []).find((n) => n.id === id); }
+
+  function nodeIcon(n) {
+    const svg = C.nodeSvg(n.symbol || n.kind, n.severity,
+                          n.id === selected || n.id === connectFrom || multi.indexOf(n.id) >= 0,
+                          Number($("symScale").value) || 1);
+    return L.divIcon({ className: "tb-node", html: svg.html, iconSize: [svg.size, svg.size], iconAnchor: [svg.size / 2, svg.size / 2] });
+  }
+
+  function tooltipFor(el, isEdge) {
+    const lines = ["<b>" + C.escapeHtml(el.label) + "</b>", C.escapeHtml(el.item)];
+    if (isEdge) {
+      if (el.diameter_in) lines.push(el.diameter_in + '" ID');
+      if (el.length_m) lines.push("Design length " + C.formatLength(el.length_m));
+    }
+    if (el.severity) lines.push('<span style="color:' + C.SEVERITY_COLOR[el.severity] + '">Check: ' + el.severity + "</span>");
+    return lines.join("<br>");
+  }
+
+  function drawLayout() {
+    edgeGroup.clearLayers(); nodeGroup.clearLayers(); labelLayer.clearLayers();
+    nodeMarkers = {}; edgeLines = {};
+    const ids = byId();
+    offsets = C.parallelOffsets(args.payload.edges, 60);
+    (args.payload.edges || []).forEach((e) => {
+      if (e.hidden) return;                 // filtered out by tag
+      const ll = C.edgeLatLngs(e, ids);
+      if (!ll) return;
+      const laid = (e.shape && e.shape.length >= 2) ? e.shape : ll;      // smoothed route from Python
+      const line = L.polyline(C.offsetLatLngs(laid, offsets[e.id]),
+        Object.assign({ pane: "edges", interactive: true }, C.edgeStyle(e, e.id === selected, displayOpts())));
+      line.bindTooltip(tooltipFor(e, true), { sticky: true });
+      line.on("click", (ev) => { L.DomEvent.stopPropagation(ev); onEdgeClick(e, ev); });
+      line.addTo(edgeGroup);
+      edgeLines[e.id] = line;
+    });
+    (args.payload.nodes || []).forEach((n) => {
+      if (n.hidden) return;                 // filtered out by tag
+      const mk = L.marker([n.lat, n.lon], { icon: nodeIcon(n), draggable: true, keyboard: true, title: n.label, riseOnHover: true });
+      mk.bindTooltip(tooltipFor(n, false), { direction: "top", offset: [0, -8] });
+      mk.on("click", (ev) => { L.DomEvent.stopPropagation(ev); onNodeClick(n, ev); });
+      mk.on("dragstart", () => {
+        dragStart = { lat: n.lat, lon: n.lon };
+        dragGroup = multi.indexOf(n.id) >= 0 && multi.length > 1
+          ? multi.filter((id) => id !== n.id)              // drag the whole selection
+          : groupFor(n.id);
+      });
+      mk.on("drag", () => {
+        const p = mk.getLatLng();
+        const dLat = p.lat - dragStart.lat, dLon = p.lng - dragStart.lon;
+        liveUpdateEdges(n.id, [p.lat, p.lng]);
+        dragGroup.forEach((gid) => {              // carry the jumpered wells along on screen
+          const src = nodeById(gid);
+          const gm = nodeMarkers[gid];
+          if (!src || !gm) return;
+          gm.setLatLng({ lat: src.lat + dLat, lng: src.lon + dLon });
+          liveUpdateEdges(gid, [src.lat + dLat, src.lon + dLon]);
+        });
+      });
+      mk.on("dragend", () => {
+        const p = mk.getLatLng();
+        const asSet = multi.indexOf(n.id) >= 0 && multi.length > 1;
+        const grouped = dragGroup.length > 0;
+        n.lat = p.lat; n.lon = p.lng;
+        if (asSet) emit("move_many", { ids: multi, anchor: n.id, lat: p.lat, lon: p.lng });
+        else emit(grouped ? "move_group" : "move_node", { id: n.id, lat: p.lat, lon: p.lng });
+        dragGroup = [];
+      });
+      mk.addTo(nodeGroup);                     // L.Marker.dragging only exists after onAdd
+      if (!(mode === "select" || mode === "move") && mk.dragging) mk.dragging.disable();
+      nodeMarkers[n.id] = mk;
+    });
+    $("empty").style.display = (args.payload.nodes || []).length ? "none" : "flex";
+    drawFootprints();
+    drawVertices();
+    updateDeleteButton();
+  }
+
+  /** True-scale plan footprints, drawn once the map is zoomed in far enough to see them. */
+  function drawFootprints() {
+    footprintGroup.clearLayers();
+    if (map.getZoom() < 13) return;
+    (args.payload.nodes || []).forEach((n) => {
+      const fp = n.footprint || [];
+      const mk = nodeMarkers[n.id];
+      const pos = mk ? [mk.getLatLng().lat, mk.getLatLng().lng] : [n.lat, n.lon];
+      const poly = C.footprintPolygon(pos[0], pos[1], fp[0], fp[1], n.heading || 0);
+      if (!poly) return;
+      L.polygon(poly, { pane: "footprints", color: "#FFFFFF", weight: 1, opacity: 0.9,
+                        fillColor: (C.NODE_STYLE[n.symbol || n.kind] || {}).color || "#243746",
+                        fillOpacity: 0.45, interactive: false }).addTo(footprintGroup);
+    });
+  }
+  map.on("zoomend", drawFootprints);
+
+  function liveUpdateEdges(nodeId, latlng) {
+    const ids = byId();
+    ids[nodeId] = Object.assign({}, ids[nodeId], { lat: latlng[0], lon: latlng[1] });
+    let msg = [];
+    (args.payload.edges || []).forEach((e) => {
+      if (e.source !== nodeId && e.target !== nodeId) return;
+      const ll = C.edgeLatLngs(e, ids);
+      if (ll && edgeLines[e.id]) {
+        edgeLines[e.id].setLatLngs(C.offsetLatLngs(ll, offsets[e.id]));
+        msg.push(e.label + " ≈ " + C.formatLength(C.polylineLength(ll)));
+      }
+    });
+    drawFootprints();
+    $("hint").textContent = msg.length ? "Geodesic (before allowance): " + msg.join(", ") : "Moving " + nodeId;
+  }
+
+  function drawVertices() {
+    vertexLayer.clearLayers();
+    if (mode !== "route" || !selected) return;
+    const e = edgeById(selected);
+    if (!e) return;
+    (e.route || []).forEach((v, idx) => {
+      const h = L.marker(v, { draggable: true, pane: "vertices",
+        icon: L.divIcon({ className: "tb-vertex", iconSize: [12, 12], iconAnchor: [6, 6] }), title: "Bend " + (idx + 1) });
+      h.on("drag", () => {
+        const p = h.getLatLng();
+        const r = C.moveVertex(e.route, idx, [p.lat, p.lng]);
+        const ll = C.edgeLatLngs(Object.assign({}, e, { route: r }), byId());
+        if (edgeLines[e.id]) edgeLines[e.id].setLatLngs(C.offsetLatLngs(ll, offsets[e.id]));
+        $("hint").textContent = e.label + " ≈ " + C.formatLength(C.polylineLength(ll)) + " geodesic";
+      });
+      h.on("dragend", () => {
+        const p = h.getLatLng();
+        e.route = C.moveVertex(e.route, idx, [p.lat, p.lng]);
+        emit("set_route", { id: e.id, route: e.route });
+      });
+      h.on("contextmenu", (ev) => {
+        L.DomEvent.preventDefault(ev);
+        e.route = C.removeVertex(e.route, idx);
+        emit("set_route", { id: e.id, route: e.route });
+        const ll = C.edgeLatLngs(e, byId());
+        if (edgeLines[e.id]) edgeLines[e.id].setLatLngs(C.offsetLatLngs(ll, offsets[e.id]));
+        drawVertices();
+      });
+      h.addTo(vertexLayer);
+    });
+  }
+
+  function refreshSelectionStyles() {
+    (args.payload.nodes || []).forEach((n) => { if (nodeMarkers[n.id]) nodeMarkers[n.id].setIcon(nodeIcon(n)); });
+    $("selCount").textContent = multi.length > 1 ? multi.length + " selected" : "";
+    (args.payload.edges || []).forEach((e) => { if (edgeLines[e.id]) edgeLines[e.id].setStyle(C.edgeStyle(e, e.id === selected, displayOpts())); });
+    updateDeleteButton();
+  }
+  function updateDeleteButton() { $("btnDelete").disabled = !selected; }
+
+  function select(id, notify) {
+    selected = id;
+    refreshSelectionStyles();
+    drawVertices();
+    if (notify) emit("select", { id: id });
+  }
+
+  function onNodeClick(n, ev) {
+    const add = ev && ev.originalEvent && (ev.originalEvent.shiftKey || ev.originalEvent.ctrlKey || ev.originalEvent.metaKey);
+    if ((mode === "select" || mode === "move") && add) {
+      const i = multi.indexOf(n.id);
+      if (i >= 0) multi.splice(i, 1);
+      else {
+        if (selected && multi.indexOf(selected) < 0) multi.push(selected);
+        multi.push(n.id);
+      }
+      refreshSelectionStyles();
+      $("hint").textContent = multi.length
+        ? multi.length + " items selected — drag any of them to move the set (Esc clears)"
+        : HINTS[mode];
+      return;
+    }
+    if (mode === "connect") {
+      const opt = $("edgeItem").selectedOptions[0];
+      if (!opt) { toast("No connection types in the catalog."); return; }
+      if (!connectFrom) {
+        connectFrom = n.id; refreshSelectionStyles();
+        $("hint").textContent = "Connecting from " + n.label + " — click the second item (Esc to cancel).";
+        return;
+      }
+      if (connectFrom === n.id) { connectFrom = null; refreshSelectionStyles(); return; }
+      const a = nodeById(connectFrom), kind = opt.dataset.kind;
+      if (!C.edgeAllowed(args.rules, kind, a.kind, n.kind)) {
+        toast("A " + kind.replace("_", " ") + " cannot connect " + a.kind.replace("_", " ") + " to " + n.kind.replace("_", " ") + ".");
+        return;
+      }
+      const d = $("diam").disabled ? 0 : Number($("diam").value);
+      emit("add_edge", { item_id: opt.value, source: connectFrom, target: n.id, diameter_in: d });
+      connectFrom = null;
+      $("hint").textContent = HINTS.connect;
+      return;
+    }
+    select(n.id, true);
+  }
+
+  function onEdgeClick(e, ev) {
+    if (mode === "route" && selected === e.id) {
+      const ll = C.edgeLatLngs(e, byId());
+      e.route = C.insertVertex(ll, e.route, [ev.latlng.lat, ev.latlng.lng]);
+      emit("set_route", { id: e.id, route: e.route });
+      edgeLines[e.id].setLatLngs(C.offsetLatLngs(C.edgeLatLngs(e, byId()), offsets[e.id]));
+      drawVertices();
+      return;
+    }
+    if (mode === "connect") return;
+    select(e.id, true);
+  }
+
+  function groupFor(id) {
+    if (!$("grp").checked) return [];
+    const n = nodeById(id);
+    if (!n || ["well", "host"].indexOf(n.kind) >= 0) return [];   // a well moves on its own
+    return C.jumperGroup(args.payload, id);
+  }
+
+  function showPick(lat, lon) {
+    if (pickMarker) map.removeLayer(pickMarker);
+    pickMarker = L.marker([lat, lon], { pane: "vertices", interactive: false,
+      icon: L.divIcon({ className: "tb-node", iconSize: [26, 26], iconAnchor: [13, 13],
+        html: '<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 26 26">'
+          + '<circle cx="13" cy="13" r="9" fill="none" stroke="#EB0037" stroke-width="2" stroke-dasharray="3 2"/>'
+          + '<line x1="13" y1="3" x2="13" y2="23" stroke="#EB0037" stroke-width="1.5"/>'
+          + '<line x1="3" y1="13" x2="23" y2="13" stroke="#EB0037" stroke-width="1.5"/></svg>' }) }).addTo(map);
+  }
+
+  function handleMapClick(ev) {
+    if (mode === "pick") {
+      showPick(ev.latlng.lat, ev.latlng.lng);
+      emit("pick", { lat: ev.latlng.lat, lon: ev.latlng.lng });
+      toast("Placement point set — load a template from the sidebar to drop it here.", true);
+      return;
+    }
+    if (mode === "add") {
+      const opt = $("nodeItem").selectedOptions[0];
+      if (!opt) { toast("No equipment in the catalog."); return; }
+      emit("add_node", { item_id: opt.value, lat: ev.latlng.lat, lon: ev.latlng.lng });
+      toast("Placed " + opt.textContent + " — updating layout…", true);
+      return;
+    }
+    if (mode === "connect") { connectFrom = null; refreshSelectionStyles(); $("hint").textContent = HINTS.connect; return; }
+    if (selected) select(null, true);
+  }
+  map.on("click", handleMapClick);
+
+  function deleteSelected() {
+    if (!selected) return;
+    const id = selected;
+    if (nodeMarkers[id]) nodeGroup.removeLayer(nodeMarkers[id]);
+    if (edgeLines[id]) edgeGroup.removeLayer(edgeLines[id]);
+    selected = null;
+    vertexLayer.clearLayers();
+    emit("delete", { id: id });
+    updateDeleteButton();
+  }
+
+  function fitLayout() {
+    let b = C.bboxOf(args.payload);
+    if (!b) b = C.rasterBbox(args.rasters);   // nothing drawn yet — frame the imported grid
+    if (!b) return;
+    if (b[0][0] === b[1][0] && b[0][1] === b[1][1]) map.setView(b[0], 12);
+    else map.fitBounds(b, { padding: [40, 40], maxZoom: 14 });
+  }
+
+  // Imported grids (.grd and friends) arrive already resampled onto a lon/lat
+  // raster, so a plain image overlay lands them in the right place.
+  function drawRasters() {
+    Object.values(rasterLayers).forEach((l) => { map.removeLayer(l); layerControl.removeLayer(l); });
+    rasterLayers = {};
+    (args.rasters || []).forEach((r, i) => {
+      if (!r || !r.url || !r.bounds) return;
+      const title = r.title || ("Grid " + (i + 1));
+      const lyr = L.imageOverlay(r.url, r.bounds, {
+        pane: "rasters",
+        opacity: typeof r.opacity === "number" ? r.opacity : 1,
+        interactive: false,
+        attribution: C.escapeHtml(title),
+      });
+      lyr.addTo(map);
+      layerControl.addOverlay(lyr, C.escapeHtml(title));
+      rasterLayers[title + "#" + i] = lyr;
+    });
+  }
+
+  function drawOverlays() {
+    Object.values(overlayGroups).forEach((g) => { map.removeLayer(g); layerControl.removeLayer(g); });
+    overlayGroups = {};
+    (args.overlays || []).forEach((fc, i) => {
+      const color = fc.color || "#4A6B82";
+      const title = fc.title || ("Layer " + (i + 1));
+      const pane = fc.kind === "concept" ? "concepts" : "overlays";
+      const radius = fc.point_radius || 4;
+      const g = L.geoJSON(fc, {
+        pane: pane,
+        style: (f) => {
+          const p = (f && f.properties) || {};
+          const fill = p._fill || color;
+          const st = { color: p._outline || "#828282", weight: fc.weight || (fc.geometry === "line" ? 2 : 1),
+                       fillColor: fill, fillOpacity: fc.geometry === "polygon" ? 0.55 : 0.12, opacity: 0.9 };
+          if (fc.geometry === "line") { st.color = fill; st.fillOpacity = 0; }
+          if (fc.dash) st.dashArray = fc.dash;
+          if (p._pattern) st.className = "hatch-" + p._pattern;      // CSS fill: url(#...)
+          return st;
+        },
+        pointToLayer: (f, latlng) => L.circleMarker(latlng, { pane: pane, radius: radius, color: "#fff", weight: 1.5,
+          fillColor: ((f && f.properties) || {})._fill || color, fillOpacity: 0.95 }),
+        onEachFeature: (f, lyr) => {
+          const p = f.properties || {};
+          const lab = p._label || p.name || p.NAME || "";
+          if (lab) lyr.bindTooltip(C.escapeHtml(lab) + '<br><span style="opacity:.7">' + C.escapeHtml(title) + "</span>", { sticky: true });
+          // a field or discovery polygon must not swallow the click: hand it to the map so
+          // equipment can still be placed, picked or deselected on top of a layer
+          lyr.on("click", (ev) => { L.DomEvent.stopPropagation(ev); handleMapClick(ev); });
+        },
+      });
+      g.addTo(map);
+      layerControl.addOverlay(g, C.escapeHtml(title) + (fc.truncated ? " (truncated)" : ""));
+      overlayGroups[title + "#" + i] = g;
+    });
+  }
+
+  // ── render loop ──
+  function onRender(data) {
+    const a = data.args || {};
+    const h = Number(a.height) || 620;
+    $("wrap").style.height = h + "px";
+    setFrameHeight(h + 2);
+    args = {
+      payload: a.payload || { nodes: [], edges: [] },
+      palette: a.palette || { node_items: [], edge_items: [] },
+      rules: a.rules || {},
+      overlays: a.overlays || [],
+      rasters: a.rasters || [],
+    };
+    const disp = args.payload.display || {};
+    if (disp.symbol_scale && !$("symScale").matches(":active")) $("symScale").value = disp.symbol_scale;
+    if (disp.line_scale && !$("lineScale").matches(":active")) $("lineScale").value = disp.line_scale;
+    fillSelect($("nodeItem"), args.palette.node_items, true);
+    fillSelect($("edgeItem"), args.palette.edge_items, true);
+    syncDiameter();
+    if (a.rev !== lastRev) {
+      if (a.selected !== undefined) selected = a.selected;
+      drawLayout();
+      drawRasters();
+      drawOverlays();
+      lastRev = a.rev;
+    }
+    map.invalidateSize();
+    if (firstRender || a.fit_token !== lastFit) { fitLayout(); lastFit = a.fit_token; }
+    if (firstRender) { setMode("select"); firstRender = false; }
+  }
+
+  window.addEventListener("message", (event) => {
+    if (event.data && event.data.type === "streamlit:render") onRender(event.data);
+  });
+  sendToStreamlit("streamlit:componentReady", { apiVersion: 1 });
+  setFrameHeight(622);
+})();
+</script>
+</body>
+</html>

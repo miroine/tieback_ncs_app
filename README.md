@@ -1,0 +1,225 @@
+# TieBack Studio
+
+Subsea tie-back concept design for the Norwegian Continental Shelf: drag-and-drop layout on a live
+NCS map, equipment catalog with editable costs, design checks, CAPEX with P10/P50/P90, a CPM
+schedule with weather windows, and steady-state flow assurance screening on the layout network.
+
+> Engineering screening tool. Default catalog rates are **indicative placeholders**, not benchmarked
+> data — load a project cost library for real work. Not affiliated with or endorsed by Equinor or Sodir.
+
+## Run
+```bash
+pip install -r requirements.txt
+streamlit run tieback_app.py
+```
+The map loads Leaflet from cdnjs.cloudflare.com and basemap tiles from Esri/OpenStreetMap; NCS layers
+come from Sodir FactMaps. All need internet access (Streamlit Community Cloud has it).
+
+## Using the map
+| Tool | Action |
+|---|---|
+| Select | Click to select. `Del` deletes, `Esc` returns to Select. |
+| Move | Drag equipment to reposition it. Shift-click (or Ctrl/Cmd-click) several items to move them as a set. A structure carries its jumpered wells and modules unless *with wells* is unticked. |
+| Size / Lines sliders | Scale equipment symbols and line thickness on the map; the setting is saved with the project. |
+| Pick point | Click the map to set a placement point: load a concept template there, move the whole layout to it, or send the selected item to it. |
+| Layer control (top right) | Basemap, EMODnet bathymetry and depth contours, plus any NCS or imported layer. |
+| Place | Choose equipment, then click the map. |
+| Connect | Choose a connection type (and ID), click the first item then the second. Invalid pairs are blocked. |
+| Edit route | Select a line, click it to add a bend, drag bends, right-click a bend to remove it. *Smooth the route* lays it as a curve through those bends. |
+
+Properties (label, coordinates in lat/lon or UTM, water depth, heading, SITP, HIPPS, phase, diameter,
+fixed length, route bends) are edited below the map; bulk edits in *All equipment*. Lines sharing the
+same two end points are drawn side by side, and *Copy route from* runs a new line (chemical, gas lift,
+fibre) along an existing corridor.
+
+Equipment carries free-text **tags**, set in its properties. The sidebar filters the map on them —
+*Show only* and *Hide* — so a phase, an option or a work package can be isolated without deleting
+anything. **Undo** and **Redo** sit above the map and cover map edits, form changes and bulk edits,
+25 steps deep.
+
+Wells are landed in a template or manifold through *Wells in template slots*, which records the slot and
+creates the integral slot tie-in rather than a fabricated spool; wells already jumpered to the structure
+are shown as in-slot. A well placed within 250 m of a structure with a free slot is landed automatically.
+Landed wells travel with the structure when it is dragged.
+
+With concepts saved as cases, the sidebar picks the **active concept** — cost, schedule, flow assurance,
+viability and the report all follow it, and edits are saved back when you switch away. Other concepts can
+be drawn on the map behind the active one for comparison.
+
+Appearance (sidebar) sets how lines are coloured — by equipment type, by fluid or service
+(multiphase, oil, gas, condensate, water injection, gas lift, chemical, control, power), by development
+phase, or by design-check severity — with a colour picker per fluid, symbol and line scaling, and an
+option to drop the bore-size term from line thickness. Each line's fluid is set in its property editor
+and defaults from its equipment type.
+
+Routes are either cornered (straight legs) or smoothed — a centripetal Catmull-Rom curve through the
+surveyed bends, which is what the line length, cost and flow assurance then use. Bends tighter than the
+minimum lay radius (sidebar, default 400 m) are flagged in the design checks; the radius is always
+measured on the laid curve.
+
+Equipment is drawn as plan-view symbols — XT, template with slots, manifold with header, PLET, SSIV,
+pump skid, jacket, semi-sub, FPSO — and at zoom 14 and closer each item also shows its true-scale
+footprint from the catalog, rotated by its heading.
+
+Utility lines can be strapped to a flowline or riser (*Strapped to (piggyback)* in the line editor):
+they follow the carrier's corridor, ride its lay campaign and add only a share of the lay time.
+
+Line types: production flowlines (CS, CRA, PiP, DEH, flexible), risers, jumpers, umbilicals (static,
+dynamic, with power cores), power cables, and utility lines — chemical injection, gas lift, water
+injection, hydraulic/service and fibre optic. Utility lines carry no production, so they are excluded
+from the production-path checks and the flow-assurance network but are costed and scheduled.
+
+## Structure
+| File | Scope |
+|---|---|
+| `tieback_app.py` | Streamlit UI only |
+| `tb_map.py`, `tb_map_component/` | Custom bi-directional Leaflet component (Streamlit v1 protocol, no npm build) and the Python event reducer |
+| `tb_tiein.py` | Tie-in screening: Sodir facilities or layout hosts as candidate hosts, distance and bearing, trial tie-back costed and solved, and one-click attach to the layout |
+| `tb_basis.py` | Design basis checklist in SI units (m, bar, °C, Sm³/d, tonn, MNOK) with entered / default / missing / to-resolve status |
+| `tb_viability.py` | Concept viability checklist: layout integrity, deliverability, hydrate margin at design rate and turndown, cool-down, erosion, slugging, spans, schedule float and cost spread, each with a target and what to do if it is not met |
+| `tb_cases.py` | Concept cases: snapshot a whole project, compare cases on cost, schedule and flow assurance, save/load case sets |
+| `tb_report.py` | DG2/DG3 screening report as a Word document with charts |
+| `tb_well.py` | Well IPR (PI, Vogel, gas back-pressure), tubing VLP via Beggs-Brill, and the operating point against network back-pressure |
+| `tb_costio.py` | Cost catalog import/export as Excel workbook or CSV pair |
+| `tb_bathymetry.py` | EMODnet Bathymetry: WMS layers, `depth_sample` for node depths, route profiles along each line, taut-string free-span screening |
+| `tb_ncs.py` | Sodir FactMaps client (fields 502, discoveries 503, facilities 304, pipelines 311, wellbores 204/205, facilities 304 in place / 307 all, discoveries 503 active / 504 all, licences 616, blocks 802, quadrants 803, structural elements 704), pagination past 1000 records, Esri-JSON fallback, layer re-discovery, and the service's own renderer so overlays match FactMaps symbology |
+| `tb_import.py` | GeoJSON, KML/KMZ, shapefile — zipped or as loose `.shp`/`.dbf`/`.prj` — CSV points; multi-file selections grouped by stem; ED50/WGS84 geographic + UTM; layout → GeoJSON |
+| `tb_grid.py` | Grid surfaces (`.grd` and friends): Surfer ASCII/6/7, IRAP classic ASCII, ZMAP+, ESRI ASCII — sniffed by content; bilinear sampling, marching-squares contours, colour image overlay resampled into Web Mercator, and the grid as a depth source in place of EMODnet |
+| `tb_geo.py` | UTM/TM (Krüger 6th order), ED50↔WGS84 Helmert, Vincenty, route lengths |
+| `tb_catalog.py` | 34 equipment items, 6 vessel spreads, overrides, uncertainty, connection rules, YAML library |
+| `tb_network.py` | Layout graph, design checks, quantity take-off |
+| `tb_schedule.py` | CPM with NCS weather windows, generated tie-back activity network |
+| `tb_cost.py` | Cost build-up, correlated Monte Carlo, schedule-driven phasing |
+| `tb_multiphase.py` | Beggs & Brill (revised, Payne) gradient and black-oil properties — ported from PVT Studio `nodal.py` with corrections (see `docs/PVT_STUDIO_NODAL_FIXES.md`) |
+| `tb_thermal.py` | Analytic pipe heat loss, lumped cool-down, Towler-Mokhatab hydrates, Hammerschmidt inhibition |
+| `tb_flowassurance.py` | Network solver: blended streams, coupled temperature (downstream, with Joule-Thomson) and pressure (upstream) passes; deliverability, hydrate, cool-down, erosion, slugging and host-capacity checks; line-size sweep, turndown sensitivity and IPR-coupled nodal solve |
+| `tb_project.py` | Project save/load (layout + catalog + cost, schedule and flow assurance settings in one YAML) |
+
+Internal units: metres, inches (ID), psi, days, USD.
+
+## Starting points
+- `templates/` — five concept templates (satellite, daisy chain, dual flowline loop, phased with
+  boosting, deepwater FPSO cluster). Load one from the sidebar, placed at the point you picked on the
+  map, at the centre of the current view, or at its own coordinates. Placement keeps distances, so a
+  concept moved from 60°N to 71°N holds its line lengths.
+- `library/cost_library_template.yaml` and `.xlsx` — cost catalog to fill in with your own rates
+  (YAML, Excel or CSV all import from the Equipment catalog tab).
+- `tools/pvt_studio_selftest.py` — run against PVT Studio's `nodal.py` to check the Beggs-Brill fixes.
+- `docs/ROADMAP.md` — the improvement plan, easiest first.
+
+## Comparing concepts on the map
+The sidebar has a **Concepts** section: a dropdown for the concept being edited — cost, schedule, flow
+assurance, viability and the report all follow it — an *Also draw on the map* list for the others, and
+*Save as concept* / *Delete concept*. A legend above the map keys the colours.
+
+Concepts are built either by saving what is on screen, or straight from a template: *Load template*
+replaces the layout, while **Add as new concept** keeps the current one as a concept and loads the
+template alongside it, so a set of alternatives can be built up without losing anything. Names never
+collide — loading the same template twice gives two concepts. Each concept keeps a colour of its own for as long as it is in the set, shown in a
+legend under the controls, and is drawn dashed in that colour: above the routes of the concept you are
+editing so it is not buried, below its equipment symbols so the one you are working on still reads as
+the primary layout. Every concept is a separate entry in the map's layer control, so you can also
+switch them on and off there.
+
+Each concept keeps a colour for as long as it is in the set and is drawn dashed in that colour, above
+the routes of the concept being edited and below its equipment. Concepts that overlap almost exactly
+will still overlap on the map — that is the geometry, not the drawing. The **Cases** tab is where the comparison is quantitative: CAPEX, first production,
+deliverability and flow-assurance margins side by side, with deltas against a baseline.
+
+## Map layers and grid surfaces
+*Import map layer* in the sidebar takes several files at once. A shapefile can be a `.zip` or the loose
+parts — select `blocks.shp` together with its `.dbf` and `.prj` and they are matched by stem into one
+layer. A shapefile carries no coordinate system of its own, so without a `.prj` you must choose the
+source CRS (WGS84/ED50, geographic or UTM); nothing is guessed.
+
+Grid surfaces load from the same uploader. `.grd` says nothing about what is inside it, so the file is
+recognised by content, not extension: **Surfer** ASCII (`DSAA`), Surfer 6 (`DSBB`) and Surfer 7
+(`DSRB`), **IRAP classic ASCII** (`-996`), **ZMAP+** and **ESRI ASCII** (`ncols`/`nrows`). A grid is
+drawn two ways — a colour image and contour lines, both switchable in the map's layer control — and the
+image is resampled pixel by pixel into Web Mercator, so a UTM grid lands where it belongs instead of
+being stretched over its lat/lon box (at 60°N that error runs to hundreds of metres across a field).
+
+A loaded grid is also a **depth source**. *Set element depths* fills `water_depth_m` on every subsea
+element from the surface, and *Seabed profiles from grid* stores a profile along each line, which the
+free-span and cool-down screening then uses instead of the regional EMODnet DTM. Say whether the values
+are depths (positive down) or elevations (negative below sea level) — the app reads the sign and
+proposes one, and you confirm it. A line that leaves the grid stores nothing rather than a half-covered
+profile that would quietly bias the checks, and the panel reports how much of the layout the grid covers.
+
+Two things the reader will not do: rotated grids are refused rather than drawn in the wrong place, and
+IRAP classic ASCII does not record which axis cycles fastest — if a surface comes out with its axes
+swapped, tick *Swap grid axes*.
+
+## Tie-in screening
+Load the Sodir facility layers, select a template or manifold, and screen it: every candidate host within
+the search radius is ranked by distance, with bearing, line length, a costed trial tie-back and — when the
+structure has wells — required wellhead pressure, arrival temperature and hydrate margin. *Add to layout*
+builds the chosen tie-back (host, riser base, PLETs, riser, flowline, umbilical) into the project.
+
+Candidates are filtered and de-duplicated before they are offered: facilities that are removed, shut
+down or still planned are dropped (Sodir keeps decommissioned structures in the "in place" layer until
+they are physically removed), mobile units are dropped, and the same facility loaded from several
+layers is merged on its NPDID — or on name and position where no NPDID is published. Each row shows the
+status the decision was based on, and the filters can be switched off to see everything.
+
+If an NCS layer comes back empty the app now says so: a layout near the median line often has no
+Norwegian facility inside the default 40 km radius.
+
+## If the app fails to start
+The sidebar has a **Diagnostics** panel: app version, Python and Streamlit versions, whether the demo
+file is present and what its first line is, how many templates were found, and whether any module is
+older than the app. A demo file that cannot be parsed no longer stops start-up — the app opens with an
+empty layout and explains why. Project, layout, catalog and case-set files load even if the `schema:`
+line has been lost, if the file has a byte-order mark, or if it uses Windows line endings.
+
+When deploying to Streamlit Community Cloud, upload the whole folder — `test_fixtures/`, `templates/`,
+`library/` and `tb_map_component/` included — and make sure `requirements.txt` is the current one
+(openpyxl, python-docx and matplotlib were added in v0.7).
+
+## Tests
+`python run_tests.py` (needs `scipy` for reference integrals and Node ≥ 18 for the JS suites)
+
+| Suite | Checks |
+|---|---|
+| geo / catalog / network / schedule / cost | 29 / 19 / 55 / 25 / 22 |
+| well (IPR/VLP) / cost spreadsheet IO / cases / report | 22 / 12 / 19 / 7 |
+| tie-in screening / design basis / viability | 21 / 21 / 14 |
+| map bridge | 40 |
+| ncs / import / grid surfaces / flow assurance | 23 / 43 / 83 / 43 |
+| multiphase / thermal / bathymetry | 31 / 25 / 26 |
+| JS core logic / component protocol simulation | 49 / 44 |
+| Headless UI (stub Streamlit, scripted interactions) | 65 |
+
+The protocol test runs the real component script against a fake DOM and fake Leaflet; the UI test
+executes `tieback_app.py` with a stub Streamlit. Neither replaces a check in a real browser.
+
+`ui_test/stubs.py` is part of the app, not scaffolding around it: it has to mirror the Streamlit API the
+app actually calls. When you update the app, update `ui_test/` in the same commit — a stub that is a
+version behind fails the build with an error in the app's own code rather than in the harness.
+
+## Known limits
+- Flow assurance draws a longitudinal section (seabed, line and riser with pressure/temperature) and a
+  pipe cross-section build-up from the catalog (bore, wall or armour, insulation, coating, carrier pipe).
+  The cross-section is schematic: wall thickness is a catalog input, not a pressure-containment calculation.
+- Bathymetry (EMODnet DTM, ~115 m grid, LAT datum) is indicative: use the project survey for design —
+  loading it as a grid surface and pressing *Set element depths* is the way to do that.
+- An imported grid is read as north-up in the CRS you give it; the app has no way to check that CRS
+  against the file, so a grid placed with the wrong zone will look plausible and be wrong.
+  Free spans use a taut-string model with no pipe stiffness or weight — survey candidates, not design spans.
+- Sodir's oil/gas and gas/condensate classes use picture fills; the map approximates them with hatch
+  patterns. Solid classes (oil green, gas red) come straight from the service renderer.
+- Drilling & completion cost excluded (FieldVista owns well costs).
+- Datum shift uses EPSG:1133 (~10 m). Sodir's WGS84 layers use ESRI ED_1950_To_WGS_1984_18, so ED50
+  layouts can sit a few metres off the NCS overlays — fine for screening, not for survey work.
+- ED50 layouts are converted to WGS84 for the map and back on every map edit.
+- A tag filter belongs to the layout it was built on and is cleared when another project, template or
+  concept is loaded. A filter that matches nothing shows a *Clear tag filter* button rather than
+  silently leaving the map blank.
+- Backward pass ignores weather windows → float on windowed activities is indicative.
+- Flow assurance is steady-state screening: Beggs & Brill only (no Hagedorn-Brown/Gray yet), black-oil
+  fluid, tree networks only (no loops or choke modelling), one host arrival pressure. Joule-Thomson
+  cooling is included via a real-gas coefficient from the Z-factor derivative. Slugging is an indicator
+  (riser flow pattern and gas velocity), not a transient simulation, and turndown is a set of steady
+  states rather than a ramp. Use OLGA/LedaFlow/PIPESIM for design.
+- Nodal deliverability linearises the network around the current rates between iterations; check that
+  the reported solve converged before trusting the rates.
