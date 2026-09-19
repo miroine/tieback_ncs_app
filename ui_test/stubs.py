@@ -68,9 +68,16 @@ class Harness:
         return list(default or [])
     def slider(self, label, min_value, max_value, value, step=None, **k): return value
     def checkbox(self, label, value=False, **k): return value
+    def color_picker(self, label, value="#000000", **k): return value
+    def toggle(self, label, value=False, **k): return value
     def date_input(self, label, value=None, **k): return value
     def data_editor(self, df, **k): return df.copy()
-    def file_uploader(self, label, type=None, key=None, **k): return self.uploads.pop(key, None)
+    def file_uploader(self, label, type=None, key=None, accept_multiple_files=False, **k):
+        # real Streamlit returns a list when accept_multiple_files is on, and [] for nothing
+        got = self.uploads.pop(key, None)
+        if not accept_multiple_files:
+            return got
+        return [] if got is None else (list(got) if isinstance(got, list) else [got])
     def rerun(self): raise Rerun()
     def cache_data(self, *a, **k):
         if a and callable(a[0]): return a[0]

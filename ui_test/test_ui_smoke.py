@@ -30,6 +30,7 @@ class _Sess:
 req = types.ModuleType("requests"); req.Session = _Sess; sys.modules["requests"] = req
 sys.path.insert(0, os.path.join(ROOT, "ui_test"))
 from _harness import Suite
+import tb_geo
 S = Suite("test_ui_smoke")
 SRC = open(os.path.join(ROOT, "tieback_app.py")).read()
 CODE = compile(SRC, "tieback_app.py", "exec")
@@ -47,6 +48,23 @@ errs = lambda: [m for k, m in H.log if k == "error"]
 ss = H.session_state
 ev = lambda seq, typ, p, nonce="UI": {"nonce": nonce, "seq": seq, "type": typ, "payload": p, "view": [2.0, 60.0, 3.2, 61.0]}
 
+def broken_demo_starts_anyway():
+    import pathlib, shutil
+    demo = pathlib.Path(ROOT) / "test_fixtures" / "demo_field_a_tieback.yaml"
+    backup = demo.read_text()
+    try:
+        demo.write_text("<!DOCTYPE html>\n<html>not a project</html>\n")
+        ss.clear()
+        run()
+        assert not errs(), errs()
+        assert ss.demo_error and "not a TieBack Studio project" in ss.demo_error
+        assert any("Demo project not loaded" in str(m) for k, m in H.log if k == "warning")
+        assert len(ss.layout.nodes) == 0          # empty layout, app still usable
+    finally:
+        demo.write_text(backup)
+        ss.clear()
+        run()
+S.check("a broken demo file does not stop the app", broken_demo_starts_anyway)
 S.check("initial render (demo project)", lambda: run() == 0 and "layout" in ss and not errs())
 S.check("component args JSON-serialisable & contain payload", lambda: len(H.last_component_args["payload"]["nodes"]) == 9)
 def add_node():
@@ -117,6 +135,42 @@ def utility_line():
     assert e["kind"] == "utility_line" and e["color"] == "#9DBA00" and e["dash"] == "4 4"
     del lay.edges["UL_TEST"]
 S.check("chemical injection line renders with its own colour and dash", utility_line)
+def empty_layer_message():
+    run(press={"Load demo"})
+    run(press={"Load for layout"})
+    assert any("nothing inside this area" in str(m) for k, m in H.log if k == "info") or \
+        ss.ncs_overlays.get("facilities", {}).get("features")
+S.check("an NCS layer with no features in the area says so", empty_layer_message)
+def tiein_screening():
+    run(press={"Load demo"})
+    live = {"fclName": "ALPHA", "fclKind": "PLATFORM", "fclWaterDepth": 125, "fclSurface": "Y",
+            "fclNpdidFacility": "1", "fclPhase": "IN SERVICE", "fclStartupDate": "1999-01-01"}
+    dead = {"fclName": "OLD BRAVO", "fclKind": "PLATFORM", "fclSurface": "Y", "fclNpdidFacility": "2",
+            "fclPhase": "IN SERVICE", "fclDateShutdown": "2015-01-01"}
+    feat = lambda p_, lon: {"type": "Feature", "geometry": {"type": "Point", "coordinates": [lon, 60.58]},
+                            "properties": p_}
+    ss.ncs_overlays["facilities"] = {"type": "FeatureCollection", "title": "Facilities in place",
+        "geometry": "point", "color": "#EB0037", "features": [feat(live, 2.62), feat(dead, 2.64)]}
+    ss.ncs_overlays["facilities_all"] = {"type": "FeatureCollection", "title": "All facilities",
+        "geometry": "point", "color": "#C4561B", "features": [feat(live, 2.62)]}   # same platform again
+    run(press={"Screen tie-in options"})
+    assert ss.get("tiein_rows") is not None, ("no rows", errs(), [m for k, m in H.log if k == "info"])
+    hosts = [r["host"] for r in ss.tiein_rows]
+    assert "ALPHA" in hosts and ss.tiein_node == "TMPL_A", (hosts, ss.get("tiein_node"))
+    assert hosts.count("ALPHA") == 1, hosts              # not duplicated across the two layers
+    assert "OLD BRAVO" not in hosts                      # shut down, not offered
+    assert next(r for r in ss.tiein_rows if r["host"] == "ALPHA")["status"] == "in operation"
+    alpha = next(r for r in ss.tiein_rows if r["host"] == "ALPHA")
+    assert alpha["distance_km"] > 0 and "required_whp_bara" in alpha
+    before = len(ss.layout.nodes)
+    run(press={"Add to layout"})
+    assert len(ss.layout.nodes) > before and not errs()
+S.check("tie-in screening ranks a Sodir facility and builds the tie-back", tiein_screening)
+def design_basis_tab():
+    run(press={"Load demo"})
+    assert any(k == "metric" and m == "Missing" for k, m in H.log)
+    assert any(k == "caption" and "SI-enheter" in str(m) for k, m in H.log)
+S.check("design basis tab renders with SI units note", design_basis_tab)
 def import_layer():
     run(press={"Add layer to map"}, uploads={"layer_upload": stubs.UploadedFile("sat.kml", KML)})
     assert ss.user_overlays and ss.user_overlays[0]["title"] == "sat.kml"
@@ -199,13 +253,199 @@ def report():
     run(press={"Build report"})
     assert ss.get("report_bytes") and len(ss.report_bytes) > 20000 and not errs()
 S.check("screening report builds from the app", report)
+def appearance():
+    import tb_map as tm
+    run(press={"Load demo"})
+    assert ss.display.color_mode == "item"
+    ss.display = tm.DisplaySettings(symbol_scale=1.8, line_scale=2.0, color_mode="fluid")
+    run()
+    pay = H.last_component_args["payload"]
+    assert pay["display"]["symbol_scale"] == 1.8 and pay["display"]["line_scale"] == 2.0
+    assert [e for e in pay["edges"] if e["id"] == "UMB1"][0]["color"] == tm.FLUID_COLORS["control"]
+S.check("appearance settings reach the map payload", appearance)
+def display_event_from_toolbar():
+    run(event=ev(20, "display", {"symbol_scale": 2.6, "line_scale": 0.8}))
+    assert ss.display.symbol_scale == 2.6 and ss.display.line_scale == 0.8 and not errs()
+S.check("toolbar size sliders persist into the session", display_event_from_toolbar)
+def display_persists_in_project():
+    import tb_project, tb_map as tm
+    ss.display = tm.DisplaySettings(symbol_scale=1.3, color_mode="phase")
+    txt = tb_project.project_to_yaml("D", ss.layout, ss.cost_settings, ss.sched_settings, ss.fa_settings,
+                                     ss.display).encode()
+    run(uploads={"proj_upload": stubs.UploadedFile("d.yaml", txt)})
+    assert ss.display.symbol_scale == 1.3 and ss.display.color_mode == "phase" and not errs()
+S.check("appearance saved and restored with the project", display_persists_in_project)
+def undo_redo():
+    run(press={"Load demo"})
+    n0 = len(ss.layout.nodes)
+    run(event=ev(30, "add_node", {"item_id": "plet_std", "lat": 60.52, "lon": 2.63}))
+    assert len(ss.layout.nodes) == n0 + 1 and ss.undo
+    run(press={"Undo"})
+    assert len(ss.layout.nodes) == n0 and ss.redo
+    run(press={"Redo"})
+    assert len(ss.layout.nodes) == n0 + 1
+S.check("undo and redo a map edit", undo_redo)
+def multi_move():
+    run(press={"Load demo"})
+    w2 = ss.layout.nodes["W2"].lat
+    run(event=ev(31, "move_many", {"ids": ["W1", "W2"], "anchor": "W1",
+                                   "lat": ss.layout.nodes["W1"].lat + 0.005,
+                                   "lon": ss.layout.nodes["W1"].lon}))
+    assert abs(ss.layout.nodes["W2"].lat - (w2 + 0.005)) < 1e-9 and not errs()
+S.check("multi-selection move applied from the map", multi_move)
+def slots_ui():
+    import tb_network as tn
+    run(press={"Load demo"})
+    ss.layout.nodes["TMPL_A"].item_id = "tmpl_6slot"
+    ss.layout.add_node(tn.Node("W9", "xt_hxt_10k", 60.5011, 2.6680, label="A-5", sitp_psi=4500))
+    run(press={"Land in slots"})
+    assert not errs(), errs()
+    landed = [w for w in ss.layout.nodes if ss.layout.nodes[w].attrs.get("in_structure") == "TMPL_A"]
+    assert landed, ("no wells landed", [m for k, m in H.log if k in ("success", "error")])
+    assert any(e.item_id == "slot_tiein" for e in ss.layout.edges.values()), (
+        "no integral tie-in", [e.item_id for e in ss.layout.edges.values()])
+S.check("wells landed in template slots from the panel", slots_ui)
+def tag_filter():
+    run(press={"Load demo"})
+    ss.layout.set_tags("W1", ["phase 2"])
+    ss.tag_exclude = ["phase 2"]
+    run()
+    pay = H.last_component_args["payload"]
+    assert [x["id"] for x in pay["nodes"] if x["hidden"]] == ["W1"]
+    ss.tag_exclude = []
+S.check("tag filter hides an element on the map", tag_filter)
+def viability_tab():
+    import tb_viability as tv
+    run(press={"Load demo"})
+    run(press={"Run viability check"})
+    assert ss.get("viab_rows"), ([m for k, m in H.log if k == "info"], errs())
+    assert tv.summary(ss.viab_rows)[tv.PASS] > 5
+S.check("viability check runs from its tab", viability_tab)
+def concept_switch_and_ghost():
+    run(press={"Load demo"})
+    run(press={"Save current as case"})
+    assert len(ss.cases) == 1
+    ss.ghost_cases = [ss.cases[0]["name"]]
+    run()
+    titles = [o.get("title", "") for o in H.last_component_args["overlays"]]
+    assert any(t.startswith("Concept:") for t in titles), titles
+    ss.ghost_cases = []
+S.check("a saved concept can be drawn on the map behind the active one", concept_switch_and_ghost)
+def auto_land_on_place():
+    import tb_network as tn
+    run(press={"Load demo"})
+    ss.layout.nodes["TMPL_A"].item_id = "tmpl_6slot"
+    t = ss.layout.nodes["TMPL_A"]
+    run(event=ev(40, "add_node", {"item_id": "xt_hxt_10k", "lat": t.lat + 0.0005, "lon": t.lon}))
+    placed = [w for w in ss.layout.nodes if ss.layout.nodes[w].attrs.get("in_structure") == "TMPL_A"]
+    assert placed, "a well placed next to the template should land in a free slot"
+S.check("a well placed beside a template is landed in a slot automatically", auto_land_on_place)
 def load_template():
     run(press={"Load template"})
     assert not errs() and len(ss.layout.nodes) >= 5
     assert ss.project_name and ss.project_name != "Field A tie-back (demo)"
 S.check("concept template loads from the sidebar", load_template)
+def template_at_picked_point():
+    run(press={"Load demo"})
+    run(event=ev(90, "pick", {"lat": 65.4, "lon": 7.25}))
+    assert ss.map_state["picked"] == [65.4, 7.25]
+    run(press={"Load template"})
+    assert not errs()
+    anchor = ss.layout.anchor()
+    assert abs(anchor[0] - 65.4) < 1e-6 and abs(anchor[1] - 7.25) < 1e-6
+S.check("template lands on the point picked on the map", template_at_picked_point)
+def move_layout_to_picked():
+    run(event=ev(91, "pick", {"lat": 62.0, "lon": 4.0}))
+    run(press={"Move layout here"})
+    a = ss.layout.anchor()
+    assert abs(a[0] - 62.0) < 1e-6 and abs(a[1] - 4.0) < 1e-6 and not errs()
+S.check("whole layout can be moved to the picked point", move_layout_to_picked)
+def group_move_event():
+    run(press={"Load demo"})
+    w0 = ss.layout.nodes["W1"].lat
+    t0 = ss.layout.nodes["TMPL_A"].lat
+    run(event=ev(92, "move_group", {"id": "TMPL_A", "lat": t0 + 0.02, "lon": ss.layout.nodes["TMPL_A"].lon}))
+    assert abs(ss.layout.nodes["W1"].lat - (w0 + 0.02)) < 1e-9
+S.check("group move from the map moves the wells with the template", group_move_event)
 def empty():
     run(press={"New empty layout (keeps catalog)"})
     assert len(ss.layout.nodes) == 0 and not errs()
 S.check("empty layout renders (no host, no wells, no schedule crash)", empty)
+def grid_import():
+    """A Surfer grid over the demo field: image + contours on the map, then the
+    grid used as the depth source instead of EMODnet."""
+    run(press={"Load demo"})
+    lay = ss.layout
+    lats = [n.lat for n in lay.nodes.values()]
+    lons = [n.lon for n in lay.nodes.values()]
+    pad = 0.15
+    w, e = min(lons) - pad, max(lons) + pad
+    s, nth = min(lats) - pad, max(lats) + pad
+    nx, ny = 24, 20
+    rows = []
+    for j in range(ny):
+        rows.append(" ".join(f"{320.0 + 2.0 * i + 1.0 * j:.3f}" for i in range(nx)))
+    grd = (f"DSAA\n{nx} {ny}\n{w} {e}\n{s} {nth}\n320 420\n" + "\n".join(rows) + "\n").encode()
+
+    run(press={"Add grid to map"}, uploads={"layer_upload": stubs.UploadedFile("seabed.grd", grd)})
+    bad = [m for m in errs() if "failed" in str(m).lower() or "could not" in str(m).lower()]
+    assert not bad, bad
+    assert ss.grid_rasters and ss.grid_rasters[0]["title"] == "seabed.grd", ss.grid_rasters
+    assert ss.grid_rasters[0]["url"].startswith("data:image/png;base64,")
+    assert any(o.get("title") == "seabed.grd contours" for o in ss.user_overlays), \
+        [o.get("title") for o in ss.user_overlays]
+    assert ss.grids and ss.grids[0]["convention"] == "positive_down"
+
+    run(press={"Set element depths"})
+    subsea = [n for n in ss.layout.nodes.values() if ss.layout.kind(n.node_id) != "host"]
+    assert all(320.0 <= n.water_depth_m <= 420.0 for n in subsea), \
+        [(n.node_id, n.water_depth_m) for n in subsea]
+
+    run(press={"Seabed profiles from grid"})
+    lines = [ed for ed in ss.layout.edges.values()
+             if ss.layout.catalog.get(ed.item_id).category in ("flowline", "utility_line")]
+    assert any(ed.attrs.get("seabed_profile") for ed in lines), "no profile stored"
+    return True
+S.check("import a .grd: image + contours on the map, depths from the grid", grid_import)
+
+def grid_removed():
+    run(press={"Remove grid"})
+    assert not ss.grids and not ss.grid_rasters
+    assert not any(o.get("title", "").endswith("contours") for o in ss.user_overlays)
+    return True
+S.check("removing a grid clears its image and contours", grid_removed)
+
+def loose_shapefile_upload():
+    """A .shp selected together with its .dbf and .prj — no zip."""
+    import struct as _struct
+    e, nn, _, _ = tb_geo.geo_to_utm(60.52, 2.62, 31, "ED50")
+    rec = _struct.pack("<idd", 1, e, nn)
+    body = _struct.pack(">ii", 1, len(rec) // 2) + rec
+    shp = (_struct.pack(">i", 9994) + b"\x00" * 20 + _struct.pack(">i", (100 + len(body)) // 2)
+           + _struct.pack("<ii", 1000, 1) + _struct.pack("<8d", *([0.0] * 8)) + body)
+    prj = (b'PROJCS["ED_1950_UTM_Zone_31N",GEOGCS["GCS_European_1950",'
+           b'DATUM["D_European_1950",SPHEROID["International_1924",6378388.0,297.0]]],'
+           b'PROJECTION["Transverse_Mercator"]]')
+    run(press={"Add layer to map"},
+        uploads={"layer_upload": [stubs.UploadedFile("blocks.shp", shp),
+                                  stubs.UploadedFile("blocks.prj", prj)]})
+    bad = [m for m in errs() if "failed" in str(m).lower() or "could not" in str(m).lower()]
+    assert not bad, bad
+    titles = [o.get("title") for o in ss.user_overlays]
+    assert "blocks.shp" in titles, titles
+    fc = next(o for o in ss.user_overlays if o.get("title") == "blocks.shp")
+    lon, lat = fc["features"][0]["geometry"]["coordinates"]
+    assert 2.6 < lon < 2.65 and 60.5 < lat < 60.55, (lon, lat)
+    return True
+S.check("upload a loose .shp with its .prj", loose_shapefile_upload)
+
+def grid_needs_a_crs():
+    """A UTM grid with no CRS chosen must be refused, not dropped off Africa."""
+    grd = (b"DSAA\n3 3\n400000 400500\n6700000 6700500\n300 310\n"
+           b"300 301 302\n303 304 305\n306 307 308\n")
+    run(uploads={"layer_upload": stubs.UploadedFile("utm.grd", grd)})
+    assert any("not lon/lat" in str(m) for m in errs()), errs()
+    return True
+S.check("a projected grid without a CRS is refused", grid_needs_a_crs)
+
 sys.exit(0 if S.report() else 1)
