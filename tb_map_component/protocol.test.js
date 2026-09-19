@@ -18,7 +18,7 @@ function mkEl(tag) {
 }
 function allOptions(sel) { const out = []; (function walk(n) { n.children.forEach((c) => { if (c.tagName === "OPTION") out.push(c); walk(c); }); })(sel); return out; }
 const els = {};
-["wrap", "map", "toolbar", "nodeItem", "edgeItem", "diam", "grp", "symScale", "lineScale", "btnDelete", "btnFit", "empty", "toast", "status", "hint", "coords"]
+["wrap", "map", "toolbar", "nodeItem", "edgeItem", "diam", "grp", "symScale", "lineScale", "selCount", "btnDelete", "btnFit", "empty", "toast", "status", "hint", "coords"]
   .forEach((id) => { els[id] = mkEl(id === "nodeItem" || id === "edgeItem" ? "select" : ["diam", "grp", "symScale", "lineScale"].indexOf(id) >= 0 ? "input" : "div"); });
 els.grp.checked = true;
 els.symScale.value = "1"; els.lineScale.value = "1";
@@ -62,6 +62,8 @@ const L = {
   geoJSON: (fc, o) => { L._geo = (L._geo || []).concat([{ fc, o }]); return { fc, addTo() { return this; } }; },
   polygon: (pts, o) => { const p = addable(evented({ pts, o })); polygons.push(p); return p; },
   circleMarker: () => ({}),
+  imageOverlay: (url, bounds, o) => { const lyr = { url, bounds, o, addTo() { return this; } };
+    L._images = (L._images || []).concat([{ url, bounds, o, layer: lyr }]); return lyr; },
   DomEvent: { stopPropagation() {}, preventDefault() {} },
 };
 const C = require("./core.js");
@@ -225,6 +227,76 @@ check("payload display settings prime the sliders", () => {
     palette, rules, overlays: [], selected: null, height: 500, rev: "rdisp2", fit_token: 0 });
   return Number(els.symScale.value) === 0.6 && Number(els.lineScale.value) === 1.8;
 });
+check("shift-click builds a multi-selection and dragging it emits move_many", () => {
+  markers.length = 0;
+  modeButtons.find((b) => b.dataset.mode === "select").handlers.click[0]();
+  render({ payload, palette, rules, overlays: [], selected: null, height: 500, rev: "rmulti", fit_token: 0 });
+  markers[0].fire("click", {});
+  markers[1].fire("click", { originalEvent: { shiftKey: true } });
+  const counted = els.selCount.textContent === "2 selected";
+  markers[1].fire("dragstart");
+  markers[1].setLatLng({ lat: 60.7, lng: 2.8 });
+  markers[1].fire("drag");
+  markers[1].fire("dragend");
+  const v = values().pop();
+  return counted && v.type === "move_many" && v.payload.ids.length === 2 && v.payload.anchor === "T1";
+});
+check("a click on an overlay polygon reaches the map instead of being swallowed", () => {
+  L._geo = [];
+  modeButtons.find((b) => b.dataset.mode === "add").handlers.click[0]();
+  render({ payload, palette, rules, selected: null, height: 500, rev: "rclick", fit_token: 0,
+    overlays: [{ type: "FeatureCollection", geometry: "polygon", title: "Discoveries", color: "#0BBE00",
+      features: [{ type: "Feature", geometry: { type: "Polygon", coordinates: [[[2, 60], [2, 61], [3, 61], [2, 60]]] },
+                   properties: { _label: "D1" } }] }] });
+  const layer = { on: (t, f) => { layer._h = f; }, bindTooltip() { return this; } };
+  L._geo[L._geo.length - 1].o.onEachFeature({ properties: { _label: "D1" } }, layer);
+  layer._h({ latlng: { lat: 60.9, lng: 2.9 } });
+  const v = values().pop();
+  return v.type === "add_node" && v.payload.lat === 60.9;
+});
+check("hidden elements are not drawn", () => {
+  markers.length = 0; lines.length = 0;
+  render({ payload: { nodes: payload.nodes.map((n, i) => Object.assign({}, n, { hidden: i === 0 })),
+                      edges: payload.edges.map((e) => Object.assign({}, e, { hidden: true })) },
+    palette, rules, overlays: [], selected: null, height: 500, rev: "rhide", fit_token: 0 });
+  return markers.length === 1 && lines.length === 0;
+});
+check("an imported grid is added as an image overlay in its own pane", () => {
+  L._images = [];
+  L._added = [];
+  render({ payload, palette, rules, overlays: [], selected: null, height: 500, rev: "rgrid1", fit_token: 0,
+    rasters: [{ title: "seabed.grd", url: "data:image/png;base64,AAAA", bounds: [[60.4, 2.5], [60.6, 2.8]], opacity: 0.7 }] });
+  const im = L._images[0];
+  return L._images.length === 1 && im.o.pane === "rasters" && im.o.opacity === 0.7
+    && im.o.interactive === false && im.bounds[1][1] === 2.8
+    && (L._added || []).indexOf("seabed.grd") >= 0;
+});
+check("a grid with no url or bounds is skipped, not drawn empty", () => {
+  L._images = [];
+  render({ payload, palette, rules, overlays: [], selected: null, height: 500, rev: "rgrid2", fit_token: 0,
+    rasters: [{ title: "broken" }, { title: "ok", url: "data:image/png;base64,AAAA", bounds: [[60, 2], [61, 3]] }] });
+  return L._images.length === 1 && L._images[0].o.opacity === 1;
+});
+check("grid images are cleared before redrawing, not stacked", () => {
+  const removed = [];
+  mapObj.removeLayer = (l) => removed.push(l);
+  L._images = [];
+  render({ payload, palette, rules, overlays: [], selected: null, height: 500, rev: "rgrid3", fit_token: 0,
+    rasters: [{ title: "a.grd", url: "u", bounds: [[60, 2], [61, 3]] }] });
+  const first = L._images[0];
+  render({ payload, palette, rules, overlays: [], selected: null, height: 500, rev: "rgrid4", fit_token: 0,
+    rasters: [{ title: "b.grd", url: "u2", bounds: [[60, 2], [61, 3]] }] });
+  mapObj.removeLayer = () => {};
+  return L._images.length === 2 && removed.indexOf(first.layer) >= 0;
+});
+check("with nothing drawn yet the map frames the imported grid", () => {
+  mapObj.fitted = null;
+  render({ payload: { nodes: [], edges: [] }, palette, rules, overlays: [], selected: null, height: 500,
+    rev: "rgrid5", fit_token: 99,
+    rasters: [{ title: "a.grd", url: "u", bounds: [[59.5, 1.5], [60.5, 3.5]] }] });
+  return !!mapObj.fitted && mapObj.fitted[0][0] === 59.5 && mapObj.fitted[1][1] === 3.5;
+});
+
 console.log("protocol.test.js: " + pass + " passed, " + fail.length + " failed");
 fail.forEach((f) => console.log("  FAIL " + f));
 process.exit(fail.length ? 1 : 0);

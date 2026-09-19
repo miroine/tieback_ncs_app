@@ -92,6 +92,33 @@ check("selection highlight scales too", () => {
   const un = C.edgeStyle({ kind: "flowline", diameter_in: 8 }, false, { line_scale: 2 });
   return Math.abs(sel.weight - un.weight - 5) < 1e-9;
 });
+check("jumperGroup lists what is tied to a structure", () => {
+  const pay = { edges: [{ id: "J1", kind: "jumper", source: "W1", target: "T1" },
+                        { id: "J2", kind: "jumper", source: "T1", target: "W2" },
+                        { id: "F1", kind: "flowline", source: "T1", target: "H1" }] };
+  const g = C.jumperGroup(pay, "T1");
+  return g.length === 2 && g.indexOf("W1") >= 0 && g.indexOf("W2") >= 0 && g.indexOf("H1") < 0;
+});
+check("plan-view symbols carry real equipment detail, not a plain shape", () => {
+  const xt = C.nodeSvg("xt", "", false, 1).html;
+  const tmpl = C.nodeSvg("template", "", false, 1).html;
+  const mf = C.nodeSvg("manifold", "", false, 1).html;
+  return (xt.match(/<rect/g) || []).length >= 3 && xt.indexOf("<circle") >= 0
+    && (tmpl.match(/<circle/g) || []).length >= 8
+    && (mf.match(/<line/g) || []).length >= 5;
+});
+check("rasterBbox unions imported grid bounds", () => {
+  const b = C.rasterBbox([{ bounds: [[60.0, 2.0], [60.5, 2.5]] }, { bounds: [[59.5, 2.2], [60.2, 3.0]] }]);
+  return b[0][0] === 59.5 && b[0][1] === 2.0 && b[1][0] === 60.5 && b[1][1] === 3.0;
+});
+check("rasterBbox ignores entries without bounds", () => {
+  const b = C.rasterBbox([{ title: "no bounds" }, { bounds: [[60, 2], [61, 3]] }]);
+  return b[0][0] === 60 && b[1][1] === 3;
+});
+check("rasterBbox with nothing to frame returns null", () => {
+  return C.rasterBbox([]) === null && C.rasterBbox(undefined) === null && C.rasterBbox([{}]) === null;
+});
+
 console.log("core.test.js: " + pass + " passed, " + fail.length + " failed");
 fail.forEach((f) => console.log("  FAIL " + f));
 process.exit(fail.length ? 1 : 0);

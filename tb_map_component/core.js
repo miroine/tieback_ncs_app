@@ -150,19 +150,55 @@
   function symbolShape(symbol, W) {
     const c = W / 2, p = 4, z = W - 2 * p, r = z / 2;
     const S = {};
-    S.xt = '<circle cx="' + c + '" cy="' + c + '" r="' + r + '"/>' +
-      '<g stroke-width="1.6" stroke="#fff" fill="none"><line x1="' + (c - r * 0.6) + '" y1="' + c + '" x2="' + (c + r * 0.6) + '" y2="' + c +
-      '"/><line x1="' + c + '" y1="' + (c - r * 0.6) + '" x2="' + c + '" y2="' + (c + r * 0.6) + '"/></g>';
-    S.template = '<rect x="' + p + '" y="' + (p + z * 0.15) + '" width="' + z + '" height="' + z * 0.7 + '" rx="2"/>' +
-      '<g fill="#fff"><circle cx="' + (c - z * 0.25) + '" cy="' + (c - z * 0.13) + '" r="' + z * 0.09 + '"/>' +
-      '<circle cx="' + (c + z * 0.25) + '" cy="' + (c - z * 0.13) + '" r="' + z * 0.09 + '"/>' +
-      '<circle cx="' + (c - z * 0.25) + '" cy="' + (c + z * 0.13) + '" r="' + z * 0.09 + '"/>' +
-      '<circle cx="' + (c + z * 0.25) + '" cy="' + (c + z * 0.13) + '" r="' + z * 0.09 + '"/></g>' +
-      '<rect x="' + p + '" y="' + (p + z * 0.15) + '" width="' + z + '" height="' + z * 0.7 + '" rx="2" fill="none" stroke="#fff" stroke-width="1.2"/>';
-    S.manifold = '<rect x="' + p + '" y="' + (c - z * 0.22) + '" width="' + z + '" height="' + z * 0.44 + '" rx="2"/>' +
-      '<g stroke="#fff" stroke-width="1.5"><line x1="' + p + '" y1="' + c + '" x2="' + (W - p) + '" y2="' + c + '"/>' +
-      '<line x1="' + (c - z * 0.2) + '" y1="' + (c - z * 0.22) + '" x2="' + (c - z * 0.2) + '" y2="' + (c - z * 0.38) + '"/>' +
-      '<line x1="' + (c + z * 0.2) + '" y1="' + (c - z * 0.22) + '" x2="' + (c + z * 0.2) + '" y2="' + (c - z * 0.38) + '"/></g>';
+    // Christmas tree in plan: guide frame, wellhead bore, production and annulus wings
+    // with their valve blocks, and the tree cap over the bore.
+    S.xt = '<rect x="' + (c - r * 0.95) + '" y="' + (c - r * 0.95) + '" width="' + (r * 1.9) + '" height="' + (r * 1.9) +
+      '" rx="' + (r * 0.25) + '" fill-opacity="0.35"/>' +
+      '<circle cx="' + c + '" cy="' + c + '" r="' + (r * 0.52) + '"/>' +
+      '<g stroke="#fff" stroke-width="' + Math.max(r * 0.18, 1) + '" stroke-linecap="round">' +
+      '<line x1="' + (c - r * 0.95) + '" y1="' + c + '" x2="' + (c + r * 0.95) + '" y2="' + c + '"/>' +
+      '<line x1="' + c + '" y1="' + (c - r * 0.95) + '" x2="' + c + '" y2="' + (c + r * 0.95) + '"/></g>' +
+      '<g fill="#fff">' +
+      '<rect x="' + (c - r * 0.92) + '" y="' + (c - r * 0.22) + '" width="' + (r * 0.34) + '" height="' + (r * 0.44) + '"/>' +
+      '<rect x="' + (c + r * 0.58) + '" y="' + (c - r * 0.22) + '" width="' + (r * 0.34) + '" height="' + (r * 0.44) + '"/>' +
+      '<circle cx="' + c + '" cy="' + c + '" r="' + (r * 0.2) + '"/></g>';
+    // Template in plan: protection structure, four slots with guide funnels, the internal
+    // header running between them, and guide posts at the corners.
+    {
+      const top = p + z * 0.12, h = z * 0.76, sl = z * 0.105;
+      let slots = "";
+      [[-0.26, -0.17], [0.06, -0.17], [-0.26, 0.17], [0.06, 0.17]].forEach(function (o) {
+        const sx = c + o[0] * z + sl, sy = c + o[1] * z;
+        slots += '<circle cx="' + sx + '" cy="' + sy + '" r="' + sl + '" fill="#fff" fill-opacity="0.92"/>' +
+          '<circle cx="' + sx + '" cy="' + sy + '" r="' + (sl * 0.45) + '" fill="none" stroke-width="' + Math.max(z * 0.03, 0.8) + '"/>';
+      });
+      let posts = "";
+      [[p + z * 0.06, top + h * 0.08], [p + z * 0.94, top + h * 0.08],
+       [p + z * 0.06, top + h * 0.92], [p + z * 0.94, top + h * 0.92]].forEach(function (q) {
+        posts += '<circle cx="' + q[0] + '" cy="' + q[1] + '" r="' + (z * 0.045) + '" fill="#fff"/>';
+      });
+      S.template = '<rect x="' + p + '" y="' + top + '" width="' + z + '" height="' + h + '" rx="' + (z * 0.06) + '" fill-opacity="0.9"/>' +
+        '<rect x="' + (p + z * 0.05) + '" y="' + (top + h * 0.06) + '" width="' + (z * 0.9) + '" height="' + (h * 0.88) +
+        '" rx="' + (z * 0.04) + '" fill="none" stroke="#fff" stroke-width="' + Math.max(z * 0.035, 1) + '"/>' +
+        '<line x1="' + (p + z * 0.1) + '" y1="' + c + '" x2="' + (p + z * 0.9) + '" y2="' + c +
+        '" stroke="#fff" stroke-width="' + Math.max(z * 0.05, 1.2) + '"/>' + slots + posts;
+    }
+    // Manifold in plan: skid frame, production header along the axis, branch spools with
+    // valve blocks, and the hubs at each end.
+    {
+      const hh = z * 0.3;
+      let branches = "";
+      [-0.28, -0.1, 0.08, 0.26].forEach(function (o) {
+        const bx = c + o * z + z * 0.08;
+        branches += '<line x1="' + bx + '" y1="' + c + '" x2="' + bx + '" y2="' + (c - hh * 1.15) + '" stroke="#fff" stroke-width="' + Math.max(z * 0.04, 1) + '"/>' +
+          '<rect x="' + (bx - z * 0.045) + '" y="' + (c - hh * 1.35) + '" width="' + (z * 0.09) + '" height="' + (z * 0.09) + '" fill="#fff"/>';
+      });
+      S.manifold = '<rect x="' + p + '" y="' + (c - hh) + '" width="' + z + '" height="' + (hh * 2) + '" rx="' + (z * 0.05) + '" fill-opacity="0.9"/>' +
+        '<line x1="' + (p + z * 0.04) + '" y1="' + c + '" x2="' + (p + z * 0.96) + '" y2="' + c +
+        '" stroke="#fff" stroke-width="' + Math.max(z * 0.09, 1.6) + '"/>' + branches +
+        '<rect x="' + p + '" y="' + (c - hh * 0.45) + '" width="' + (z * 0.07) + '" height="' + (hh * 0.9) + '" fill="#fff"/>' +
+        '<rect x="' + (W - p - z * 0.07) + '" y="' + (c - hh * 0.45) + '" width="' + (z * 0.07) + '" height="' + (hh * 0.9) + '" fill="#fff"/>';
+    }
     S.plet = '<rect x="' + p + '" y="' + (c - z * 0.25) + '" width="' + z * 0.75 + '" height="' + z * 0.5 + '" rx="1.5"/>' +
       '<polygon points="' + (p + z * 0.75) + ',' + (c - z * 0.25) + ' ' + (W - p) + ',' + c + ' ' + (p + z * 0.75) + ',' + (c + z * 0.25) + '"/>';
     S.plem = S.plet;
@@ -262,6 +298,17 @@
     return out.filter(function (v, i, a) { return a.indexOf(v) === i; });
   }
 
+  /** Nodes tied to `id` by a jumper — they travel with a structure when it is moved. */
+  function jumperGroup(payload, id) {
+    const out = [];
+    (payload.edges || []).forEach(function (e) {
+      if (e.kind !== "jumper") return;
+      if (e.source === id) out.push(e.target);
+      else if (e.target === id) out.push(e.source);
+    });
+    return out.filter(function (v, i, a) { return a.indexOf(v) === i; });
+  }
+
   function formatLength(m) {
     if (m == null || isNaN(m)) return "";
     return m >= 1000 ? (m / 1000).toFixed(2) + " km" : Math.round(m) + " m";
@@ -284,10 +331,22 @@
     return [[s, w], [N, e]];
   }
 
+  // Union of imported-grid bounds — used to frame the map when no layout is drawn yet.
+  function rasterBbox(rasters) {
+    const list = (rasters || []).filter(function (r) { return r && r.bounds && r.bounds.length === 2; });
+    if (!list.length) return null;
+    let s = 90, w = 180, N = -90, e = -180;
+    list.forEach(function (r) {
+      s = Math.min(s, r.bounds[0][0]); w = Math.min(w, r.bounds[0][1]);
+      N = Math.max(N, r.bounds[1][0]); e = Math.max(e, r.bounds[1][1]);
+    });
+    return [[s, w], [N, e]];
+  }
+
   return {
     EDGE_KINDS, NODE_STYLE, EDGE_STYLE, SEVERITY_COLOR,
     makeNonce, eventFactory, edgeAllowed, nodesById, edgeLatLngs, insertVertex, removeVertex,
     moveVertex, haversine, polylineLength, edgeStyle, nodeSvg, symbolShape, parallelOffsets,
-    offsetLatLngs, footprintPolygon, jumperGroup, formatLength, escapeHtml, bboxOf,
+    offsetLatLngs, footprintPolygon, jumperGroup, formatLength, escapeHtml, bboxOf, rasterBbox,
   };
 });
