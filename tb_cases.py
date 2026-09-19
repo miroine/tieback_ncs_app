@@ -17,12 +17,47 @@ import yaml
 
 import tb_cost
 import tb_flowassurance as tb_fa
+import tb_import
 import tb_project
 import tb_schedule
 from tb_catalog import Catalog
 from tb_network import Layout
 
 SCHEMA = "tieback_caseset/1"
+
+# Colours for drawing several concepts on one map. Chosen to stay apart from the
+# equipment palette (navy, teal, amber) so a concept outline never reads as a line type.
+CONCEPT_COLORS = ["#C4561B", "#7D4EBF", "#0F8A3C", "#B3801A", "#2E86AB", "#A8326E",
+                  "#6B8E23", "#8B5A2B"]
+
+
+def color_for(cases: List[dict], name: str) -> str:
+    """A concept keeps its colour for as long as it is in the set, so the legend
+    means the same thing from one rerun to the next."""
+    names = [c.get("name") for c in cases]
+    idx = names.index(name) if name in names else 0
+    return CONCEPT_COLORS[idx % len(CONCEPT_COLORS)]
+
+
+def concept_overlay(case: dict, color: str) -> dict:
+    """A saved concept as a map overlay, drawn over the routes of the concept
+    being edited but under its equipment, so overlapping concepts stay readable.
+
+    Every feature carries the concept colour, because the layer is styled per
+    feature and a shared layer colour would be lost on the points.
+    """
+    layout = restore(case)[1]
+    fc = tb_import.layout_to_geojson(layout)
+    name = case.get("name", "concept")
+    for f in fc["features"]:
+        props = f.setdefault("properties", {})
+        props["_fill"] = color
+        props["_outline"] = color
+        props["_label"] = f"{props.get('label') or props.get('id') or ''} — {name}".strip(" —")
+    fc.update(title=f"Concept: {name}", color=color, kind="concept", geometry="line",
+              dash="6 5", weight=3, point_radius=5,
+              rev=f"concept:{name}:{color}:{len(fc['features'])}")
+    return fc
 
 
 def snapshot(name: str, layout: Layout, cost: tb_cost.CostSettings, sched: tb_schedule.ScheduleSettings,

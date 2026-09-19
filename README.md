@@ -107,6 +107,20 @@ Internal units: metres, inches (ID), psi, days, USD.
 - `tools/pvt_studio_selftest.py` — run against PVT Studio's `nodal.py` to check the Beggs-Brill fixes.
 - `docs/ROADMAP.md` — the improvement plan, easiest first.
 
+## Comparing concepts on the map
+Save a concept in the **Cases** tab, change something, save it again under another name. The
+**Concepts** panel at the top of the Layout tab then has a dropdown for the concept you are editing —
+cost, schedule, flow assurance, viability and the report all follow it — and a *Also draw on the map*
+list for the others. Each concept keeps a colour of its own for as long as it is in the set, shown in a
+legend under the controls, and is drawn dashed in that colour: above the routes of the concept you are
+editing so it is not buried, below its equipment symbols so the one you are working on still reads as
+the primary layout. Every concept is a separate entry in the map's layer control, so you can also
+switch them on and off there.
+
+Concepts that overlap almost exactly will still overlap on the map — that is the geometry, not the
+drawing. The **Cases** tab is where the comparison is quantitative: CAPEX, first production,
+deliverability and flow-assurance margins side by side, with deltas against a baseline.
+
 ## Map layers and grid surfaces
 *Import map layer* in the sidebar takes several files at once. A shapefile can be a `.zip` or the loose
 parts — select `blocks.shp` together with its `.dbf` and `.prj` and they are matched by stem into one
@@ -163,13 +177,13 @@ When deploying to Streamlit Community Cloud, upload the whole folder — `test_f
 | Suite | Checks |
 |---|---|
 | geo / catalog / network / schedule / cost | 29 / 19 / 55 / 25 / 22 |
-| well (IPR/VLP) / cost spreadsheet IO / cases / report | 22 / 12 / 11 / 7 |
+| well (IPR/VLP) / cost spreadsheet IO / cases / report | 22 / 12 / 19 / 7 |
 | tie-in screening / design basis / viability | 21 / 21 / 14 |
 | map bridge | 40 |
 | ncs / import / grid surfaces / flow assurance | 23 / 43 / 83 / 43 |
 | multiphase / thermal / bathymetry | 31 / 25 / 26 |
-| JS core logic / component protocol simulation | 46 / 41 |
-| Headless UI (stub Streamlit, scripted interactions) | 57 |
+| JS core logic / component protocol simulation | 49 / 44 |
+| Headless UI (stub Streamlit, scripted interactions) | 60 |
 
 The protocol test runs the real component script against a fake DOM and fake Leaflet; the UI test
 executes `tieback_app.py` with a stub Streamlit. Neither replaces a check in a real browser.

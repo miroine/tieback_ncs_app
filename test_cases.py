@@ -65,4 +65,61 @@ def templates_compare():
     rows = cs.compare(cases)
     assert len(rows) == 3 and all(r["capex_total_musd"] > 0 for r in rows)
 S.check("shipped templates compare against each other", templates_compare)
+
+# ── drawing several concepts on one map ────────────────────────────────────
+def overlay_shape():
+    fc = cs.concept_overlay(C0, "#7D4EBF")
+    assert fc["type"] == "FeatureCollection" and fc["features"], "no features"
+    assert fc["kind"] == "concept" and fc["geometry"] == "line"
+    assert fc["dash"] and fc["weight"] >= 2 and fc["point_radius"] >= 4, fc
+    assert fc["title"] == "Concept: base"
+    return True
+S.check("a saved concept becomes a map overlay", overlay_shape)
+
+
+def overlay_colours_every_feature():
+    """The layer is styled per feature, so a colour only on the collection would
+    be lost on the points — every feature has to carry it."""
+    fc = cs.concept_overlay(C0, "#7D4EBF")
+    assert all(f["properties"]["_fill"] == "#7D4EBF" for f in fc["features"]), "line colour lost"
+    assert all(f["properties"]["_outline"] == "#7D4EBF" for f in fc["features"])
+    return True
+S.check("every feature carries the concept colour", overlay_colours_every_feature)
+
+
+def overlay_labels_name_the_concept():
+    fc = cs.concept_overlay(C0, "#7D4EBF")
+    labels = [f["properties"]["_label"] for f in fc["features"]]
+    assert all(l.endswith("— base") for l in labels), labels[:3]
+    return True
+S.check("hovering a concept feature names the concept", overlay_labels_name_the_concept)
+
+
+def overlay_matches_the_layout():
+    fc = cs.concept_overlay(C0, "#C4561B")
+    lay = cs.restore(C0)[1]
+    assert len(fc["features"]) == len(lay.nodes) + len(lay.edges), \
+        (len(fc["features"]), len(lay.nodes), len(lay.edges))
+    return True
+S.check("the overlay holds every element of that concept", overlay_matches_the_layout)
+
+
+def colours_are_stable():
+    cases = [case("A"), case("B"), case("C")]
+    first = cs.color_for(cases, "B")
+    assert cs.color_for(cases, "B") == first, "colour changed between calls"
+    assert cs.color_for(cases, "A") != first, "two concepts share a colour"
+    # removing a LATER concept must not recolour the earlier ones
+    assert cs.color_for(cases[:2], "B") == first
+    return True
+S.check("a concept keeps its colour while it is in the set", colours_are_stable)
+
+S.check("more concepts than colours wraps rather than failing",
+        lambda: cs.color_for([case(str(i)) for i in range(len(cs.CONCEPT_COLORS) + 3)], "0")
+        == cs.CONCEPT_COLORS[0])
+S.check("an unknown name still gets a colour",
+        lambda: cs.color_for([C0], "not saved") in cs.CONCEPT_COLORS)
+S.check("concept rev changes with the colour",
+        lambda: cs.concept_overlay(C0, "#111111")["rev"] != cs.concept_overlay(C0, "#222222")["rev"])
+
 sys.exit(0 if S.report() else 1)

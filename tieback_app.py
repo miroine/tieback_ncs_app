@@ -43,7 +43,7 @@ import tb_tiein
 import tb_viability
 import tb_well
 
-APP_VERSION = "0.11.1"
+APP_VERSION = "0.12.0"
 HERE = Path(__file__).parent
 DEMO_FILE = HERE / "test_fixtures" / "demo_field_a_tieback.yaml"
 
@@ -334,29 +334,9 @@ with st.sidebar:
         st.rerun()
 
     if S.get("cases"):
-        st.subheader("Concepts")
-        names = [c_["name"] for c_ in S.cases]
-        current = S.get("active_case") or "(working layout)"
-        options = ["(working layout)"] + names
-        pick_active = st.selectbox("Active concept", options,
-                                   index=options.index(current) if current in options else 0,
-                                   key=f"active_case_{REV}",
-                                   help="Switching loads that concept into the editor — cost, schedule, "
-                                        "flow assurance, viability and the report all follow it")
-        if pick_active != current:
-            if S.get("autosave_case", True) and current in names:
-                S.cases = [c_ for c_ in S.cases if c_["name"] != current]
-                S.cases.append(tb_cases.snapshot(current, LAY, S.cost_settings, S.sched_settings,
-                                                 S.fa_settings, "", S.display))
-            if pick_active != "(working layout)":
-                set_project(*tb_cases.restore(next(c_ for c_ in S.cases if c_["name"] == pick_active)))
-            S.active_case = pick_active
-            S.case_rows = None
-            st.rerun()
-        S.autosave_case = st.checkbox("Save edits back when switching", S.get("autosave_case", True))
-        S.ghost_cases = st.multiselect("Also show on the map", [n_ for n_ in names if n_ != pick_active],
-                                       default=[g for g in S.get("ghost_cases", []) if g in names],
-                                       help="Draws the other concepts behind the active one")
+        st.caption(f"Concepts: {len(S.cases)} saved · editing "
+                   f"**{S.get('active_case') or '(working layout)'}** — switch and compare them "
+                   f"at the top of the Layout tab.")
 
     st.subheader("Design basis")
     datums = list(tb_geo.DATUMS)
@@ -673,6 +653,56 @@ with tab_layout:
     m4.metric("Umbilicals", f"{km('umbilical'):.1f} km")
     m5.metric("Checks", f"{n_err} errors · {n_warn} warnings" if (n_err or n_warn) else "All clear")
 
+    # ── concepts: which one is being edited, which are drawn alongside ──
+    if S.get("cases"):
+        names = [c_["name"] for c_ in S.cases]
+        current = S.get("active_case") or "(working layout)"
+        options = ["(working layout)"] + names
+        with st.expander(f"Concepts — editing **{current}**"
+                         + (f", showing {len(S.get('ghost_cases', []) or [])} alongside"
+                            if S.get("ghost_cases") else ""), expanded=True):
+            pc = st.columns([2, 3])
+            pick_active = pc[0].selectbox(
+                "Concept being edited", options,
+                index=options.index(current) if current in options else 0,
+                key=f"active_case_{REV}",
+                help="Cost, schedule, flow assurance, viability and the report all follow this one")
+            show = pc[1].multiselect(
+                "Also draw on the map", [n_ for n_ in names if n_ != pick_active],
+                default=[g for g in S.get("ghost_cases", []) if g in names and g != pick_active],
+                key=f"ghost_cases_{REV}",
+                help="Drawn dashed in the concept's own colour, over the routes of the concept you "
+                     "are editing but under its equipment")
+            S.ghost_cases = show
+            bc = st.columns([1, 1, 2])
+            S.autosave_case = bc[0].checkbox("Save edits when switching", S.get("autosave_case", True))
+            if bc[1].button("Show all others"):
+                S.ghost_cases = [n_ for n_ in names if n_ != pick_active]
+                st.rerun()
+            if show:
+                swatches = "".join(
+                    f'<span style="display:inline-flex;align-items:center;gap:6px;margin-right:14px">'
+                    f'<span style="width:22px;height:0;border-top:3px dashed '
+                    f'{tb_cases.color_for(S.cases, nm)}"></span>'
+                    f'<span style="font-size:13px">{nm}</span></span>' for nm in show)
+                st.markdown(
+                    f'<div style="margin:2px 0 6px">'
+                    f'<span style="display:inline-flex;align-items:center;gap:6px;margin-right:14px">'
+                    f'<span style="width:22px;height:0;border-top:3px solid #00243D"></span>'
+                    f'<span style="font-size:13px"><b>{pick_active}</b> (editing)</span></span>'
+                    f'{swatches}</div>', unsafe_allow_html=True)
+            if pick_active != current:
+                if S.get("autosave_case", True) and current in names:
+                    S.cases = [c_ for c_ in S.cases if c_["name"] != current]
+                    S.cases.append(tb_cases.snapshot(current, LAY, S.cost_settings, S.sched_settings,
+                                                     S.fa_settings, "", S.display))
+                if pick_active != "(working layout)":
+                    set_project(*tb_cases.restore(next(c_ for c_ in S.cases
+                                                       if c_["name"] == pick_active)))
+                S.active_case = pick_active
+                S.case_rows = None
+                st.rerun()
+
     cc = st.columns([1, 1, 1, 3])
     if cc[0].button("Undo", disabled=not S.get("undo"),
                     help=f"Undo {S.undo[-1][0]}" if S.get("undo") else "Nothing to undo"):
@@ -685,17 +715,12 @@ with tab_layout:
         cc[2].caption(f"{len(S.undo)} step(s)")
 
     overlays = list(S.ncs_overlays.values()) + list(S.user_overlays)
-    ghost_colors = ["#8E9BA6", "#A88BC0", "#8BAF9B", "#C0A88B"]
-    for i, gname in enumerate(S.get("ghost_cases", []) or []):
+    for gname in (S.get("ghost_cases", []) or []):
         case = next((c_ for c_ in S.get("cases", []) if c_["name"] == gname), None)
         if not case:
             continue
         try:
-            g_lay = tb_cases.restore(case)[1]
-            fc = tb_import.layout_to_geojson(g_lay)
-            fc.update(title=f"Concept: {gname}", color=ghost_colors[i % len(ghost_colors)],
-                      geometry="line", rev=f"ghost:{gname}")
-            overlays.append(fc)
+            overlays.append(tb_cases.concept_overlay(case, tb_cases.color_for(S.cases, gname)))
         except Exception as exc:  # noqa: BLE001
             st.warning(f"Concept '{gname}' could not be drawn: {exc}")
 
