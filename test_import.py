@@ -203,4 +203,17 @@ S.check("read_uploads reads a mixed selection in one go", read_many)
 S.raises("read_uploads reports the file that failed", ValueError,
          lambda: im.read_uploads({"bad.shp": b"\x00" * 120, "bad.prj": PRJ_WGS.encode()}))
 
+
+# ── whatever the file uploader hands back ──────────────────────────────────
+class _Up:
+    def __init__(self, name): self.name = name
+
+
+S.check("as_upload_list wraps a single object", lambda: len(im.as_upload_list(_Up("a.shp"))) == 1)
+S.check("as_upload_list passes a list through", lambda: len(im.as_upload_list([_Up("a"), _Up("b")])) == 2)
+S.check("as_upload_list on nothing is empty",
+        lambda: im.as_upload_list(None) == [] and im.as_upload_list([]) == [])
+S.check("as_upload_list drops None entries", lambda: len(im.as_upload_list([_Up("a"), None])) == 1)
+S.check("as_upload_list accepts a tuple", lambda: len(im.as_upload_list((_Up("a"),))) == 1)
+
 sys.exit(0 if S.report() else 1)

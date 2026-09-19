@@ -428,6 +428,21 @@ def read_any(filename: str, data: bytes, crs: Optional[Crs] = None) -> dict:
 SIDECARS = (".dbf", ".prj", ".shx", ".cpg", ".sbn", ".sbx", ".qix", ".idx")
 
 
+def as_upload_list(value) -> list:
+    """Whatever a file uploader hands back, as a list.
+
+    Streamlit returns a list when `accept_multiple_files` is on and a single
+    object when it is off, and test harnesses do not always mirror that. Taking
+    the returned value at its word and iterating it turns a harness mismatch into
+    a TypeError in the middle of the app.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [v for v in value if v is not None]
+    return [value]
+
+
 def group_uploads(names: List[str]) -> Tuple[List[str], Dict[str, Dict[str, str]]]:
     """Split a multi-file selection into layers to read and shapefile sidecars.
 

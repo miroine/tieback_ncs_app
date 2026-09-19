@@ -43,7 +43,7 @@ import tb_tiein
 import tb_viability
 import tb_well
 
-APP_VERSION = "0.11.0"
+APP_VERSION = "0.11.1"
 HERE = Path(__file__).parent
 DEMO_FILE = HERE / "test_fixtures" / "demo_field_a_tieback.yaml"
 
@@ -517,7 +517,7 @@ with st.sidebar:
     sel_crs = {"WGS84 lat/lon": tb_import.WGS84_GEO, "ED50 lat/lon": tb_import.Crs("geographic", "ED50"),
                "WGS84 UTM": tb_import.Crs("utm", "WGS84", int(zone)),
                "ED50 UTM": tb_import.Crs("utm", "ED50", int(zone))}.get(crs_mode)
-    files = {f.name: f.getvalue() for f in (lfs or [])}
+    files = {f.name: f.getvalue() for f in tb_import.as_upload_list(lfs)}
     grid_names = [nm for nm, data in files.items() if _looks_like_grid(data)]
     vector_files = {nm: d for nm, d in files.items() if nm not in grid_names}
 

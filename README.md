@@ -166,13 +166,17 @@ When deploying to Streamlit Community Cloud, upload the whole folder — `test_f
 | well (IPR/VLP) / cost spreadsheet IO / cases / report | 22 / 12 / 11 / 7 |
 | tie-in screening / design basis / viability | 21 / 21 / 14 |
 | map bridge | 40 |
-| ncs / import / grid surfaces / flow assurance | 23 / 38 / 83 / 43 |
+| ncs / import / grid surfaces / flow assurance | 23 / 43 / 83 / 43 |
 | multiphase / thermal / bathymetry | 31 / 25 / 26 |
 | JS core logic / component protocol simulation | 46 / 41 |
-| Headless UI (stub Streamlit, scripted interactions) | 56 |
+| Headless UI (stub Streamlit, scripted interactions) | 57 |
 
 The protocol test runs the real component script against a fake DOM and fake Leaflet; the UI test
 executes `tieback_app.py` with a stub Streamlit. Neither replaces a check in a real browser.
+
+`ui_test/stubs.py` is part of the app, not scaffolding around it: it has to mirror the Streamlit API the
+app actually calls. When you update the app, update `ui_test/` in the same commit — a stub that is a
+version behind fails the build with an error in the app's own code rather than in the harness.
 
 ## Known limits
 - Flow assurance draws a longitudinal section (seabed, line and riser with pressure/temperature) and a
