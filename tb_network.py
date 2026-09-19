@@ -149,6 +149,121 @@ class Layout:
         for e in self.edges.values():
             e.route = [moved(la, lo) for la, lo in e.route]
 
+    # ── template slots, tags, multi-element moves ──
+    SLOT_ITEM = "slot_tiein"
+
+    def hosted_wells(self, structure_id: str) -> List[str]:
+        """Wells landed in this structure's slots."""
+        return sorted(n.node_id for n in self.nodes.values()
+                      if n.attrs.get("in_structure") == structure_id)
+
+    def free_slots(self, structure_id: str) -> int:
+        it = self.catalog.get(self.nodes[structure_id].item_id)
+        used = sum(1 for e in self.edges.values()
+                   if structure_id in (e.from_node, e.to_node)
+                   and self.catalog.get(e.item_id).category == "jumper"
+                   and self.kind(e.to_node if e.from_node == structure_id else e.from_node) == "well")
+        return max(it.slots - used, 0)
+
+    def assign_to_structure(self, well_ids, structure_id: str, item_id: Optional[str] = None) -> List[str]:
+        """Land wells in a structure: records the slot and creates the tie-in if missing.
+
+        Saves drawing a connection for every well; the tie-in defaults to the integral
+        slot connection rather than a fabricated spool.
+        """
+        if structure_id not in self.nodes:
+            raise KeyError(f"unknown structure '{structure_id}'")
+        if self.kind(structure_id) not in ("template", "manifold"):
+            raise ValueError(f"{structure_id} is a {self.kind(structure_id)}; wells land in a template or manifold")
+        item = item_id or (self.SLOT_ITEM if self.SLOT_ITEM in self.catalog.items else "jumper_rigid")
+        made = []
+        for w in well_ids:
+            if w not in self.nodes:
+                raise KeyError(f"unknown well '{w}'")
+            if self.kind(w) != "well":
+                raise ValueError(f"{w} is a {self.kind(w)}, not a well")
+            self.nodes[w].attrs["in_structure"] = structure_id
+            linked = any(self.catalog.get(e.item_id).category == "jumper"
+                         and {e.from_node, e.to_node} == {w, structure_id} for e in self.edges.values())
+            if not linked:
+                eid, i = f"SLOT_{w}", 1
+                while eid in self.edges or eid in self.nodes:
+                    i += 1
+                    eid = f"SLOT_{w}_{i}"
+                self.add_edge(Edge(eid, item, w, structure_id, label=eid))
+                made.append(eid)
+        return made
+
+    def release_from_structure(self, well_ids, remove_edges: bool = True) -> List[str]:
+        removed = []
+        for w in well_ids:
+            struct = self.nodes[w].attrs.pop("in_structure", None)
+            if struct and remove_edges:
+                for e in [e for e in self.edges.values()
+                          if {e.from_node, e.to_node} == {w, struct}
+                          and self.catalog.get(e.item_id).category == "jumper"]:
+                    del self.edges[e.edge_id]
+                    removed.append(e.edge_id)
+        return removed
+
+    def nearest_structure(self, well_id: str, max_m: float = 200.0, with_free_slot: bool = True):
+        """Closest template/manifold to a well, for landing it automatically."""
+        w = self.nodes[well_id]
+        best, best_d = None, max_m
+        for n in self.nodes.values():
+            if self.kind(n.node_id) not in ("template", "manifold"):
+                continue
+            if with_free_slot and self.free_slots(n.node_id) <= 0:
+                continue
+            d = tb_geo.geodesic_distance(w.lat, w.lon, n.lat, n.lon, self.settings.datum)
+            if d <= best_d:
+                best, best_d = n.node_id, d
+        return best
+
+    def tags(self, element_id: str) -> List[str]:
+        el = self.nodes.get(element_id) or self.edges.get(element_id)
+        raw = (el.attrs.get("tags") if el else None) or []
+        if isinstance(raw, str):
+            raw = [t.strip() for t in raw.split(",")]
+        return [str(t).strip() for t in raw if str(t).strip()]
+
+    def set_tags(self, element_id: str, tags) -> List[str]:
+        el = self.nodes.get(element_id) or self.edges.get(element_id)
+        if el is None:
+            raise KeyError(f"unknown element '{element_id}'")
+        clean = sorted({str(t).strip() for t in (tags or []) if str(t).strip()})
+        if clean:
+            el.attrs["tags"] = clean
+        else:
+            el.attrs.pop("tags", None)
+        return clean
+
+    def all_tags(self) -> List[str]:
+        out = set()
+        for eid in list(self.nodes) + list(self.edges):
+            out.update(self.tags(eid))
+        return sorted(out)
+
+    def by_tags(self, include=None, exclude=None) -> List[str]:
+        """Element ids matching the filter: any of `include` (all when empty), none of `exclude`."""
+        inc, exc = set(include or []), set(exclude or [])
+        out = []
+        for eid in list(self.nodes) + list(self.edges):
+            t = set(self.tags(eid))
+            if exc & t:
+                continue
+            if inc and not (inc & t):
+                continue
+            out.append(eid)
+        return out
+
+    def translate_elements(self, node_ids, dlat: float, dlon: float):
+        """Move several nodes by the same offset (multi-select drag)."""
+        for nid in node_ids:
+            if nid in self.nodes:
+                n = self.nodes[nid]
+                self.move_node(nid, n.lat + dlat, n.lon + dlon)
+
     def jumper_group(self, node_id: str) -> List[str]:
         """Nodes tied to this one by a jumper — the wells and modules that sit on a
         structure and should travel with it."""
@@ -160,7 +275,8 @@ class Layout:
                 out.append(e.to_node)
             elif e.to_node == node_id:
                 out.append(e.from_node)
-        return sorted(set(out))
+        out += self.hosted_wells(node_id)
+        return sorted(set(out) - {node_id})
 
     def kind(self, node_id: str) -> str:
         return self.catalog.get(self.nodes[node_id].item_id).category
@@ -325,6 +441,22 @@ class Layout:
                 if n_wells > it.slots:
                     F.append(Finding("error", "SLOTS_EXCEEDED",
                                      f"{n_wells} wells on {it.slots}-slot {it.category}.", nid))
+
+        # wells landed in a structure's slots
+        for n in self.nodes.values():
+            struct = n.attrs.get("in_structure")
+            if not struct:
+                continue
+            if struct not in self.nodes:
+                F.append(Finding("error", "SLOT_STRUCTURE",
+                                 f"Landed in '{struct}', which is not in the layout.", n.node_id))
+            elif self.kind(struct) not in ("template", "manifold"):
+                F.append(Finding("warning", "SLOT_STRUCTURE",
+                                 f"Landed in {struct}, which is a {self.kind(struct)}.", n.node_id))
+            elif not any(cat.get(e.item_id).category == "jumper"
+                         and {e.from_node, e.to_node} == {n.node_id, struct} for e in self.edges.values()):
+                F.append(Finding("warning", "SLOT_NOT_TIED",
+                                 f"Recorded in {struct}'s slots but not tied in.", n.node_id))
 
         # installation lift capacity
         for nid in self.nodes:

@@ -31,6 +31,7 @@ import tb_cost
 import tb_costio
 import tb_flowassurance as tb_fa
 import tb_geo
+import tb_grid
 import tb_import
 import tb_map
 import tb_ncs
@@ -39,9 +40,10 @@ import tb_project
 import tb_report
 import tb_schedule
 import tb_tiein
+import tb_viability
 import tb_well
 
-APP_VERSION = "0.9.2"
+APP_VERSION = "0.11.0"
 HERE = Path(__file__).parent
 DEMO_FILE = HERE / "test_fixtures" / "demo_field_a_tieback.yaml"
 
@@ -99,6 +101,72 @@ def bump():
     st.session_state.rev += 1
 
 
+def _looks_like_grid(data: bytes) -> bool:
+    """A .grd/.dat/.txt may be a grid or a point list, so ask the grid sniffer."""
+    try:
+        tb_grid.sniff(data)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _add_grid(grid, ramp: str, opacity: float, n_levels: int):
+    """Put a grid on the map: a colour image, and contours as a normal vector layer."""
+    S = st.session_state
+    S.grids = [e for e in S.get("grids", []) if e["grid"].name != grid.name]
+    S.grid_rasters = [r for r in S.get("grid_rasters", []) if r.get("title") != grid.name]
+    S.user_overlays = [o for o in S.user_overlays if o.get("title") != f"{grid.name} contours"]
+    raster = tb_grid.image_overlay(grid, ramp=ramp, opacity=opacity, title=grid.name)
+    S.grid_rasters.append(raster)
+    if n_levels > 0:
+        st_ = grid.stats()
+        levels = tb_grid.nice_levels(st_["min"], st_["max"], int(n_levels))
+        fc = tb_grid.contour_features(grid, levels, ramp=ramp, title=f"{grid.name} contours")
+        fc["rev"] = f"contours:{grid.name}:{len(levels)}:{ramp}"
+        S.user_overlays.append(fc)
+    S.grids.append({"grid": grid, "convention": grid.depth_convention()})
+    return raster
+
+
+UNDO_DEPTH = 25
+
+
+def record(label: str = ""):
+    """Snapshot the layout before changing it, so the change can be undone."""
+    ss = st.session_state
+    if "layout" not in ss:
+        return
+    ss.setdefault("undo", []).append((label, ss.layout.to_dict()))
+    del ss.undo[:-UNDO_DEPTH]
+    ss.redo = []
+
+
+def _restore_layout(dct):
+    st.session_state.layout = tb_network.Layout.from_dict(dct, st.session_state.layout.catalog)
+
+
+def undo():
+    ss = st.session_state
+    if not ss.get("undo"):
+        return ""
+    label, dct = ss.undo.pop()
+    ss.setdefault("redo", []).append((label, ss.layout.to_dict()))
+    _restore_layout(dct)
+    bump()
+    return label
+
+
+def redo():
+    ss = st.session_state
+    if not ss.get("redo"):
+        return ""
+    label, dct = ss.redo.pop()
+    ss.setdefault("undo", []).append((label, ss.layout.to_dict()))
+    _restore_layout(dct)
+    bump()
+    return label
+
+
 def empty_project():
     return ("New tie-back", tb_network.Layout(tb_catalog.Catalog()), tb_cost.CostSettings(),
             tb_schedule.ScheduleSettings(), tb_fa.FASettings(), tb_map.DisplaySettings())
@@ -131,6 +199,7 @@ def set_project(name, layout, cost, sched, fa_settings=None, display=None):
     st.session_state.cost_settings = cost
     st.session_state.sched_settings = sched
     st.session_state.weather_factor = cost.weather_factor
+    st.session_state.undo, st.session_state.redo = [], []
     st.session_state.map_state = {k: v for k, v in st.session_state.get("map_state", {}).items()
                                   if k in ("view", "picked", "seen")}
     st.session_state.mc = None
@@ -146,6 +215,8 @@ def init_state():
     ss.fit_token = 0
     ss.ncs_overlays = {}
     ss.user_overlays = []
+    ss.grids = []            # imported .grd surfaces: [{"grid": Grid, "convention": str}]
+    ss.grid_rasters = []     # their image overlays, as the map component wants them
     ss.currency = "MUSD"
     ss.nok_per_usd = 10.5
     ss.last_upload = None
@@ -262,6 +333,31 @@ with st.sidebar:
                     S.cost_settings, S.sched_settings, S.fa_settings)
         st.rerun()
 
+    if S.get("cases"):
+        st.subheader("Concepts")
+        names = [c_["name"] for c_ in S.cases]
+        current = S.get("active_case") or "(working layout)"
+        options = ["(working layout)"] + names
+        pick_active = st.selectbox("Active concept", options,
+                                   index=options.index(current) if current in options else 0,
+                                   key=f"active_case_{REV}",
+                                   help="Switching loads that concept into the editor — cost, schedule, "
+                                        "flow assurance, viability and the report all follow it")
+        if pick_active != current:
+            if S.get("autosave_case", True) and current in names:
+                S.cases = [c_ for c_ in S.cases if c_["name"] != current]
+                S.cases.append(tb_cases.snapshot(current, LAY, S.cost_settings, S.sched_settings,
+                                                 S.fa_settings, "", S.display))
+            if pick_active != "(working layout)":
+                set_project(*tb_cases.restore(next(c_ for c_ in S.cases if c_["name"] == pick_active)))
+            S.active_case = pick_active
+            S.case_rows = None
+            st.rerun()
+        S.autosave_case = st.checkbox("Save edits back when switching", S.get("autosave_case", True))
+        S.ghost_cases = st.multiselect("Also show on the map", [n_ for n_ in names if n_ != pick_active],
+                                       default=[g for g in S.get("ghost_cases", []) if g in names],
+                                       help="Draws the other concepts behind the active one")
+
     st.subheader("Design basis")
     datums = list(tb_geo.DATUMS)
     d_sel = st.selectbox("Layout datum", datums, index=datums.index(LAY.settings.datum), key=f"datum_{REV}",
@@ -272,6 +368,10 @@ with st.sidebar:
                             key=f"endal_{REV}", help="Tie-in spools and overlength")
     wf = st.number_input("Offshore weather factor", 1.0, 3.0, float(S.weather_factor), 0.05, key=f"wf_{REV}",
                          help="Multiplies offshore durations in both cost and schedule")
+    S.auto_land = st.checkbox("Land new wells in a nearby template automatically",
+                              S.get("auto_land", True), key=f"autoland_{REV}",
+                              help="A well placed within 250 m of a template or manifold with a free slot "
+                                   "is tied in for you")
     minr = st.number_input("Minimum lay bend radius (m)", 0.0, 5000.0,
                            float(LAY.settings.min_bend_radius_m), 50.0, key=f"minr_{REV}",
                            help="Routes with tighter bends are flagged in the design checks")
@@ -311,6 +411,17 @@ with st.sidebar:
         if (cmode, sym, lsc, bydia, colors) != (disp.color_mode, disp.symbol_scale, disp.line_scale,
                                                 disp.thickness_by_diameter, disp.fluid_colors):
             S.display = tb_map.DisplaySettings(sym, lsc, bydia, cmode, colors)
+        all_tags = LAY.all_tags()
+        if all_tags:
+            st.caption("Tag filter")
+            S.tag_include = st.multiselect("Show only", all_tags,
+                                           default=[t for t in S.get("tag_include", []) if t in all_tags],
+                                           key=f"tagin_{REV}")
+            S.tag_exclude = st.multiselect("Hide", all_tags,
+                                           default=[t for t in S.get("tag_exclude", []) if t in all_tags],
+                                           key=f"tagex_{REV}")
+        else:
+            st.caption("No tags yet — add them in an item's properties to filter the map.")
 
     st.subheader("NCS map layers")
     st.caption("Live from Sodir FactMaps (WGS84). Fetched for the layout area or the current map view.")
@@ -393,24 +504,95 @@ with st.sidebar:
                     st.info(f"{fc['title']}: showing first {len(fc['features'])} features — zoom in and load for map view.")
 
     st.subheader("Import map layer")
-    lf = st.file_uploader("GeoJSON, KML/KMZ, shapefile (.zip) or CSV",
-                          type=["geojson", "json", "kml", "kmz", "zip", "csv", "txt"], key="layer_upload")
+    lfs = st.file_uploader("GeoJSON, KML/KMZ, shapefile (.shp with its .dbf/.prj, or a .zip), "
+                           "CSV, or a grid (.grd/.asc/.irap/.zmap)",
+                           type=["geojson", "json", "kml", "kmz", "zip", "shp", "dbf", "prj", "shx", "cpg",
+                                 "csv", "txt", "grd", "asc", "irap", "zmap", "dat"],
+                           accept_multiple_files=True, key="layer_upload")
+    st.caption("Select a .shp together with its .dbf and .prj — a shapefile carries no coordinate "
+               "system of its own, so without the .prj you must set it below.")
     crs_mode = st.selectbox("Source coordinates", ["From file (or WGS84 lat/lon)", "WGS84 lat/lon", "ED50 lat/lon",
                                                    "WGS84 UTM", "ED50 UTM"])
     zone = st.number_input("UTM zone (north)", 1, 60, 31, 1, disabled="UTM" not in crs_mode)
-    if lf is not None and st.button("Add layer to map"):
-        crs = {"WGS84 lat/lon": tb_import.WGS84_GEO, "ED50 lat/lon": tb_import.Crs("geographic", "ED50"),
+    sel_crs = {"WGS84 lat/lon": tb_import.WGS84_GEO, "ED50 lat/lon": tb_import.Crs("geographic", "ED50"),
                "WGS84 UTM": tb_import.Crs("utm", "WGS84", int(zone)),
                "ED50 UTM": tb_import.Crs("utm", "ED50", int(zone))}.get(crs_mode)
+    files = {f.name: f.getvalue() for f in (lfs or [])}
+    grid_names = [nm for nm, data in files.items() if _looks_like_grid(data)]
+    vector_files = {nm: d for nm, d in files.items() if nm not in grid_names}
+
+    if vector_files and st.button("Add layer to map"):
         try:
-            fc = tb_import.read_any(lf.name, lf.getvalue(), crs)
             palette = ["#4A6B82", "#7D4EBF", "#B08D57", "#007079", "#C4561B"]
-            fc.update(title=lf.name, color=palette[len(S.user_overlays) % len(palette)],
-                      rev=hashlib.md5(lf.getvalue()).hexdigest()[:10])
-            S.user_overlays.append(fc)
-            st.success(f"Added {len(fc['features'])} features from {lf.name}")
+            for name, fc in tb_import.read_uploads(vector_files, sel_crs):
+                fc.update(title=name, color=palette[len(S.user_overlays) % len(palette)],
+                          rev=hashlib.md5(vector_files[name]).hexdigest()[:10])
+                S.user_overlays.append(fc)
+                st.success(f"Added {len(fc['features'])} features from {name}")
         except Exception as exc:  # noqa: BLE001
             st.error(f"Import failed: {exc}")
+
+    if grid_names:
+        st.markdown("**Grid surface**")
+        gname = st.selectbox("Grid file", grid_names, key="grid_file")
+        swap = st.checkbox("Swap grid axes", value=False, key="grid_swap",
+                           help="IRAP classic ASCII does not state which axis cycles fastest. "
+                                "Tick this if the surface comes out with its axes swapped.")
+        try:
+            preview = tb_grid.read_grid(gname, files[gname], sel_crs, transposed=swap)
+            st.caption(f"{preview.source_format} — {preview.describe()}")
+            gc = st.columns(3)
+            ramp = gc[0].selectbox("Colour ramp", list(tb_grid.RAMPS), key="grid_ramp")
+            opacity = gc[1].slider("Opacity", 0.1, 1.0, 0.7, 0.05, key="grid_opacity")
+            n_lv = gc[2].number_input("Contour lines", 0, 60, 12, 1, key="grid_levels",
+                                      help="0 draws no contours — image only.")
+            if st.button("Add grid to map"):
+                try:
+                    _add_grid(preview, ramp, float(opacity), int(n_lv))
+                    st.success(f"Added {preview.name} ({preview.nx} × {preview.ny} nodes)")
+                    S.fit_token += 1
+                    st.rerun()
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Could not draw the grid: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Grid import failed: {exc}")
+
+    if S.get("grids"):
+        st.markdown("**Loaded grids**")
+        gnames = [e["grid"].name for e in S.grids]
+        pick = st.selectbox("Grid", gnames, key="grid_pick")
+        entry = next(e for e in S.grids if e["grid"].name == pick)
+        grid = entry["grid"]
+        cov = tb_grid.coverage(LAY, grid)
+        st.caption(f"{grid.describe()} — covers {cov['nodes_on_grid']} of "
+                   f"{cov['nodes_on_grid'] + cov['nodes_off_grid']} elements in the layout")
+        conv = st.selectbox("These values are", ["positive_down", "elevation"],
+                            index=0 if entry["convention"] != "elevation" else 1,
+                            format_func=lambda k: ("Water depth, positive down (m)" if k == "positive_down"
+                                                   else "Seabed elevation, negative below sea level (m)"),
+                            key="grid_conv")
+        entry["convention"] = conv
+        gb = st.columns(3)
+        if gb[0].button("Set element depths"):
+            got = tb_grid.fill_node_depths(LAY, grid, only_blank=False, convention=conv)
+            hit = sum(1 for v in got.values() if v is not None)
+            bump()
+            st.success(f"Water depth set on {hit} of {len(got)} elements from {grid.name}")
+        if gb[1].button("Seabed profiles from grid"):
+            got = tb_grid.fetch_route_profiles(LAY, grid, convention=conv)
+            ok_n = sum(1 for v in got.values() if v)
+            bump()
+            if ok_n:
+                st.success(f"Stored a profile on {ok_n} of {len(got)} lines — "
+                           f"turn on 'Follow stored seabed profiles' in Flow assurance.")
+            else:
+                st.warning("No line lies wholly inside the grid, so no profile was stored. "
+                           "A part-covered profile would bias the free-span and cool-down checks.")
+        if gb[2].button("Remove grid"):
+            S.grids = [e for e in S.grids if e["grid"].name != pick]
+            S.grid_rasters = [r for r in S.grid_rasters if r.get("title") != pick]
+            S.user_overlays = [o for o in S.user_overlays if o.get("title") != f"{pick} contours"]
+            st.rerun()
     if S.user_overlays:
         names = [o["title"] for o in S.user_overlays]
         drop = st.selectbox("Imported layers", names, key="drop_layer")
@@ -476,8 +658,9 @@ findings = LAY.validate()
 n_err = sum(f.severity == "error" for f in findings)
 n_warn = sum(f.severity == "warning" for f in findings)
 
-tab_layout, tab_cat, tab_cost, tab_sched, tab_fa, tab_basis, tab_cases, tab_exp = st.tabs(
-    ["Layout", "Equipment catalog", "Cost", "Schedule", "Flow assurance", "Design basis", "Cases", "Export"])
+tab_layout, tab_cat, tab_cost, tab_sched, tab_fa, tab_basis, tab_viab, tab_cases, tab_exp = st.tabs(
+    ["Layout", "Equipment catalog", "Cost", "Schedule", "Flow assurance", "Design basis", "Viability",
+     "Cases", "Export"])
 
 # ═══════════════════════════════ LAYOUT ═══════════════════════════════
 with tab_layout:
@@ -490,18 +673,59 @@ with tab_layout:
     m4.metric("Umbilicals", f"{km('umbilical'):.1f} km")
     m5.metric("Checks", f"{n_err} errors · {n_warn} warnings" if (n_err or n_warn) else "All clear")
 
+    cc = st.columns([1, 1, 1, 3])
+    if cc[0].button("Undo", disabled=not S.get("undo"),
+                    help=f"Undo {S.undo[-1][0]}" if S.get("undo") else "Nothing to undo"):
+        undo()
+        st.rerun()
+    if cc[1].button("Redo", disabled=not S.get("redo")):
+        redo()
+        st.rerun()
+    if S.get("undo"):
+        cc[2].caption(f"{len(S.undo)} step(s)")
+
     overlays = list(S.ncs_overlays.values()) + list(S.user_overlays)
-    payload = tb_map.build_payload(LAY, findings, S.display)
+    ghost_colors = ["#8E9BA6", "#A88BC0", "#8BAF9B", "#C0A88B"]
+    for i, gname in enumerate(S.get("ghost_cases", []) or []):
+        case = next((c_ for c_ in S.get("cases", []) if c_["name"] == gname), None)
+        if not case:
+            continue
+        try:
+            g_lay = tb_cases.restore(case)[1]
+            fc = tb_import.layout_to_geojson(g_lay)
+            fc.update(title=f"Concept: {gname}", color=ghost_colors[i % len(ghost_colors)],
+                      geometry="line", rev=f"ghost:{gname}")
+            overlays.append(fc)
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"Concept '{gname}' could not be drawn: {exc}")
+
+    tag_inc, tag_exc = S.get("tag_include", []), S.get("tag_exclude", [])
+    visible = set(LAY.by_tags(tag_inc, tag_exc)) if (tag_inc or tag_exc) else None
+    if visible is not None:
+        st.caption(f"Tag filter active — showing {len(visible)} of {len(LAY.nodes) + len(LAY.edges)} items")
+    payload = tb_map.build_payload(LAY, findings, S.display, visible)
     event = tb_map.render_map(payload, tb_map.build_palette(CAT), overlays, S.map_state.get("selected"),
-                              height=640, fit_token=S.fit_token)
+                              height=640, fit_token=S.fit_token, rasters=S.get("grid_rasters", []))
     if tb_map.apply_display_event(S.display, event):
         tb_map.apply_event(LAY, event, S.map_state)      # consume it so it is not re-applied
         bump()
         st.rerun()
+    pre_event = LAY.to_dict() if event else None
     result = tb_map.apply_event(LAY, event, S.map_state)
+    if result["changed"] and pre_event is not None:
+        S.setdefault("undo", []).append((str(event.get("type", "map edit")), pre_event))
+        del S.undo[:-UNDO_DEPTH]
+        S.redo = []
     if result["error"]:
         st.toast(result["error"], icon="⚠️")
     if result["changed"]:
+        new_id = result.get("selected")
+        if (result["message"].startswith("Added") and new_id in LAY.nodes
+                and LAY.kind(new_id) == "well" and S.get("auto_land", True)):
+            near = LAY.nearest_structure(new_id, max_m=250.0)
+            if near:
+                LAY.assign_to_structure([new_id], near)
+                st.toast(f"{new_id} landed in {LAY.nodes[near].label or near}", icon="⚓")
         bump()
         st.rerun()
 
@@ -546,12 +770,17 @@ with tab_layout:
                 hipps = cc[3].checkbox("HIPPS", node.hipps, help="Protects everything downstream of this item")
                 sitp = st.number_input("Shut-in tubing pressure (psi)", 0.0, 25000.0, float(node.sitp_psi),
                                        step=100.0) if it.category == "well" else node.sitp_psi
+                node_tags = st.text_input("Tags (comma separated)", ", ".join(LAY.tags(sel)),
+                                          help="Filter the map by tag from the sidebar, e.g. "
+                                               "'phase 2, option B, high priority'")
                 ok = st.form_submit_button("Apply changes", type="primary")
             if ok:
                 if utm_vals:
                     lat, lon = tb_geo.utm_to_geo(utm_vals[0], utm_vals[1], int(utm_vals[2]), "N", LAY.settings.datum)
+                record("edit node")
                 node.label, node.item_id, node.water_depth_m = label, item_id, depth
                 node.attrs["heading_deg"] = float(heading)
+                LAY.set_tags(sel, node_tags.split(","))
                 node.phase, node.hipps, node.sitp_psi = int(phase), hipps, sitp
                 LAY.move_node(sel, float(lat), float(lon))
                 bump()
@@ -592,6 +821,8 @@ with tab_layout:
                                      key=f"piggy_{sel}_{REV}",
                                      help="Laid with that line instead of its own campaign: it follows the "
                                           "carrier's route and only adds a share of the lay time")
+                edge_tags = st.text_input("Tags (comma separated)", ", ".join(LAY.tags(sel)),
+                                          key=f"etags_{sel}_{REV}")
                 smooth = st.checkbox("Smooth the route (as-laid curve through the bends)",
                                      bool(edge.attrs.get("smooth")),
                                      help="Rigid lines are laid in curves, not sharp corners. Length and "
@@ -601,9 +832,11 @@ with tab_layout:
                                               "line following the flowline)")
                 ok = st.form_submit_button("Apply changes", type="primary")
             if ok:
+                record("edit line")
                 edge.label, edge.item_id, edge.diameter_in, edge.phase = label, item_id, diam, int(phase)
                 edge.attrs["smooth"] = bool(smooth)
                 edge.attrs["fluid"] = fluid
+                LAY.set_tags(sel, edge_tags.split(","))
                 if piggy == "—":
                     edge.attrs.pop("piggyback_on", None)
                 else:
@@ -651,6 +884,51 @@ with tab_layout:
             LAY.move_node(sel, float(pk[0]), float(pk[1]))
             bump()
             st.rerun()
+
+    with st.expander("Wells in template slots"):
+        tmpls = [nid for nid in LAY.nodes if LAY.kind(nid) in ("template", "manifold")]
+        loose = [nid for nid in LAY.nodes if LAY.kind(nid) == "well"]
+        if not tmpls or not loose:
+            st.caption("Add a template or manifold and some wells, then land the wells in its slots here "
+                       "instead of drawing a connection for each one.")
+        else:
+            cc = st.columns([1.4, 2, 1])
+            tgt = cc[0].selectbox("Structure", tmpls, key=f"slot_t_{REV}",
+                                  format_func=lambda i: f"{LAY.nodes[i].label or i} "
+                                                        f"({LAY.free_slots(i)} free of {CAT.get(LAY.nodes[i].item_id).slots})")
+            # a well recorded in this structure, or already tied to it, is in a slot
+            tied = {e.to_node if e.from_node == tgt else e.from_node for e in LAY.edges.values()
+                    if tgt in (e.from_node, e.to_node) and CAT.get(e.item_id).category == "jumper"}
+            already = [w for w in loose
+                       if LAY.nodes[w].attrs.get("in_structure") == tgt or w in tied]
+            nearby = [w for w in loose
+                      if w not in already and not LAY.nodes[w].attrs.get("in_structure")
+                      and tb_geo.geodesic_distance(LAY.nodes[w].lat, LAY.nodes[w].lon,
+                                                   LAY.nodes[tgt].lat, LAY.nodes[tgt].lon,
+                                                   LAY.settings.datum) <= 250.0]
+            pre = already + nearby[:max(LAY.free_slots(tgt), 0)]
+            chosen_wells = cc[1].multiselect("Wells", loose, default=pre, key=f"slot_w_{REV}",
+                                             format_func=lambda i: LAY.nodes[i].label or i)
+            if cc[2].button("Land in slots", type="primary"):
+                record("land wells in slots")
+                try:
+                    made = LAY.assign_to_structure(chosen_wells, tgt)
+                except (KeyError, ValueError) as exc:
+                    st.error(str(exc))
+                else:
+                    st.success(f"{len(chosen_wells)} well(s) in {tgt}"
+                               + (f", {len(made)} tie-in(s) created" if made else ""))
+                    bump()
+                    st.rerun()
+            released = [w for w in already if w not in chosen_wells]
+            if released and st.button(f"Release {len(released)} well(s) from {tgt}"):
+                record("release wells")
+                LAY.release_from_structure(released)
+                bump()
+                st.rerun()
+            st.caption("Wells within 250 m of the structure are pre-selected. A well landed in a slot gets "
+                       "the integral slot tie-in, not a fabricated spool, and travels with the structure "
+                       "when you drag it.")
 
     with st.expander("Tie-in screening — where should this structure connect?"):
         order_kind = {"template": 0, "manifold": 1, "boosting": 2, "plem": 3, "plet": 4}
@@ -770,6 +1048,7 @@ with tab_layout:
             "design_length_m": st.column_config.NumberColumn(disabled=True, format="%.0f"),
             "item_id": st.column_config.SelectboxColumn("item", options=edge_ids, required=True)})
         if st.button("Apply table edits", type="primary"):
+            record("bulk edit")
             try:
                 for r in ned.to_dict("records"):
                     nd = LAY.nodes[r["id"]]
@@ -1459,6 +1738,52 @@ with tab_basis:
         "note": st.column_config.TextColumn("Note", width="large")})
     st.download_button("Design basis (CSV)", pd.DataFrame(basis_rows).to_csv(index=False),
                        "tieback_design_basis.csv")
+
+# ═══════════════════════════════ VIABILITY ═══════════════════════════════
+with tab_viab:
+    st.caption("Does this concept stand up? Every criterion is judged on the active concept's layout, "
+               "rates and settings. SI units throughout.")
+    if S.get("active_case") and S.active_case != "(working layout)":
+        st.info(f"Active concept: **{S.active_case}**")
+    cc = st.columns([1, 3])
+    td_frac = cc[0].slider("Turndown case", 0.1, 0.9, 0.5, 0.1, key=f"viab_td_{REV}",
+                           help="Fraction of design rate used for the turndown checks")
+    vsig = md5(LAY.to_dict(), vars(S.fa_settings), vars(S.cost_settings), td_frac)
+    if cc[1].button("Run viability check", type="primary") or S.get("viab_sig") == vsig:
+        if S.get("viab_sig") != vsig:
+            with st.spinner("Solving, scheduling and costing the concept…"):
+                S.viab_rows, S.viab_sig = tb_viability.viability(LAY, S.cost_settings, S.sched_settings,
+                                                                 S.fa_settings, td_frac), vsig
+        rows = S.viab_rows
+        counts = tb_viability.summary(rows)
+        k = st.columns(4)
+        k[0].metric("Pass", counts[tb_viability.PASS])
+        k[1].metric("To resolve", counts[tb_viability.ATTENTION])
+        k[2].metric("Blocking", counts[tb_viability.FAIL])
+        k[3].metric("Not assessed", counts[tb_viability.NA])
+        v = tb_viability.verdict(rows)
+        (st.error if counts[tb_viability.FAIL] else st.warning if counts[tb_viability.ATTENTION]
+         else st.success)(v)
+        blocking = [r for r in rows if r["status"] in (tb_viability.FAIL, tb_viability.ATTENTION)]
+        if blocking:
+            st.markdown("#### What to fix")
+            for r in tb_viability.sort_rows(blocking):
+                icon = "🔴" if r["status"] == tb_viability.FAIL else "🟠"
+                st.markdown(f"{icon} **{r['criterion']}** ({r['group']}) — {r['value']}"
+                            + (f", target {r['threshold']}" if r["threshold"] else "")
+                            + (f". {r['action']}" if r["action"] else ""))
+        st.markdown("#### All criteria")
+        vdf = pd.DataFrame(tb_viability.sort_rows(rows))
+        st.dataframe(vdf, hide_index=True, **STRETCH, column_config={
+            "group": st.column_config.TextColumn("Group", width="small"),
+            "criterion": st.column_config.TextColumn("Criterion", width="medium"),
+            "status": st.column_config.TextColumn("Status", width="small"),
+            "value": st.column_config.TextColumn("Value", width="medium"),
+            "threshold": st.column_config.TextColumn("Target", width="small"),
+            "action": st.column_config.TextColumn("If not met", width="large")})
+        st.download_button("Viability checklist (CSV)", vdf.to_csv(index=False), "tieback_viability.csv")
+    else:
+        st.info("Run the check to score the concept on layout, flow assurance, schedule and cost.")
 
 # ═══════════════════════════════ CASES ═══════════════════════════════
 with tab_cases:

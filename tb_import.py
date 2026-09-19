@@ -322,23 +322,21 @@ def _read_shp(data: bytes) -> List[Optional[dict]]:
     return geoms
 
 
-def read_shapefile_zip(data: bytes, crs: Optional[Crs] = None) -> dict:
-    with zipfile.ZipFile(io.BytesIO(data)) as z:
-        names = z.namelist()
-        shp = next((n for n in names if n.lower().endswith(".shp")), None)
-        if shp is None:
-            raise ValueError("zip contains no .shp")
-        stem = shp[:-4]
-        find = lambda ext: next((n for n in names if n.lower() == (stem + ext).lower()), None)
-        geoms = _read_shp(z.read(shp))
-        dbf = find(".dbf")
-        rows = _read_dbf(z.read(dbf)) if dbf else []
-        prj = find(".prj")
-        src = crs
-        if src is None:
-            if prj is None:
-                raise ValueError("shapefile has no .prj — specify the source CRS")
-            src = crs_from_text(z.read(prj).decode("latin-1"))
+def read_shapefile_parts(shp: bytes, dbf: Optional[bytes] = None, prj: Optional[bytes] = None,
+                         crs: Optional[Crs] = None) -> dict:
+    """A shapefile from its loose parts: .shp is required, .dbf and .prj optional.
+
+    Without a .prj the CRS must be given — a shapefile carries no CRS of its own
+    and guessing one would put the layer kilometres from where it belongs.
+    """
+    geoms = _read_shp(shp)
+    rows = _read_dbf(dbf) if dbf else []
+    src = crs
+    if src is None:
+        if prj is None:
+            raise ValueError("shapefile has no .prj — upload it alongside the .shp "
+                             "or choose the source CRS")
+        src = crs_from_text(prj.decode("latin-1"))
     feats = []
     for i, g in enumerate(geoms):
         row = rows[i] if i < len(rows) else {}
@@ -348,6 +346,19 @@ def read_shapefile_zip(data: bytes, crs: Optional[Crs] = None) -> dict:
     fc = reproject_fc({"type": "FeatureCollection", "features": feats}, src)
     _check_lonlat(fc)
     return fc
+
+
+def read_shapefile_zip(data: bytes, crs: Optional[Crs] = None) -> dict:
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        names = z.namelist()
+        shp = next((n for n in names if n.lower().endswith(".shp")), None)
+        if shp is None:
+            raise ValueError("zip contains no .shp")
+        stem = shp[:-4]
+        find = lambda ext: next((n for n in names if n.lower() == (stem + ext).lower()), None)  # noqa: E731
+        dbf, prj = find(".dbf"), find(".prj")
+        return read_shapefile_parts(z.read(shp), z.read(dbf) if dbf else None,
+                                    z.read(prj) if prj else None, crs)
 
 
 # ───────────────────────────────────── CSV ─────────────────────────────────
@@ -407,9 +418,58 @@ def read_any(filename: str, data: bytes, crs: Optional[Crs] = None) -> dict:
         return read_kmz(data)
     if ext == "zip":
         return read_shapefile_zip(data, crs)
+    if ext == "shp":
+        return read_shapefile_parts(data, None, None, crs)
     if ext in ("csv", "txt"):
         return read_csv_points(data, crs)
     raise ValueError(f"unsupported file type .{ext}")
+
+
+SIDECARS = (".dbf", ".prj", ".shx", ".cpg", ".sbn", ".sbx", ".qix", ".idx")
+
+
+def group_uploads(names: List[str]) -> Tuple[List[str], Dict[str, Dict[str, str]]]:
+    """Split a multi-file selection into layers to read and shapefile sidecars.
+
+    Returns (primary filenames, {shp filename: {".dbf": name, ".prj": name}}). A
+    .dbf or .prj on its own is a sidecar with no shapefile and is simply dropped.
+    """
+    lower = {n: n.lower() for n in names}
+    shps = [n for n in names if lower[n].endswith(".shp")]
+    parts: Dict[str, Dict[str, str]] = {}
+    claimed = set()
+    for shp in shps:
+        stem = lower[shp][:-4]
+        found = {}
+        for n in names:
+            for ext in SIDECARS:
+                if lower[n] == stem + ext:
+                    found[ext] = n
+                    claimed.add(n)
+        parts[shp] = found
+    primary = [n for n in names
+               if n not in claimed and not lower[n].endswith(SIDECARS)]
+    return primary, parts
+
+
+def read_uploads(files: Dict[str, bytes], crs: Optional[Crs] = None) -> List[Tuple[str, dict]]:
+    """Read a whole multi-file selection. Shapefile parts are matched by stem, so
+    selecting `blocks.shp`, `blocks.dbf` and `blocks.prj` together loads one layer.
+
+    Returns [(name, FeatureCollection), …]; raises on the first file that fails.
+    """
+    primary, parts = group_uploads(list(files))
+    out: List[Tuple[str, dict]] = []
+    for name in primary:
+        if name.lower().endswith(".shp"):
+            side = parts.get(name, {})
+            out.append((name, read_shapefile_parts(
+                files[name],
+                files.get(side.get(".dbf", "")),
+                files.get(side.get(".prj", "")), crs)))
+        else:
+            out.append((name, read_any(name, files[name], crs)))
+    return out
 
 
 # ─────────────────────────── layout <-> features ───────────────────────────

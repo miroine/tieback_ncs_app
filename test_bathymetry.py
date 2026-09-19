@@ -15,16 +15,28 @@ class Sess:
         if any(f in geom for f in self.fail):
             raise ConnectionError("simulated outage")
         if "depth_profile" in url:
-            return Resp([{"smoothed": -100.0, "lat": 60.5, "lon": 2.5, "distance": 0},
-                         {"smoothed": -140.0, "lat": 60.6, "lon": 2.6, "distance": 12000}])
+            return Resp([{"smoothed": 100.0, "lat": 60.5, "lon": 2.5, "distance": 0},
+                         {"smoothed": 140.0, "lat": 60.6, "lon": 2.6, "distance": 12000}])
         for key, val in self.by_point.items():
             if key in geom:
                 return Resp(val)
         return Resp({"min": -122.0, "max": -118.0, "avg": -120.0, "smoothed": -119.5})
 
 S.check("depth uses smoothed value, positive down", lambda: B.depth_at(60.5, 2.5, Sess()) == 119.5)
+S.check("EMODnet's positive-depth response is accepted (regression: it was discarded, so every lookup came back empty)",
+        lambda: B.depth_at(60.5, 2.5, Sess({"2.500000": {"min": 31.2, "max": 31.3, "avg": 31.25,
+                                                         "stdev": 0.05, "smoothed": 30.95}})) == 30.95)
+S.check("positive depth also works through the batch helper",
+        lambda: B.depths_at([("A", 60.5, 2.5)], Sess({"2.500000": {"avg": 142.0}}))["A"] == 142.0)
+S.check("zero reading is treated as no data",
+        lambda: B.depth_at(60.5, 2.5, Sess({"2.500000": {"smoothed": 0}})) is None)
 S.check("falls back to avg when smoothed missing", lambda: B.depth_at(60.5, 2.5, Sess({"2.500000": {"avg": -87.0}})) == 87.0)
-S.check("land (positive elevation) → None", lambda: B.depth_at(60.5, 5.0, Sess({"5.000000": {"smoothed": 314.0}})) is None)
+# The REST API reports depth positive-down, so a bare number is a depth, not an elevation.
+# Land and gaps come back without a numeric value.
+S.check("no numeric value (land or gap) → None",
+        lambda: B.depth_at(60.5, 5.0, Sess({"5.000000": {"smoothed": None, "avg": None}})) is None)
+S.check("negative value is read as an elevation and converted to depth",
+        lambda: B.depth_at(60.5, 5.0, Sess({"5.000000": {"smoothed": -314.0}})) == 314.0)
 S.check("no data → None", lambda: B.depth_at(60.5, 5.0, Sess({"5.000000": {}})) is None)
 def wkt():
     s_ = Sess(); B.depth_at(60.5, 2.25, s_)

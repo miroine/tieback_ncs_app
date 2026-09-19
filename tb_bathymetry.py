@@ -4,13 +4,13 @@ tb_bathymetry.py — EMODnet Bathymetry access for TieBack Studio.
 * Map layers: the component draws the EMODnet WMS (`mean_multicolour`, `contours`);
   the constants here document the same service for reference and for reports.
 * Depth sampling: `rest.emodnet-bathymetry.eu/depth_sample` returns DTM statistics for
-  one grid cell, `/depth_profile` a section along a LineString. The DTM is ~115 m
+  one grid cell, `/depth_profile` a section along a LineString. Depths come back
+  positive-down (a 120 m site reads 120, not -120). The DTM is ~115 m
   (1/16 arc-minute) and referenced to LAT, so it is survey-indicative only: use the
   project bathymetry survey for design.
 
 Transport-agnostic: pass anything with `.get(url, params=..., timeout=...)`.
-Depths are returned positive-down in metres; EMODnet reports elevation with land
-positive, so values are negated and land (elevation > 0) is reported as None.
+Depths are returned positive-down in metres. Land and no-data come back as None.
 """
 from __future__ import annotations
 
@@ -23,11 +23,20 @@ ATTRIBUTION = "Bathymetry © EMODnet Bathymetry Consortium (DTM 2022, ~115 m gri
 
 
 def _depth_from_payload(d: dict) -> Optional[float]:
-    """EMODnet returns mean/min/max/smoothed elevations (negative below sea level)."""
-    for key in ("smoothed", "avg", "mean"):
+    """Water depth (m, positive down) from a depth_sample / depth_profile record.
+
+    The REST API reports depth as a POSITIVE number below sea level
+    ({"min": 31.2, "avg": 31.25, "smoothed": 30.95}); some records instead carry a
+    negative elevation. Both are accepted, and a record with no numeric value
+    (land or a gap in the DTM) comes back as None.
+    """
+    for key in ("smoothed", "avg", "mean", "depth", "value"):
         v = d.get(key)
-        if isinstance(v, (int, float)):
-            return -float(v) if v < 0 else None
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            depth = float(v)
+            if depth < 0:                      # negative-elevation convention
+                depth = -depth
+            return depth if depth > 0 else None
     return None
 
 

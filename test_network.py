@@ -196,4 +196,71 @@ def jumper_group():
     assert lay.jumper_group("TMPL_A") == ["PLET_T", "W1", "W2", "W3", "W4"]
     assert lay.jumper_group("W1") == ["TMPL_A"] and lay.jumper_group("HOST_A") == []
 S.check("jumper group lists what sits on a structure", jumper_group)
+def slots_and_landing():
+    lay = demo()
+    lay.nodes["TMPL_A"].item_id = "tmpl_6slot"
+    assert lay.free_slots("TMPL_A") == 2
+    lay.add_node(n.Node("W9", "xt_hxt_10k", 60.5011, 2.6680, label="A-5", sitp_psi=4500))
+    made = lay.assign_to_structure(["W9"], "TMPL_A")
+    assert made == ["SLOT_W9"] and lay.catalog.get(lay.edges["SLOT_W9"].item_id).item_id == "slot_tiein"
+    assert lay.hosted_wells("TMPL_A") == ["W9"] and lay.free_slots("TMPL_A") == 1
+    assert lay.path_to_host("W9")[0][:2] == ["W9", "TMPL_A"]
+    assert not [f for f in lay.validate() if f.severity in ("error", "warning")]
+S.check("landing a well in a slot creates the integral tie-in and routes it", slots_and_landing)
+def landing_idempotent():
+    lay = demo(); lay.nodes["TMPL_A"].item_id = "tmpl_6slot"
+    lay.add_node(n.Node("W9", "xt_hxt_10k", 60.5011, 2.668))
+    lay.assign_to_structure(["W9"], "TMPL_A")
+    assert lay.assign_to_structure(["W9"], "TMPL_A") == []      # already tied in
+S.check("landing the same well twice makes one tie-in", landing_idempotent)
+S.raises("landing in a PLET is rejected", ValueError, lambda: demo().assign_to_structure(["W1"], "PLET_T"))
+S.raises("landing a non-well is rejected", ValueError, lambda: demo().assign_to_structure(["PLET_T"], "TMPL_A"))
+S.raises("landing in an unknown structure is rejected", KeyError, lambda: demo().assign_to_structure(["W1"], "ZZ"))
+def release():
+    lay = demo()
+    lay.nodes["W1"].attrs["in_structure"] = "TMPL_A"
+    removed = lay.release_from_structure(["W1"])
+    assert removed == ["J_W1"] and "in_structure" not in lay.nodes["W1"].attrs
+S.check("releasing a well removes its slot tie-in", release)
+def nearest():
+    lay = demo(); lay.nodes["TMPL_A"].item_id = "tmpl_6slot"
+    lay.add_node(n.Node("W9", "xt_hxt_10k", 60.5011, 2.6681))
+    lay.add_node(n.Node("W10", "xt_hxt_10k", 60.40, 2.40))
+    assert lay.nearest_structure("W9") == "TMPL_A" and lay.nearest_structure("W10") is None
+    lay.nodes["TMPL_A"].item_id = "tmpl_4slot"          # full again
+    assert lay.nearest_structure("W9") is None
+S.check("nearest structure respects distance and free slots", nearest)
+def slot_findings():
+    lay = demo()
+    lay.nodes["W1"].attrs["in_structure"] = "NOPE"
+    assert "SLOT_STRUCTURE" in codes(lay, "error")
+    lay.nodes["W1"].attrs["in_structure"] = "PLET_T"
+    assert "SLOT_STRUCTURE" in codes(lay, "warning")
+    lay.nodes["W1"].attrs["in_structure"] = "TMPL_A"
+    del lay.edges["J_W1"]
+    assert "SLOT_NOT_TIED" in codes(lay, "warning")
+S.check("slot records are checked against the layout", slot_findings)
+def tags():
+    lay = demo()
+    assert lay.set_tags("TMPL_A", [" phase 1 ", "critical", ""]) == ["critical", "phase 1"]
+    lay.set_tags("FL1", ["phase 1"])
+    assert lay.all_tags() == ["critical", "phase 1"]
+    assert lay.by_tags(include=["critical"]) == ["TMPL_A"]
+    assert "TMPL_A" not in lay.by_tags(exclude=["critical"])
+    assert len(lay.by_tags()) == len(lay.nodes) + len(lay.edges)
+    assert lay.set_tags("TMPL_A", []) == [] and "tags" not in lay.nodes["TMPL_A"].attrs
+S.check("tags are cleaned, listed and filtered", tags)
+S.check("tags survive a YAML round-trip",
+        lambda: (lambda l: (l.set_tags("W1", ["option B"]),
+                            n.Layout.from_dict(yaml.safe_load(l.to_yaml()), l.catalog).tags("W1") == ["option B"])[-1])(demo()))
+def move_many():
+    lay = demo()
+    lats = {w: lay.nodes[w].lat for w in ("W1", "W2")}
+    lay.translate_elements(["W1", "W2"], 0.01, -0.02)
+    assert all(abs(lay.nodes[w].lat - (lats[w] + 0.01)) < 1e-9 for w in ("W1", "W2"))
+    assert abs(lay.nodes["W3"].lat - 60.5008) < 1e-9        # untouched
+S.check("several nodes move by the same offset", move_many)
+S.check("a landed well travels with its structure",
+        lambda: (lambda l: (l.nodes["W1"].attrs.__setitem__("in_structure", "TMPL_A"),
+                            "W1" in l.jumper_group("TMPL_A"))[-1])(demo()))
 sys.exit(0 if S.report() else 1)

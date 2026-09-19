@@ -139,4 +139,68 @@ def export():
 S.check("layout -> GeoJSON (lon/lat order, lengths) and re-import", export)
 S.check("point_features incl. MultiPoint",
         lambda: len(im.point_features({"features": [{"geometry": {"type": "MultiPoint", "coordinates": [[1, 2], [3, 4]]}, "properties": {}}]})) == 2)
+
+# ── loose shapefile parts (.shp uploaded next to .dbf / .prj, no zip) ───────
+def parts_of(prefix="wells"):
+    e, nn, _, _ = g.geo_to_utm(60.5, 2.7, 31, "ED50")
+    return {f"{prefix}.shp": shp_file(1, [rec_point(e, nn), rec_point(e + 1000, nn)]),
+            f"{prefix}.dbf": dbf_file([("NAME", "C", 10)], [("A-1",), ("A-2",)]),
+            f"{prefix}.prj": PRJ_ED50_31.encode()}
+
+
+def loose_parts():
+    f = parts_of()
+    fc = im.read_shapefile_parts(f["wells.shp"], f["wells.dbf"], f["wells.prj"])
+    assert len(fc["features"]) == 2
+    lon, lat = fc["features"][0]["geometry"]["coordinates"]
+    la_w, lo_w = g.transform_datum(60.5, 2.7, "ED50", "WGS84")
+    assert abs(lat - la_w) < 1e-9 and abs(lon - lo_w) < 1e-9, "not reprojected from the .prj"
+    assert fc["features"][0]["properties"]["NAME"] == "A-1", "attributes lost"
+    return True
+
+
+S.check("shapefile from loose .shp/.dbf/.prj", loose_parts)
+S.check("loose .shp alone, CRS given",
+        lambda: len(im.read_shapefile_parts(parts_of()["wells.shp"],
+                                            crs=im.Crs("utm", "ED50", 31))["features"]) == 2)
+S.raises("loose .shp alone without a CRS raises", ValueError,
+         lambda: im.read_shapefile_parts(parts_of()["wells.shp"]))
+S.check("read_any accepts a bare .shp with a CRS",
+        lambda: len(im.read_any("wells.shp", parts_of()["wells.shp"],
+                                im.Crs("utm", "ED50", 31))["features"]) == 2)
+S.check("zip reader still works through the shared parts reader",
+        lambda: len(im.read_any("wells.zip", zipit({k: v for k, v in parts_of().items()}))["features"]) == 2)
+
+
+def grouping():
+    names = ["wells.shp", "wells.dbf", "wells.prj", "wells.shx", "blocks.geojson", "notes.txt"]
+    primary, parts = im.group_uploads(names)
+    assert primary == ["wells.shp", "blocks.geojson", "notes.txt"], primary
+    assert parts["wells.shp"][".dbf"] == "wells.dbf" and parts["wells.shp"][".prj"] == "wells.prj"
+    return True
+
+
+S.check("multi-file selection groups shapefile sidecars by stem", grouping)
+S.check("sidecar without its .shp is dropped",
+        lambda: im.group_uploads(["orphan.dbf", "a.geojson"])[0] == ["a.geojson"])
+S.check("sidecar matching is case-insensitive",
+        lambda: im.group_uploads(["W.SHP", "w.dbf"])[1]["W.SHP"][".dbf"] == "w.dbf")
+S.check("two shapefiles in one selection stay separate",
+        lambda: len(im.group_uploads(["a.shp", "a.prj", "b.shp", "b.prj"])[0]) == 2)
+
+
+def read_many():
+    files = dict(parts_of())
+    files["pts.geojson"] = json.dumps({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "geometry": {"type": "Point", "coordinates": [2.7, 60.5]}, "properties": {}}]}).encode()
+    out = im.read_uploads(files)
+    assert [nm for nm, _ in out] == ["wells.shp", "pts.geojson"], [nm for nm, _ in out]
+    assert len(out[0][1]["features"]) == 2 and len(out[1][1]["features"]) == 1
+    return True
+
+
+S.check("read_uploads reads a mixed selection in one go", read_many)
+S.raises("read_uploads reports the file that failed", ValueError,
+         lambda: im.read_uploads({"bad.shp": b"\x00" * 120, "bad.prj": PRJ_WGS.encode()}))
+
 sys.exit(0 if S.report() else 1)

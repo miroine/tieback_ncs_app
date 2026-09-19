@@ -120,8 +120,13 @@ def from_display(layout, lat, lon):
     return tb_geo.transform_datum(lat, lon, "WGS84", layout.settings.datum)
 
 
-def build_payload(layout: "net.Layout", findings=None, display: Optional["DisplaySettings"] = None) -> dict:
-    """Geometry is always WGS84 (display datum); the layout may be stored in ED50."""
+def build_payload(layout: "net.Layout", findings=None, display: Optional["DisplaySettings"] = None,
+                  visible: Optional[set] = None) -> dict:
+    """Geometry is always WGS84 (display datum); the layout may be stored in ED50.
+
+    `visible` (element ids) comes from the tag filter — elements outside it are sent
+    with hidden=True so the map leaves them out without losing them.
+    """
     findings = layout.validate() if findings is None else findings
     display = display or DisplaySettings()
     sev = severity_map(findings)
@@ -132,7 +137,9 @@ def build_payload(layout: "net.Layout", findings=None, display: Optional["Displa
                   footprint=[cat.get(n.item_id).footprint_l_m, cat.get(n.item_id).footprint_w_m],
                   heading=float(n.attrs.get("heading_deg", 0.0) or 0.0),
                   lat=to_display(layout, n.lat, n.lon)[0], lon=to_display(layout, n.lat, n.lon)[1],
-                  phase=n.phase, hipps=n.hipps,
+                  phase=n.phase, hipps=n.hipps, tags=layout.tags(n.node_id),
+                  hidden=(visible is not None and n.node_id not in visible),
+                  in_structure=n.attrs.get("in_structure", ""),
                   severity=sev.get(n.node_id, "")) for n in layout.nodes.values()]
     edges = [dict(id=e.edge_id, label=e.label or e.edge_id, item_id=e.item_id,
                   item=cat.get(e.item_id).name, kind=cat.get(e.item_id).category,
@@ -143,6 +150,9 @@ def build_payload(layout: "net.Layout", findings=None, display: Optional["Displa
                   color=edge_color(layout, e, display, sev.get(e.edge_id, "")),
                   dash=cat.get(e.item_id).line_dash, fluid=fluid_of(layout, e),
                   length_m=round(layout.edge_length(e), 1), phase=e.phase,
+                  tags=layout.tags(e.edge_id),
+                  hidden=(visible is not None and (e.edge_id not in visible
+                                                   or e.from_node not in visible or e.to_node not in visible)),
                   severity=sev.get(e.edge_id, "")) for e in layout.edges.values()]
     return {"nodes": nodes, "edges": edges,
             "display": {"symbol_scale": float(display.symbol_scale), "line_scale": float(display.line_scale),
@@ -203,6 +213,15 @@ def apply_event(layout: "net.Layout", event: Optional[dict], state: dict) -> dic
             layout.add_node(net.Node(nid, it.item_id, la, lo,
                                      label=str(p.get("label") or nid), phase=int(p.get("phase", 1))))
             res.update(changed=True, selected=nid, message=f"Added {it.name} {nid}")
+        elif typ == "move_many":
+            ids = [str(x) for x in (p.get("ids") or []) if x in layout.nodes]
+            anchor = p.get("anchor")
+            if anchor not in layout.nodes:
+                raise KeyError(f"unknown node {anchor}")
+            la, lo = from_display(layout, float(p["lat"]), float(p["lon"]))
+            dlat, dlon = la - layout.nodes[anchor].lat, lo - layout.nodes[anchor].lon
+            layout.translate_elements(ids, dlat, dlon)
+            res.update(changed=True, selected=anchor, message=f"Moved {len(ids)} items")
         elif typ == "move_group":
             nid = p["id"]
             if nid not in layout.nodes:
@@ -288,13 +307,21 @@ def apply_display_event(display: "DisplaySettings", event: Optional[dict]) -> bo
 
 
 def render_map(payload: dict, palette: dict, overlays: List[dict], selected: Optional[str],
-               height: int = 620, fit_token: int = 0, key: str = "tieback_map"):
-    """Render the component (Streamlit only). Returns the latest event or None."""
+               height: int = 620, fit_token: int = 0, key: str = "tieback_map",
+               rasters: Optional[List[dict]] = None):
+    """Render the component (Streamlit only). Returns the latest event or None.
+
+    `rasters` are image overlays (imported grids) — {title, url, bounds, opacity}.
+    Only their `rev` goes into the content hash: a grid image is a ~100 kB data
+    URI and hashing it on every rerun would cost more than redrawing it.
+    """
     global _component_func
     import streamlit.components.v1 as components
     if _component_func is None:
         _component_func = components.declare_component("tieback_map", path=str(COMPONENT_DIR))
-    rev = content_rev(payload, [o.get("rev", o.get("layer")) for o in overlays])
+    rasters = list(rasters or [])
+    rev = content_rev(payload, [o.get("rev", o.get("layer")) for o in overlays],
+                      [r.get("rev", r.get("title")) for r in rasters])
     return _component_func(payload=payload, palette=palette, rules=EDGE_RULES, overlays=overlays,
-                           selected=selected, height=height, rev=rev, fit_token=fit_token,
-                           key=key, default=None)
+                           rasters=rasters, selected=selected, height=height, rev=rev,
+                           fit_token=fit_token, key=key, default=None)

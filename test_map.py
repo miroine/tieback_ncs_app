@@ -141,6 +141,28 @@ def pick_ed50():
     assert abs(st["picked"][0] - tb_geo.transform_datum(61.25, 3.4, "WGS84", "ED50")[0]) < 1e-12
 S.check("picked point converted into the layout datum", pick_ed50)
 
+def move_many_event():
+    lay, st = demo(), {}
+    w2 = lay.nodes["W2"].lat
+    r = m.apply_event(lay, ev(1, "move_many", {"ids": ["W1", "W2"], "anchor": "W1",
+                                               "lat": lay.nodes["W1"].lat + 0.01,
+                                               "lon": lay.nodes["W1"].lon}), st)
+    assert r["changed"] and "2 items" in r["message"] and abs(lay.nodes["W2"].lat - (w2 + 0.01)) < 1e-9
+S.check("move_many shifts the whole selection by the anchor's offset", move_many_event)
+S.check("move_many with an unknown anchor errors",
+        lambda: m.apply_event(demo(), ev(1, "move_many", {"ids": ["W1"], "anchor": "ZZ", "lat": 60, "lon": 2}), {})["error"])
+def payload_tags_and_hidden():
+    lay = demo()
+    lay.set_tags("W1", ["phase 2"])
+    pl = m.build_payload(lay, None, None, set(lay.by_tags(exclude=["phase 2"])))
+    w1 = [x for x in pl["nodes"] if x["id"] == "W1"][0]
+    assert w1["hidden"] and w1["tags"] == ["phase 2"]
+    assert [e["id"] for e in pl["edges"] if e["hidden"]] == ["J_W1"]     # its jumper goes too
+    assert not [x for x in pl["nodes"] if x["id"] == "TMPL_A"][0]["hidden"]
+S.check("tag filter marks elements hidden, including lines to a hidden node", payload_tags_and_hidden)
+S.check("no filter means nothing hidden",
+        lambda: not any(x["hidden"] for x in m.build_payload(demo())["nodes"]))
+
 # ── appearance: scale, colour mode, fluid ──
 def fluid_defaults():
     lay = demo()

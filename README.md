@@ -19,7 +19,7 @@ come from Sodir FactMaps. All need internet access (Streamlit Community Cloud ha
 | Tool | Action |
 |---|---|
 | Select | Click to select. `Del` deletes, `Esc` returns to Select. |
-| Move | Drag equipment to reposition it. A structure carries its jumpered wells and modules unless *with wells* is unticked. |
+| Move | Drag equipment to reposition it. Shift-click (or Ctrl/Cmd-click) several items to move them as a set. A structure carries its jumpered wells and modules unless *with wells* is unticked. |
 | Size / Lines sliders | Scale equipment symbols and line thickness on the map; the setting is saved with the project. |
 | Pick point | Click the map to set a placement point: load a concept template there, move the whole layout to it, or send the selected item to it. |
 | Layer control (top right) | Basemap, EMODnet bathymetry and depth contours, plus any NCS or imported layer. |
@@ -31,6 +31,20 @@ Properties (label, coordinates in lat/lon or UTM, water depth, heading, SITP, HI
 fixed length, route bends) are edited below the map; bulk edits in *All equipment*. Lines sharing the
 same two end points are drawn side by side, and *Copy route from* runs a new line (chemical, gas lift,
 fibre) along an existing corridor.
+
+Equipment carries free-text **tags**, set in its properties. The sidebar filters the map on them —
+*Show only* and *Hide* — so a phase, an option or a work package can be isolated without deleting
+anything. **Undo** and **Redo** sit above the map and cover map edits, form changes and bulk edits,
+25 steps deep.
+
+Wells are landed in a template or manifold through *Wells in template slots*, which records the slot and
+creates the integral slot tie-in rather than a fabricated spool; wells already jumpered to the structure
+are shown as in-slot. A well placed within 250 m of a structure with a free slot is landed automatically.
+Landed wells travel with the structure when it is dragged.
+
+With concepts saved as cases, the sidebar picks the **active concept** — cost, schedule, flow assurance,
+viability and the report all follow it, and edits are saved back when you switch away. Other concepts can
+be drawn on the map behind the active one for comparison.
 
 Appearance (sidebar) sets how lines are coloured — by equipment type, by fluid or service
 (multiphase, oil, gas, condensate, water injection, gas lift, chemical, control, power), by development
@@ -62,15 +76,17 @@ from the production-path checks and the flow-assurance network but are costed an
 | `tb_map.py`, `tb_map_component/` | Custom bi-directional Leaflet component (Streamlit v1 protocol, no npm build) and the Python event reducer |
 | `tb_tiein.py` | Tie-in screening: Sodir facilities or layout hosts as candidate hosts, distance and bearing, trial tie-back costed and solved, and one-click attach to the layout |
 | `tb_basis.py` | Design basis checklist in SI units (m, bar, °C, Sm³/d, tonn, MNOK) with entered / default / missing / to-resolve status |
+| `tb_viability.py` | Concept viability checklist: layout integrity, deliverability, hydrate margin at design rate and turndown, cool-down, erosion, slugging, spans, schedule float and cost spread, each with a target and what to do if it is not met |
 | `tb_cases.py` | Concept cases: snapshot a whole project, compare cases on cost, schedule and flow assurance, save/load case sets |
 | `tb_report.py` | DG2/DG3 screening report as a Word document with charts |
 | `tb_well.py` | Well IPR (PI, Vogel, gas back-pressure), tubing VLP via Beggs-Brill, and the operating point against network back-pressure |
 | `tb_costio.py` | Cost catalog import/export as Excel workbook or CSV pair |
 | `tb_bathymetry.py` | EMODnet Bathymetry: WMS layers, `depth_sample` for node depths, route profiles along each line, taut-string free-span screening |
 | `tb_ncs.py` | Sodir FactMaps client (fields 502, discoveries 503, facilities 304, pipelines 311, wellbores 204/205, facilities 304 in place / 307 all, discoveries 503 active / 504 all, licences 616, blocks 802, quadrants 803, structural elements 704), pagination past 1000 records, Esri-JSON fallback, layer re-discovery, and the service's own renderer so overlays match FactMaps symbology |
-| `tb_import.py` | GeoJSON, KML/KMZ, zipped shapefile (pure Python), CSV points; ED50/WGS84 geographic + UTM; layout → GeoJSON |
+| `tb_import.py` | GeoJSON, KML/KMZ, shapefile — zipped or as loose `.shp`/`.dbf`/`.prj` — CSV points; multi-file selections grouped by stem; ED50/WGS84 geographic + UTM; layout → GeoJSON |
+| `tb_grid.py` | Grid surfaces (`.grd` and friends): Surfer ASCII/6/7, IRAP classic ASCII, ZMAP+, ESRI ASCII — sniffed by content; bilinear sampling, marching-squares contours, colour image overlay resampled into Web Mercator, and the grid as a depth source in place of EMODnet |
 | `tb_geo.py` | UTM/TM (Krüger 6th order), ED50↔WGS84 Helmert, Vincenty, route lengths |
-| `tb_catalog.py` | 24 equipment items, 6 vessel spreads, overrides, uncertainty, connection rules, YAML library |
+| `tb_catalog.py` | 34 equipment items, 6 vessel spreads, overrides, uncertainty, connection rules, YAML library |
 | `tb_network.py` | Layout graph, design checks, quantity take-off |
 | `tb_schedule.py` | CPM with NCS weather windows, generated tie-back activity network |
 | `tb_cost.py` | Cost build-up, correlated Monte Carlo, schedule-driven phasing |
@@ -90,6 +106,30 @@ Internal units: metres, inches (ID), psi, days, USD.
   (YAML, Excel or CSV all import from the Equipment catalog tab).
 - `tools/pvt_studio_selftest.py` — run against PVT Studio's `nodal.py` to check the Beggs-Brill fixes.
 - `docs/ROADMAP.md` — the improvement plan, easiest first.
+
+## Map layers and grid surfaces
+*Import map layer* in the sidebar takes several files at once. A shapefile can be a `.zip` or the loose
+parts — select `blocks.shp` together with its `.dbf` and `.prj` and they are matched by stem into one
+layer. A shapefile carries no coordinate system of its own, so without a `.prj` you must choose the
+source CRS (WGS84/ED50, geographic or UTM); nothing is guessed.
+
+Grid surfaces load from the same uploader. `.grd` says nothing about what is inside it, so the file is
+recognised by content, not extension: **Surfer** ASCII (`DSAA`), Surfer 6 (`DSBB`) and Surfer 7
+(`DSRB`), **IRAP classic ASCII** (`-996`), **ZMAP+** and **ESRI ASCII** (`ncols`/`nrows`). A grid is
+drawn two ways — a colour image and contour lines, both switchable in the map's layer control — and the
+image is resampled pixel by pixel into Web Mercator, so a UTM grid lands where it belongs instead of
+being stretched over its lat/lon box (at 60°N that error runs to hundreds of metres across a field).
+
+A loaded grid is also a **depth source**. *Set element depths* fills `water_depth_m` on every subsea
+element from the surface, and *Seabed profiles from grid* stores a profile along each line, which the
+free-span and cool-down screening then uses instead of the regional EMODnet DTM. Say whether the values
+are depths (positive down) or elevations (negative below sea level) — the app reads the sign and
+proposes one, and you confirm it. A line that leaves the grid stores nothing rather than a half-covered
+profile that would quietly bias the checks, and the panel reports how much of the layout the grid covers.
+
+Two things the reader will not do: rotated grids are refused rather than drawn in the wrong place, and
+IRAP classic ASCII does not record which axis cycles fastest — if a surface comes out with its axes
+swapped, tick *Swap grid axes*.
 
 ## Tie-in screening
 Load the Sodir facility layers, select a template or manifold, and screen it: every candidate host within
@@ -122,14 +162,14 @@ When deploying to Streamlit Community Cloud, upload the whole folder — `test_f
 
 | Suite | Checks |
 |---|---|
-| geo / catalog / network / schedule / cost | 29 / 19 / 43 / 25 / 22 |
+| geo / catalog / network / schedule / cost | 29 / 19 / 55 / 25 / 22 |
 | well (IPR/VLP) / cost spreadsheet IO / cases / report | 22 / 12 / 11 / 7 |
-| tie-in screening / design basis | 21 / 21 |
-| map bridge | 36 |
-| ncs / import / flow assurance | 23 / 27 / 43 |
-| multiphase / thermal / bathymetry | 31 / 25 / 22 |
-| JS core logic / component protocol simulation | 41 / 34 |
-| Headless UI (stub Streamlit, scripted interactions) | 45 |
+| tie-in screening / design basis / viability | 21 / 21 / 14 |
+| map bridge | 40 |
+| ncs / import / grid surfaces / flow assurance | 23 / 38 / 83 / 43 |
+| multiphase / thermal / bathymetry | 31 / 25 / 26 |
+| JS core logic / component protocol simulation | 46 / 41 |
+| Headless UI (stub Streamlit, scripted interactions) | 56 |
 
 The protocol test runs the real component script against a fake DOM and fake Leaflet; the UI test
 executes `tieback_app.py` with a stub Streamlit. Neither replaces a check in a real browser.
@@ -138,7 +178,10 @@ executes `tieback_app.py` with a stub Streamlit. Neither replaces a check in a r
 - Flow assurance draws a longitudinal section (seabed, line and riser with pressure/temperature) and a
   pipe cross-section build-up from the catalog (bore, wall or armour, insulation, coating, carrier pipe).
   The cross-section is schematic: wall thickness is a catalog input, not a pressure-containment calculation.
-- Bathymetry (EMODnet DTM, ~115 m grid, LAT datum) is indicative: use the project survey for design.
+- Bathymetry (EMODnet DTM, ~115 m grid, LAT datum) is indicative: use the project survey for design —
+  loading it as a grid surface and pressing *Set element depths* is the way to do that.
+- An imported grid is read as north-up in the CRS you give it; the app has no way to check that CRS
+  against the file, so a grid placed with the wrong zone will look plausible and be wrong.
   Free spans use a taut-string model with no pipe stiffness or weight — survey candidates, not design spans.
 - Sodir's oil/gas and gas/condensate classes use picture fills; the map approximates them with hatch
   patterns. Solid classes (oil green, gas red) come straight from the service renderer.
