@@ -744,6 +744,34 @@ items:
   wall_thickness_in: 0.0
   insulation_mm: 0.0
   coating_mm: 0.0
+- item_id: slot_tiein
+  name: Template slot tie-in (integral)
+  category: jumper
+  cost_basis: unit
+  procurement_usd: 250000.0
+  fabrication_usd: 150000.0
+  engineering_frac: 0.08
+  install_spread: rig
+  install_days: 0.5
+  lead_time_months: 12
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 4
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: "XT landed directly in the template flowbase \u2014 no fabricated spool"
+  symbol: ''
+  footprint_l_m: 0.0
+  footprint_w_m: 0.0
+  line_color: '#6F6F6F'
+  line_dash: 2 3
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
 - item_id: jumper_rigid
   name: Rigid spool/jumper
   category: jumper
