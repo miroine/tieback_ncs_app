@@ -76,6 +76,7 @@ from the production-path checks and the flow-assurance network but are costed an
 | `tb_map.py`, `tb_map_component/` | Custom bi-directional Leaflet component (Streamlit v1 protocol, no npm build) and the Python event reducer |
 | `tb_tiein.py` | Tie-in screening: Sodir facilities or layout hosts as candidate hosts, distance and bearing, trial tie-back costed and solved, and one-click attach to the layout |
 | `tb_basis.py` | Design basis checklist in SI units (m, bar, °C, Sm³/d, tonn, MNOK) with entered / default / missing / to-resolve status |
+| `tb_chemistry.py` | Production chemistry: MEG vs methanol sizing and recommendation (Hammerschmidt inverted, Nielsen-Bucklin cross-check, regeneration credit, life cost), and a screen for wax, asphaltenes, scale, emulsions, corrosion, souring, sand and naphthenates that names the test when the data is missing |
 | `tb_viability.py` | Concept viability checklist: layout integrity, deliverability, hydrate margin at design rate and turndown, cool-down, erosion, slugging, spans, schedule float and cost spread, each with a target and what to do if it is not met |
 | `tb_cases.py` | Concept cases: snapshot a whole project, compare cases on cost, schedule and flow assurance, save/load case sets |
 | `tb_report.py` | DG2/DG3 screening report as a Word document with charts |
@@ -106,6 +107,29 @@ Internal units: metres, inches (ID), psi, days, USD.
   (YAML, Excel or CSV all import from the Equipment catalog tab).
 - `tools/pvt_studio_selftest.py` — run against PVT Studio's `nodal.py` to check the Beggs-Brill fixes.
 - `docs/ROADMAP.md` — the improvement plan, easiest first.
+
+## Production chemistry
+The Flow assurance tab ends with a production-chemistry screen. It sizes **MEG and methanol side by
+side** for the subcooling you need — required concentration, injection rate, annual make-up with a
+regeneration credit, and life cost including the MEG plant — and says which way the numbers point, with
+the argument for each written out so it can be disagreed with. Methanol is cross-checked against
+Nielsen-Bucklin, because Hammerschmidt stops being valid above about 25 wt %; where a concentration
+runs past the correlation's range the row says so instead of quietly using it.
+
+Beyond hydrates it screens **wax, gelling on shutdown, asphaltenes, scale, emulsions, internal
+corrosion, sour service, reservoir souring, sand erosion, under-deposit corrosion and naphthenates**.
+Where the fluid data is missing the row comes back *unknown* and names the test that would settle it —
+WAT by cross-polar microscopy, SARA and onset pressure, a full water analysis — rather than guessing.
+Wax appearance temperature in particular cannot be inferred from API gravity, and the screen does not
+pretend otherwise.
+
+## Editing the schedule
+The activity network is generated from the layout, so it is rebuilt whenever the layout changes. The
+Schedule tab's *Edit the plan* table lets you override any activity's duration, hold one back with a
+*start no earlier than* date, and add your own milestones (rig contract, partner approval) on fixed
+dates. Edits are stored as overrides keyed by activity id, so they survive the rebuild; an override on
+an activity that no longer exists is ignored rather than breaking the schedule. Everything saves with
+the project.
 
 ## Comparing concepts on the map
 The sidebar has a **Concepts** section: a dropdown for the concept being edited — cost, schedule, flow
@@ -181,14 +205,15 @@ When deploying to Streamlit Community Cloud, upload the whole folder — `test_f
 
 | Suite | Checks |
 |---|---|
-| geo / catalog / network / schedule / cost | 29 / 19 / 55 / 25 / 22 |
+| geo / catalog / network / schedule / cost | 29 / 19 / 55 / 35 / 22 |
 | well (IPR/VLP) / cost spreadsheet IO / cases / report | 22 / 12 / 19 / 7 |
+| production chemistry | 52 |
 | tie-in screening / design basis / viability | 21 / 21 / 14 |
 | map bridge | 40 |
 | ncs / import / grid surfaces / flow assurance | 23 / 43 / 83 / 43 |
-| multiphase / thermal / bathymetry | 31 / 25 / 26 |
+| multiphase / thermal / bathymetry | 31 / 25 / 37 |
 | JS core logic / component protocol simulation | 49 / 44 |
-| Headless UI (stub Streamlit, scripted interactions) | 65 |
+| Headless UI (stub Streamlit, scripted interactions) | 71 |
 
 The protocol test runs the real component script against a fake DOM and fake Leaflet; the UI test
 executes `tieback_app.py` with a stub Streamlit. Neither replaces a check in a real browser.
@@ -201,6 +226,10 @@ version behind fails the build with an error in the app's own code rather than i
 - Flow assurance draws a longitudinal section (seabed, line and riser with pressure/temperature) and a
   pipe cross-section build-up from the catalog (bore, wall or armour, insulation, coating, carrier pipe).
   The cross-section is schematic: wall thickness is a catalog input, not a pressure-containment calculation.
+- Bathymetry: the two EMODnet endpoints answer in different shapes — `depth_sample` returns an object,
+  `depth_profile` a bare array of elevations with no positions — and both sign conventions occur. The
+  batch helpers swallow failures so one bad point cannot stop a run, so *Test EMODnet connection* is
+  the button that tells a network problem from genuinely absent data.
 - Bathymetry (EMODnet DTM, ~115 m grid, LAT datum) is indicative: use the project survey for design —
   loading it as a grid surface and pressing *Set element depths* is the way to do that.
 - An imported grid is read as north-up in the CRS you give it; the app has no way to check that CRS
@@ -216,6 +245,9 @@ version behind fails the build with an error in the app's own code rather than i
   concept is loaded. A filter that matches nothing shows a *Clear tag filter* button rather than
   silently leaving the map blank.
 - Backward pass ignores weather windows → float on windowed activities is indicative.
+- Production chemistry is a screen, not a study: Hammerschmidt for concentration, an assumed fraction
+  for methanol lost to the gas and condensate, and placeholder chemical prices. Confirm with a
+  thermodynamic flash on the real fluid and the operator's chemical contracts.
 - Flow assurance is steady-state screening: Beggs & Brill only (no Hagedorn-Brown/Gray yet), black-oil
   fluid, tree networks only (no loops or choke modelling), one host arrival pressure. Joule-Thomson
   cooling is included via a real-gas coefficient from the Z-factor derivative. Slugging is an indicator

@@ -4,8 +4,10 @@ tb_bathymetry.py — EMODnet Bathymetry access for TieBack Studio.
 * Map layers: the component draws the EMODnet WMS (`mean_multicolour`, `contours`);
   the constants here document the same service for reference and for reports.
 * Depth sampling: `rest.emodnet-bathymetry.eu/depth_sample` returns DTM statistics for
-  one grid cell, `/depth_profile` a section along a LineString. Depths come back
-  positive-down (a 120 m site reads 120, not -120). The DTM is ~115 m
+  one grid cell as an object ({"avg": -100.97, "smoothed": -100.93, …}), while
+  `/depth_profile` answers with a bare array of elevations along the LineString
+  ([-100.97, -100.84, …]) and no positions. Both sign conventions appear in the
+  wild, so every value is normalised to metres positive down. The DTM is ~115 m
   (1/16 arc-minute) and referenced to LAT, so it is survey-indicative only: use the
   project bathymetry survey for design.
 
@@ -69,14 +71,21 @@ def depth_profile(vertices: Sequence[Tuple[float, float]], session, timeout: flo
     r = session.get(f"{REST_URL}/depth_profile", params={"geom": f"LINESTRING({wkt})"}, timeout=timeout)
     r.raise_for_status()
     data = r.json()
-    rows = data if isinstance(data, list) else data.get("profile") or data.get("samples") or []
+    rows = data if isinstance(data, list) else (data.get("profile") or data.get("samples") or [])
     out = []
     for i, rec in enumerate(rows):
-        if not isinstance(rec, dict):
-            continue
-        d = _depth_from_payload(rec)
-        out.append(dict(index=i, depth_m=d, lat=rec.get("lat"), lon=rec.get("lon"),
-                        distance_m=rec.get("distance")))
+        if isinstance(rec, dict):
+            out.append(dict(index=i, depth_m=_depth_from_payload(rec), lat=rec.get("lat"),
+                            lon=rec.get("lon"), distance_m=rec.get("distance")))
+        elif rec is None:
+            out.append(dict(index=i, depth_m=None, lat=None, lon=None, distance_m=None))
+        elif isinstance(rec, (int, float)) and not isinstance(rec, bool):
+            # The live service answers with a bare array of elevations —
+            # [-100.97, -100.84, …] — one per sample along the line, with no
+            # positions. Skipping non-dict records (as this did) threw the whole
+            # profile away and looked exactly like "no bathymetry data".
+            out.append(dict(index=i, depth_m=_depth_from_payload({"value": rec}),
+                            lat=None, lon=None, distance_m=None))
     return out
 
 
@@ -186,3 +195,48 @@ def fill_node_depths(layout, session, only_blank: bool = True, timeout: float = 
         if d is not None:
             layout.nodes[nid].water_depth_m = round(d, 1)
     return got
+
+
+def diagnose(session, lat: float = 60.5, lon: float = 2.5, timeout: float = 20.0) -> Dict[str, dict]:
+    """Probe both endpoints once and report what came back.
+
+    The batch helpers swallow failures so one bad point cannot stop a run, which
+    makes a network or service problem look identical to "no data here". This is
+    what the app calls to tell the two apart.
+    """
+    out: Dict[str, dict] = {}
+    try:
+        r = session.get(f"{REST_URL}/depth_sample",
+                        params={"geom": f"POINT({lon:.6f} {lat:.6f})"}, timeout=timeout)
+        body = r.json() if r.status_code == 200 else None
+        out["depth_sample"] = {"ok": r.status_code == 200 and _depth_from_payload(body or {}) is not None,
+                               "status": r.status_code,
+                               "depth_m": _depth_from_payload(body or {}),
+                               "body": str(body)[:160], "error": ""}
+    except Exception as exc:  # noqa: BLE001
+        out["depth_sample"] = {"ok": False, "status": None, "depth_m": None, "body": "",
+                               "error": f"{type(exc).__name__}: {exc}"[:200]}
+    try:
+        rows = depth_profile([(lat, lon), (lat + 0.02, lon + 0.02)], session, timeout)
+        got = [r for r in rows if r.get("depth_m") is not None]
+        out["depth_profile"] = {"ok": bool(got), "status": 200, "samples": len(rows),
+                                "with_depth": len(got), "error": ""}
+    except Exception as exc:  # noqa: BLE001
+        out["depth_profile"] = {"ok": False, "status": None, "samples": 0, "with_depth": 0,
+                                "error": f"{type(exc).__name__}: {exc}"[:200]}
+    return out
+
+
+def diagnosis_message(report: Dict[str, dict]) -> str:
+    """One line a user can act on."""
+    s, pr = report.get("depth_sample", {}), report.get("depth_profile", {})
+    if s.get("ok") and pr.get("ok"):
+        return f"EMODnet reachable — {s['depth_m']:.0f} m at the test point, profile returned {pr['with_depth']} samples."
+    if s.get("error") or pr.get("error"):
+        return ("Could not reach EMODnet: " + (s.get("error") or pr.get("error"))
+                + ". Check that the deployment allows outbound HTTPS to rest.emodnet-bathymetry.eu.")
+    if s.get("status") and s["status"] != 200:
+        return f"EMODnet answered HTTP {s['status']} — the service is up but refused the request."
+    if s.get("ok") and not pr.get("ok"):
+        return "Point depths work but the profile call returned nothing usable — report this."
+    return "EMODnet answered but had no depth at the test point (land, or outside the DTM)."

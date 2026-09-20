@@ -166,6 +166,13 @@ class ScheduleSettings:
     weather_factor: float = 1.25         # offshore duration multiplier (NCS)
     marine_window: Window = field(default_factory=Window)
     phase_offset_days: Dict[int, float] = field(default_factory=dict)  # phase -> delay of award
+    # ── user edits to the generated plan ──
+    # The network is generated from the layout, so it is rebuilt whenever the
+    # layout changes. Edits are kept as overrides keyed by activity id rather than
+    # as edited activities, so they survive that rebuild.
+    duration_overrides: Dict[str, float] = field(default_factory=dict)   # act_id -> days
+    not_before: Dict[str, str] = field(default_factory=dict)             # act_id -> ISO date
+    extra_milestones: List[dict] = field(default_factory=list)           # {name, date, [after]}
 
 
 def build_from_layout(layout, settings: Optional[ScheduleSettings] = None):
@@ -320,4 +327,48 @@ def build_from_layout(layout, settings: Optional[ScheduleSettings] = None):
                          milestone=True, group="Milestones", phase=ph))
         first_oil_preds.append((fo, 0))
 
+    apply_overrides(sch, s)
     return sch.compute(), element_map
+
+
+def _as_date(v) -> Optional[dt.date]:
+    if isinstance(v, dt.date):
+        return v
+    if isinstance(v, str) and v.strip():
+        try:
+            return dt.date.fromisoformat(v.strip()[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def apply_overrides(sch: Schedule, s: ScheduleSettings) -> Schedule:
+    """Apply the user's edits to the generated network.
+
+    Durations and 'start no earlier than' dates are keyed by activity id, and
+    unknown ids are ignored — an override for an activity that no longer exists
+    (its equipment was deleted) must not break the schedule.
+    """
+    for aid, days in (s.duration_overrides or {}).items():
+        a = sch.activities.get(aid)
+        if a is not None and days is not None:
+            d = float(days)
+            if d >= 0:
+                a.duration_days = d
+    for aid, when in (s.not_before or {}).items():
+        a = sch.activities.get(aid)
+        d = _as_date(when)
+        if a is not None and d is not None:
+            a.fixed_start = d
+    for i, m in enumerate(s.extra_milestones or []):
+        d = _as_date(m.get("date"))
+        name = str(m.get("name") or "").strip()
+        if not (d and name):
+            continue
+        aid = f"USER_MS_{i + 1}"
+        if aid in sch.activities:
+            continue
+        after = m.get("after") or ""
+        preds = [(after, 0)] if after in sch.activities else []
+        sch.add(Activity(aid, name, 0, preds, milestone=True, group="Milestones", fixed_start=d))
+    return sch

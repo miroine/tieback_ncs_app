@@ -75,4 +75,74 @@ def weather():
     s2, _ = s.build_from_layout(demo(), s.ScheduleSettings(weather_factor=1.0))
     assert abs(s2.activities["P1_INST_STRUCT"].duration_days * 1.25 - A["P1_INST_STRUCT"].duration_days) < 1e-9
 S.check("weather factor scales campaign duration", weather)
+
+# ── user edits to the generated plan ───────────────────────────────────────
+def override_changes_the_duration():
+    lay = demo()
+    base = s.build_from_layout(lay, s.ScheduleSettings())[0]
+    st2 = s.ScheduleSettings(duration_overrides={"FEED": 500.0})
+    got = s.build_from_layout(lay, st2)[0]
+    assert base.activities["FEED"].duration_days != 500.0
+    assert got.activities["FEED"].duration_days == 500.0
+    assert got.activities["DG3"].es > base.activities["DG3"].es, "DG3 must move with FEED"
+    return True
+S.check("a duration override moves the activities after it", override_changes_the_duration)
+
+S.check("an override for an unknown activity is ignored",
+        lambda: s.build_from_layout(demo(), s.ScheduleSettings(
+            duration_overrides={"NOT_AN_ACTIVITY": 10.0}))[0] is not None)
+S.check("a negative override is ignored rather than breaking the network",
+        lambda: s.build_from_layout(demo(), s.ScheduleSettings(
+            duration_overrides={"FEED": -50.0}))[0].activities["FEED"].duration_days > 0)
+
+def not_before_holds_an_activity():
+    lay = demo()
+    base = s.build_from_layout(lay, s.ScheduleSettings())[0]
+    late = base.activities["FEED"].es + dt.timedelta(days=400)
+    got = s.build_from_layout(lay, s.ScheduleSettings(not_before={"FEED": late.isoformat()}))[0]
+    assert got.activities["FEED"].es == late, (got.activities["FEED"].es, late)
+    return True
+S.check("'start no earlier than' holds an activity back", not_before_holds_an_activity)
+
+S.check("a not-before earlier than the network allows changes nothing",
+        lambda: s.build_from_layout(demo(), s.ScheduleSettings(
+            not_before={"FEED": "2000-01-01"}))[0].activities["FEED"].es
+        == s.build_from_layout(demo(), s.ScheduleSettings())[0].activities["FEED"].es)
+S.check("an unparseable date is ignored",
+        lambda: s.build_from_layout(demo(), s.ScheduleSettings(
+            not_before={"FEED": "not a date"}))[0] is not None)
+
+def extra_milestone_appears():
+    got = s.build_from_layout(demo(), s.ScheduleSettings(
+        extra_milestones=[{"name": "Rig contract signed", "date": "2028-03-01"},
+                          {"name": "", "date": "2028-03-01"},          # no name — skipped
+                          {"name": "No date", "date": ""}]))[0]        # no date — skipped
+    added = [a for a in got.activities.values() if a.name == "Rig contract signed"]
+    assert len(added) == 1, [a.name for a in got.activities.values() if a.group == "Milestones"]
+    assert added[0].milestone and added[0].es == dt.date(2028, 3, 1), added[0]
+    assert not any(a.name == "No date" for a in got.activities.values())
+    return True
+S.check("a user milestone is added on its date, and incomplete rows are skipped", extra_milestone_appears)
+
+S.check("a user milestone can hang off an existing activity",
+        lambda: s.build_from_layout(demo(), s.ScheduleSettings(
+            extra_milestones=[{"name": "After FEED", "date": "2027-01-01", "after": "FEED"}]
+        ))[0].activities["USER_MS_1"].predecessors == [("FEED", 0)])
+S.check("an unknown predecessor is dropped, not an error",
+        lambda: s.build_from_layout(demo(), s.ScheduleSettings(
+            extra_milestones=[{"name": "Loose", "date": "2029-01-01", "after": "NOPE"}]
+        ))[0].activities["USER_MS_1"].predecessors == [])
+
+def edits_round_trip_through_a_project_file():
+    import tb_project, tb_cost
+    st2 = s.ScheduleSettings(duration_overrides={"FEED": 500.0}, not_before={"DG3": "2029-01-01"},
+                             extra_milestones=[{"name": "Rig contract", "date": "2028-03-01", "after": ""}])
+    txt = tb_project.project_to_yaml("P", demo(), tb_cost.CostSettings(), st2)
+    back = tb_project.project_from_yaml_full(txt)[3]
+    assert back.duration_overrides == {"FEED": 500.0}, back.duration_overrides
+    assert back.not_before == {"DG3": "2029-01-01"}, back.not_before
+    assert back.extra_milestones[0]["name"] == "Rig contract", back.extra_milestones
+    return True
+S.check("plan edits are saved and reloaded with the project", edits_round_trip_through_a_project_file)
+
 sys.exit(0 if S.report() else 1)

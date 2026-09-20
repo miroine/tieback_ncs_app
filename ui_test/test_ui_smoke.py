@@ -30,7 +30,7 @@ class _Sess:
 req = types.ModuleType("requests"); req.Session = _Sess; sys.modules["requests"] = req
 sys.path.insert(0, os.path.join(ROOT, "ui_test"))
 from _harness import Suite
-import tb_geo, tb_cases
+import tb_geo, tb_cases, tb_schedule
 S = Suite("test_ui_smoke")
 SRC = open(os.path.join(ROOT, "tieback_app.py")).read()
 CODE = compile(SRC, "tieback_app.py", "exec")
@@ -633,5 +633,78 @@ def save_and_delete_concept():
     assert ss.active_case == "(working layout)"
     return True
 S.check("save and delete a concept from the sidebar", save_and_delete_concept)
+
+def start_from_an_empty_design():
+    """'Is it possible to start from an empty design?' — yes, and the app must
+    stay usable with nothing on the map."""
+    run(press={"Load demo"})
+    assert ss.layout.nodes
+    run(press={"New empty layout (keeps catalog)"})
+    assert not ss.layout.nodes and not ss.layout.edges, (len(ss.layout.nodes), len(ss.layout.edges))
+    assert ss.project_name == "New tie-back", ss.project_name
+    hard = [m for m in errs() if "Traceback" in str(m) or "failed" in str(m).lower()]
+    assert not hard, hard
+    # and equipment can be placed straight onto the empty layout
+    run(event=ev(9001, "add_node", {"item_id": "tmpl_4slot", "lat": 60.5, "lon": 2.5}))
+    assert len(ss.layout.nodes) == 1, len(ss.layout.nodes)
+    return True
+S.check("start from an empty design and place the first item", start_from_an_empty_design)
+
+
+def empty_layout_keeps_the_catalog():
+    before = len(ss.layout.catalog.items)
+    run(press={"New empty layout (keeps catalog)"})
+    assert len(ss.layout.catalog.items) == before, "the catalog must survive"
+    return True
+S.check("an empty layout keeps the equipment catalog", empty_layout_keeps_the_catalog)
+
+
+def chemistry_screen_runs():
+    run(press={"Load demo"})
+    run(press={"Run production chemistry screen"})
+    assert not [m for m in errs() if "chemistry" in str(m).lower()], errs()
+    assert ss.get("chem_inputs") is not None
+    return True
+S.check("the production chemistry screen runs on the demo", chemistry_screen_runs)
+
+
+def plan_edits_move_first_oil():
+    """The milestones/activity editor has to change the dates, not just the table."""
+    run(press={"Load demo"})
+    sched = ss.sched_settings
+    before = tb_schedule.build_from_layout(ss.layout, sched)[0]
+    fo_before = sorted([a for a in before.activities.values()
+                        if a.act_id.endswith("_FIRST_OIL")], key=lambda a: a.es)[0].es
+    sched.duration_overrides = {"FEED": float(before.activities["FEED"].duration_days) + 200.0}
+    sched.extra_milestones = [{"name": "Rig contract", "date": "2028-05-01", "after": ""}]
+    run()
+    after = tb_schedule.build_from_layout(ss.layout, sched)[0]
+    fo_after = sorted([a for a in after.activities.values()
+                       if a.act_id.endswith("_FIRST_OIL")], key=lambda a: a.es)[0].es
+    # 200 days of extra FEED pushes an offshore campaign past the marine season,
+    # so first production slips further than the 200 days added — that is the
+    # weather window doing its job, not an error.
+    assert (fo_after - fo_before).days >= 200, (fo_before, fo_after)
+    assert any(a.name == "Rig contract" for a in after.activities.values()), "added milestone missing"
+    return True
+S.check("editing an activity duration moves first production", plan_edits_move_first_oil)
+
+
+def plan_edits_survive_a_layout_change():
+    """Overrides are keyed by activity id so a layout edit does not wipe them."""
+    ss.sched_settings.duration_overrides = {"FEED": 500.0}
+    run(event=ev(9002, "add_node", {"item_id": "xt_vxt_10k", "lat": 60.58, "lon": 2.56}))
+    sch = tb_schedule.build_from_layout(ss.layout, ss.sched_settings)[0]
+    assert sch.activities["FEED"].duration_days == 500.0, sch.activities["FEED"].duration_days
+    return True
+S.check("plan edits survive a change to the layout", plan_edits_survive_a_layout_change)
+
+
+def stale_override_is_ignored():
+    ss.sched_settings.duration_overrides = {"NO_SUCH_ACTIVITY": 99.0}
+    run()
+    assert not [m for m in errs() if "schedule" in str(m).lower()], errs()
+    return True
+S.check("an override for an activity that no longer exists is ignored", stale_override_is_ignored)
 
 sys.exit(0 if S.report() else 1)

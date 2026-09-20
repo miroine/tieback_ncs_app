@@ -114,4 +114,70 @@ def long_valley():
     assert sp[0]["truncated"] and sp[0]["length_m"] == 200
 S.check("a long valley is reported but its length truncated", long_valley)
 S.check("WMS layer names", lambda: B.WMS_LAYERS["colour"] == "mean_multicolour" and B.WMS_URL.endswith("/wms"))
+
+# ── the live payload shapes, as the service actually answers ───────────────
+class _Resp:
+    def __init__(self, payload, status=200): self._p, self.status_code = payload, status
+    def raise_for_status(self):
+        if self.status_code != 200: raise RuntimeError(f"HTTP {self.status_code}")
+    def json(self): return self._p
+class _Sess:
+    """Fake transport. `payload` may be one body, or {endpoint: body} — the two
+    endpoints answer with different shapes, so diagnose() needs both."""
+    def __init__(self, payload, status=200): self._p, self._s = payload, status
+    def get(self, url, params=None, timeout=None):
+        self.last = (url, params)
+        body = self._p
+        if isinstance(body, dict) and body and set(body) <= {"depth_sample", "depth_profile"}:
+            body = body["depth_profile" if url.endswith("depth_profile") else "depth_sample"]
+        return _Resp(body() if callable(body) else body, self._s)
+class _Boom:
+    def get(self, *a, **k): raise OSError("Name or service not known")
+
+# depth_profile answers with a bare array of elevations, no positions
+LIVE_PROFILE = [-100.96802, -100.84319, -100.77765, -99.71803]
+LIVE_SAMPLE = {"avg": -100.96802, "smoothed": -100.93068, "elementarySurfaces": 1,
+               "reference": {"identifier": "GEBCO2024", "type": "DTM"}}
+
+def profile_from_bare_array():
+    """Regression: the service returns [-100.97, …]; skipping non-dict records
+    threw every sample away and looked exactly like 'no bathymetry data'."""
+    rows = B.depth_profile([(60.5, 2.5), (60.55, 2.6)], _Sess(LIVE_PROFILE))
+    assert len(rows) == 4, rows
+    assert all(r["depth_m"] is not None for r in rows), rows
+    assert abs(rows[0]["depth_m"] - 100.968) < 1e-3, rows[0]
+    return True
+S.check("depth_profile reads the live bare-array payload", profile_from_bare_array)
+
+S.check("a bare-array profile resamples to the requested count",
+        lambda: len(B.resample_profile(B.depth_profile([(60.5, 2.5), (60.6, 2.6)],
+                                                       _Sess(LIVE_PROFILE)), 12)) == 12)
+S.check("depth_sample reads the live object payload",
+        lambda: abs(B.depth_at(60.5, 2.5, _Sess(LIVE_SAMPLE)) - 100.93068) < 1e-4)
+S.check("record-shaped profiles still work",
+        lambda: B.depth_profile([(60.5, 2.5), (60.6, 2.6)],
+                                _Sess([{"smoothed": -90.0, "lat": 60.5, "lon": 2.5}]))[0]["depth_m"] == 90.0)
+S.check("a null in the array is a gap, not a zero",
+        lambda: B.depth_profile([(60.5, 2.5), (60.6, 2.6)], _Sess([-90.0, None, -92.0]))[1]["depth_m"] is None)
+
+def diagnose_reports_success():
+    rep = B.diagnose(_Sess(lambda: LIVE_SAMPLE))
+    assert rep["depth_sample"]["ok"], rep
+    assert abs(rep["depth_sample"]["depth_m"] - 100.93) < 0.1
+    return True
+S.check("diagnose reports a working service", diagnose_reports_success)
+
+S.check("diagnose reports a network failure with its reason",
+        lambda: "Name or service not known" in B.diagnose(_Boom())["depth_sample"]["error"])
+S.check("diagnose reports an HTTP error status",
+        lambda: B.diagnose(_Sess({}, status=503))["depth_sample"]["status"] == 503)
+S.check("the message names the host when the network is down",
+        lambda: "rest.emodnet-bathymetry.eu" in B.diagnosis_message(B.diagnose(_Boom())))
+S.check("the message is positive when both endpoints answer",
+        lambda: "reachable" in B.diagnosis_message(B.diagnose(
+            _Sess({"depth_sample": LIVE_SAMPLE, "depth_profile": LIVE_PROFILE}))))
+S.check("diagnose counts the profile samples it got",
+        lambda: B.diagnose(_Sess({"depth_sample": LIVE_SAMPLE,
+                                  "depth_profile": LIVE_PROFILE}))["depth_profile"]["with_depth"] == 4)
+
 sys.exit(0 if S.report() else 1)
