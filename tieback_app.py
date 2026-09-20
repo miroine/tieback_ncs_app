@@ -45,7 +45,7 @@ import tb_tiein
 import tb_viability
 import tb_well
 
-APP_VERSION = "0.13.0"
+APP_VERSION = "0.13.1"
 HERE = Path(__file__).parent
 DEMO_FILE = HERE / "test_fixtures" / "demo_field_a_tieback.yaml"
 
@@ -214,6 +214,60 @@ def set_project(name, layout, cost, sched, fa_settings=None, display=None):
     bump()
 
 
+# ── deployment check ───────────────────────────────────────────────────────
+# Files get deployed piecemeal — a stale tb_*.py against a current tieback_app.py
+# used to crash with an AttributeError deep inside a tab, which reads as an app
+# bug rather than as a half-finished upload. Every cross-module call this version
+# added is declared here, checked once at start-up, and guarded at its call site,
+# so an out-of-date file disables one feature and names itself instead of taking
+# the whole app down.
+REQUIRED_API = {
+    "tb_bathymetry": ["diagnose", "diagnosis_message", "depth_profile", "fetch_route_profiles"],
+    "tb_cases": ["concept_overlay", "color_for", "snapshot", "restore"],
+    "tb_chemistry": ["screen", "recommend_inhibitor", "ChemistryInputs", "InhibitorCase"],
+    "tb_grid": ["read_grid", "image_overlay", "contour_features", "sniff"],
+    "tb_import": ["as_upload_list", "read_uploads", "read_shapefile_parts"],
+    "tb_schedule": ["apply_overrides", "build_from_layout"],
+    "tb_map": ["render_map", "DisplaySettings"],
+    "tb_network": ["place_at", "by_tags", "set_tags"],
+    "tb_project": ["project_from_yaml_full"],
+    "tb_flowassurance": ["solve", "well_inputs"],
+    "tb_tiein": ["screen"],
+    "tb_basis": ["design_basis"],
+    "tb_report": ["build_report"],
+    "tb_viability": ["viability"],
+}
+_MODULES = {"tb_flowassurance": "tb_fa"}
+
+
+def _module(name):
+    return globals().get(_MODULES.get(name, name))
+
+
+def stale_modules() -> dict:
+    """{module: [missing attribute, …]} for every file older than this app."""
+    out = {}
+    for name, attrs in REQUIRED_API.items():
+        mod = _module(name)
+        if mod is None:
+            out[name] = ["module not imported"]
+            continue
+        # a few of these live on the Layout class rather than at module level
+        missing = [a for a in attrs
+                   if not hasattr(mod, a) and not hasattr(tb_network.Layout, a)]
+        if missing:
+            out[name] = missing
+    return out
+
+
+def has_api(module_name: str, *attrs) -> bool:
+    """True when this feature's module is current enough to call."""
+    mod = _module(module_name)
+    return mod is not None and all(hasattr(mod, a) for a in attrs)
+
+
+STALE = stale_modules()
+
 WORKING_LAYOUT = "(working layout)"
 
 
@@ -304,6 +358,14 @@ st.markdown(f"""
 st.markdown(f"""<div class="tb-title"><h1>TieBack Studio</h1>
 <span>{S.project_name} · subsea tie-back concept design for the Norwegian Continental Shelf</span></div>""",
             unsafe_allow_html=True)
+
+if STALE:
+    st.error(
+        "**Part of this deployment is out of date.** These files are older than "
+        f"`tieback_app.py` (v{APP_VERSION}) and the features that need them are turned off:\n\n"
+        + "\n".join(f"- `{m}.py` — missing `{'`, `'.join(a)}`" for m, a in STALE.items())
+        + "\n\nRe-upload the whole folder rather than individual files. "
+          "Everything else on this page still works.")
 
 # ─────────────────────── cached computations ───────────────────────
 
@@ -595,7 +657,9 @@ with st.sidebar:
                 else:
                     st.warning("No depths returned for those positions — press *Test EMODnet "
                                "connection* below.")
-    if st.button("Test EMODnet connection"):
+    if not has_api("tb_bathymetry", "diagnose"):
+        st.caption("Connection test needs a newer tb_bathymetry.py — see the banner at the top.")
+    elif st.button("Test EMODnet connection"):
         # The batch helpers swallow failures so one bad point cannot stop a run,
         # which makes a network problem look exactly like "no data here".
         with st.spinner("Probing rest.emodnet-bathymetry.eu…"):
@@ -760,17 +824,8 @@ with st.sidebar:
             rows.append(("Demo file first line", first))
         tpl_n = len(list((HERE / "templates").glob("*.yaml"))) if (HERE / "templates").exists() else 0
         rows.append(("Templates found", str(tpl_n)))
-        expected = {"tb_project": "project_from_yaml_full", "tb_map": "DisplaySettings",
-                    "tb_network": "place_at", "tb_flowassurance": "solve_coupled", "tb_tiein": "screen",
-                    "tb_basis": "design_basis", "tb_cases": "snapshot", "tb_report": "build_report"}
-        stale = []
-        for mod_name, attr in expected.items():
-            mod = globals().get(mod_name if mod_name != "tb_flowassurance" else "tb_fa")
-            target = mod if attr[0].isupper() or not hasattr(tb_network.Layout, attr) else tb_network.Layout
-            if mod is None or not (hasattr(mod, attr) or hasattr(tb_network.Layout, attr)):
-                stale.append(mod_name)
-        rows.append(("Module check", "all modules current" if not stale
-                     else f"older than the app: {', '.join(stale)} — re-upload those files"))
+        rows.append(("Module check", "all modules current" if not STALE
+                     else "; ".join(f"{m}.py is missing {', '.join(a)}" for m, a in STALE.items())))
         st.dataframe(pd.DataFrame(rows, columns=["Item", "Value"]), hide_index=True, **STRETCH)
 
     st.markdown('<div class="tb-foot">Screening tool for engineering concept work. Default cost rates are '
@@ -1469,73 +1524,77 @@ with tab_sched:
         k[3].metric("Last activity ends", SCH.finish.strftime("%b %Y"))
 
         st.markdown("#### Edit the plan")
-        st.caption("The network is generated from the layout, so it is rebuilt whenever the layout "
-                   "changes. Edits are kept as overrides against the activity, and survive that "
-                   "rebuild; an override on an activity that no longer exists is ignored.")
-        ed_tbl = pd.DataFrame([{
-            "id": a.act_id, "activity": a.name, "group": a.group,
-            "duration_days": float(a.duration_days),
-            "not_before": (ssn.not_before or {}).get(a.act_id, ""),
-            "starts": a.es.isoformat() if a.es else "",
-            "float_days": round(a.total_float_days, 1),
-            "critical": bool(a.critical),
-        } for a in sorted(acts.values(), key=lambda x: (x.es or dt.date.min, x.act_id))])
-        edited = st.data_editor(
-            ed_tbl, hide_index=True, key=f"acts_edit_{REV}", **STRETCH,
-            disabled=["id", "activity", "group", "starts", "float_days", "critical"],
-            column_config={
-                "id": "Activity id", "activity": "Activity", "group": "Group",
-                "duration_days": st.column_config.NumberColumn("Duration (days)", min_value=0.0,
-                                                               step=1.0, format="%.0f"),
-                "not_before": st.column_config.TextColumn("Start no earlier than (YYYY-MM-DD)"),
-                "starts": "Scheduled start", "float_days": "Float (days)", "critical": "Critical"})
-        ms_tbl = pd.DataFrame(ssn.extra_milestones or [{"name": "", "date": "", "after": ""}])
-        for col in ("name", "date", "after"):
-            if col not in ms_tbl.columns:
-                ms_tbl[col] = ""
-        ms_new = st.data_editor(
-            ms_tbl[["name", "date", "after"]], hide_index=True, num_rows="dynamic",
-            key=f"ms_edit_{REV}", **STRETCH,
-            column_config={"name": "Your own milestone", "date": "Date (YYYY-MM-DD)",
-                           "after": st.column_config.SelectboxColumn(
-                               "After (optional)", options=[""] + sorted(acts))})
-        bb = st.columns([1, 1, 3])
-        if bb[0].button("Apply plan edits", type="primary"):
-            base = pd.DataFrame([{"id": a.act_id, "duration_days": float(a.duration_days)}
-                                 for a in acts.values()]).set_index("id")["duration_days"]
-            overrides, not_before = dict(ssn.duration_overrides or {}), {}
-            for r in edited.to_dict("records"):
-                aid = r["id"]
-                try:
-                    d_new = float(r["duration_days"])
-                except (TypeError, ValueError):
-                    continue
-                # only keep a duration the user actually changed, so a later layout
-                # change still flows through to everything they left alone
-                if aid in base and abs(d_new - float(base[aid])) > 1e-9:
-                    overrides[aid] = d_new
-                elif aid in overrides and abs(d_new - float(base[aid])) <= 1e-9:
-                    overrides.pop(aid, None)
-                nb = str(r.get("not_before") or "").strip()
-                if nb:
-                    not_before[aid] = nb
-            ssn.duration_overrides, ssn.not_before = overrides, not_before
-            ssn.extra_milestones = [
-                {"name": str(r.get("name") or "").strip(), "date": str(r.get("date") or "").strip(),
-                 "after": str(r.get("after") or "").strip()}
-                for r in ms_new.to_dict("records")
-                if str(r.get("name") or "").strip() and str(r.get("date") or "").strip()]
-            bump()
-            st.rerun()
-        n_ov = len(ssn.duration_overrides or {}) + len(ssn.not_before or {})
-        if bb[1].button("Reset all edits", disabled=not (n_ov or ssn.extra_milestones)):
-            ssn.duration_overrides, ssn.not_before, ssn.extra_milestones = {}, {}, []
-            bump()
-            st.rerun()
-        if n_ov or ssn.extra_milestones:
-            bb[2].caption(f"{len(ssn.duration_overrides or {})} duration override(s), "
-                          f"{len(ssn.not_before or {})} date constraint(s), "
-                          f"{len(ssn.extra_milestones or [])} added milestone(s) — saved with the project")
+        PLAN_OK = has_api("tb_schedule", "apply_overrides")
+        if not PLAN_OK:
+            st.info("Editing the plan needs a newer tb_schedule.py — see the banner at the top.")
+        if PLAN_OK:
+            st.caption("The network is generated from the layout, so it is rebuilt whenever the layout "
+                       "changes. Edits are kept as overrides against the activity, and survive that "
+                       "rebuild; an override on an activity that no longer exists is ignored.")
+            ed_tbl = pd.DataFrame([{
+                "id": a.act_id, "activity": a.name, "group": a.group,
+                "duration_days": float(a.duration_days),
+                "not_before": (ssn.not_before or {}).get(a.act_id, ""),
+                "starts": a.es.isoformat() if a.es else "",
+                "float_days": round(a.total_float_days, 1),
+                "critical": bool(a.critical),
+            } for a in sorted(acts.values(), key=lambda x: (x.es or dt.date.min, x.act_id))])
+            edited = st.data_editor(
+                ed_tbl, hide_index=True, key=f"acts_edit_{REV}", **STRETCH,
+                disabled=["id", "activity", "group", "starts", "float_days", "critical"],
+                column_config={
+                    "id": "Activity id", "activity": "Activity", "group": "Group",
+                    "duration_days": st.column_config.NumberColumn("Duration (days)", min_value=0.0,
+                                                                   step=1.0, format="%.0f"),
+                    "not_before": st.column_config.TextColumn("Start no earlier than (YYYY-MM-DD)"),
+                    "starts": "Scheduled start", "float_days": "Float (days)", "critical": "Critical"})
+            ms_tbl = pd.DataFrame(ssn.extra_milestones or [{"name": "", "date": "", "after": ""}])
+            for col in ("name", "date", "after"):
+                if col not in ms_tbl.columns:
+                    ms_tbl[col] = ""
+            ms_new = st.data_editor(
+                ms_tbl[["name", "date", "after"]], hide_index=True, num_rows="dynamic",
+                key=f"ms_edit_{REV}", **STRETCH,
+                column_config={"name": "Your own milestone", "date": "Date (YYYY-MM-DD)",
+                               "after": st.column_config.SelectboxColumn(
+                                   "After (optional)", options=[""] + sorted(acts))})
+            bb = st.columns([1, 1, 3])
+            if bb[0].button("Apply plan edits", type="primary"):
+                base = pd.DataFrame([{"id": a.act_id, "duration_days": float(a.duration_days)}
+                                     for a in acts.values()]).set_index("id")["duration_days"]
+                overrides, not_before = dict(ssn.duration_overrides or {}), {}
+                for r in edited.to_dict("records"):
+                    aid = r["id"]
+                    try:
+                        d_new = float(r["duration_days"])
+                    except (TypeError, ValueError):
+                        continue
+                    # only keep a duration the user actually changed, so a later layout
+                    # change still flows through to everything they left alone
+                    if aid in base and abs(d_new - float(base[aid])) > 1e-9:
+                        overrides[aid] = d_new
+                    elif aid in overrides and abs(d_new - float(base[aid])) <= 1e-9:
+                        overrides.pop(aid, None)
+                    nb = str(r.get("not_before") or "").strip()
+                    if nb:
+                        not_before[aid] = nb
+                ssn.duration_overrides, ssn.not_before = overrides, not_before
+                ssn.extra_milestones = [
+                    {"name": str(r.get("name") or "").strip(), "date": str(r.get("date") or "").strip(),
+                     "after": str(r.get("after") or "").strip()}
+                    for r in ms_new.to_dict("records")
+                    if str(r.get("name") or "").strip() and str(r.get("date") or "").strip()]
+                bump()
+                st.rerun()
+            n_ov = len(ssn.duration_overrides or {}) + len(ssn.not_before or {})
+            if bb[1].button("Reset all edits", disabled=not (n_ov or ssn.extra_milestones)):
+                ssn.duration_overrides, ssn.not_before, ssn.extra_milestones = {}, {}, []
+                bump()
+                st.rerun()
+            if n_ov or ssn.extra_milestones:
+                bb[2].caption(f"{len(ssn.duration_overrides or {})} duration override(s), "
+                              f"{len(ssn.not_before or {})} date constraint(s), "
+                              f"{len(ssn.extra_milestones or [])} added milestone(s) — saved with the project")
 
         tbl = pd.DataFrame(SCH.table())
         tbl["row"] = np.where(tbl["critical"], "● " + tbl["name"], tbl["name"])
@@ -1923,147 +1982,151 @@ with tab_fa:
 
         # ── production chemistry ──
         st.markdown("#### Production chemistry")
-        st.caption("Screening on the data entered — correlations with a limited valid range and "
-                   "rules of thumb. Replace with the operator's fluid analyses before FEED.")
-        ci = S.get("chem_inputs") or tb_chemistry.ChemistryInputs()
-        with st.form(f"chem_form_{REV}"):
-            q = st.columns(4)
-            wat = q[0].number_input("Wax appearance temp (°C)", -99.0, 90.0,
-                                    float(ci.wax_appearance_c) if ci.wax_appearance_c is not None else -99.0,
-                                    1.0, help="−99 = not measured")
-            pour = q[1].number_input("Pour point (°C)", -99.0, 60.0,
-                                     float(ci.pour_point_c) if ci.pour_point_c is not None else -99.0, 1.0)
-            co2 = q[2].number_input("CO₂ (mol %)", -1.0, 50.0,
-                                    float(ci.co2_mol_pct) if ci.co2_mol_pct is not None else -1.0, 0.1,
-                                    help="−1 = not measured")
-            h2s = q[3].number_input("H₂S (ppm)", -1.0, 50000.0,
-                                    float(ci.h2s_ppm) if ci.h2s_ppm is not None else -1.0, 10.0)
-            q = st.columns(4)
-            asph = q[0].number_input("Asphaltenes (wt %)", -1.0, 25.0,
-                                     float(ci.asphaltene_wt_pct) if ci.asphaltene_wt_pct is not None else -1.0, 0.1)
-            psat = q[1].number_input("Saturation pressure (bara)", -1.0, 700.0,
-                                     float(ci.saturation_pressure_bara) if ci.saturation_pressure_bara is not None else -1.0, 5.0)
-            sal = q[2].number_input("Formation water salinity (wt %)", -1.0, 35.0,
-                                    float(ci.formation_water_salinity_wt_pct) if ci.formation_water_salinity_wt_pct is not None else -1.0, 0.5)
-            ba = q[3].number_input("Barium (mg/l)", -1.0, 5000.0,
-                                   float(ci.barium_mg_l) if ci.barium_mg_l is not None else -1.0, 10.0)
-            q = st.columns(4)
-            mat = q[0].selectbox("Flowline material", ["carbon steel", "carbon steel + inhibitor",
-                                                        "13Cr CRA", "clad / lined CRA"],
-                                 index=["carbon steel", "carbon steel + inhibitor", "13Cr CRA",
-                                        "clad / lined CRA"].index(ci.material)
-                                 if ci.material in ("carbon steel", "carbon steel + inhibitor",
-                                                    "13Cr CRA", "clad / lined CRA") else 0)
-            sw = q[1].checkbox("Seawater injection (no sulphate removal)", bool(ci.sulphate_injection))
-            sand = q[2].checkbox("Sand expected", bool(ci.sand_expected))
-            tan = q[3].number_input("TAN (mg KOH/g)", -1.0, 10.0,
-                                    float(ci.tan_mg_koh_g) if ci.tan_mg_koh_g is not None else -1.0, 0.1)
-            if st.form_submit_button("Run production chemistry screen", type="primary"):
-                none_if = lambda v, sentinel=-1.0: None if v <= sentinel else float(v)  # noqa: E731
-                S.chem_inputs = tb_chemistry.ChemistryInputs(
-                    wax_appearance_c=None if wat <= -99 else float(wat),
-                    pour_point_c=None if pour <= -99 else float(pour),
-                    co2_mol_pct=none_if(co2), h2s_ppm=none_if(h2s),
-                    asphaltene_wt_pct=none_if(asph), saturation_pressure_bara=none_if(psat),
-                    formation_water_salinity_wt_pct=none_if(sal), barium_mg_l=none_if(ba),
-                    material=mat, sulphate_injection=bool(sw), sand_expected=bool(sand),
-                    tan_mg_koh_g=none_if(tan), inhibitor=S.fa_settings.inhibitor)
-                st.rerun()
+        CHEM_OK = has_api("tb_chemistry", "screen", "recommend_inhibitor")
+        if not CHEM_OK:
+            st.info("Production chemistry needs tb_chemistry.py — see the banner at the top.")
+        if CHEM_OK:
+            st.caption("Screening on the data entered — correlations with a limited valid range and "
+                       "rules of thumb. Replace with the operator's fluid analyses before FEED.")
+            ci = S.get("chem_inputs") or tb_chemistry.ChemistryInputs()
+            with st.form(f"chem_form_{REV}"):
+                q = st.columns(4)
+                wat = q[0].number_input("Wax appearance temp (°C)", -99.0, 90.0,
+                                        float(ci.wax_appearance_c) if ci.wax_appearance_c is not None else -99.0,
+                                        1.0, help="−99 = not measured")
+                pour = q[1].number_input("Pour point (°C)", -99.0, 60.0,
+                                         float(ci.pour_point_c) if ci.pour_point_c is not None else -99.0, 1.0)
+                co2 = q[2].number_input("CO₂ (mol %)", -1.0, 50.0,
+                                        float(ci.co2_mol_pct) if ci.co2_mol_pct is not None else -1.0, 0.1,
+                                        help="−1 = not measured")
+                h2s = q[3].number_input("H₂S (ppm)", -1.0, 50000.0,
+                                        float(ci.h2s_ppm) if ci.h2s_ppm is not None else -1.0, 10.0)
+                q = st.columns(4)
+                asph = q[0].number_input("Asphaltenes (wt %)", -1.0, 25.0,
+                                         float(ci.asphaltene_wt_pct) if ci.asphaltene_wt_pct is not None else -1.0, 0.1)
+                psat = q[1].number_input("Saturation pressure (bara)", -1.0, 700.0,
+                                         float(ci.saturation_pressure_bara) if ci.saturation_pressure_bara is not None else -1.0, 5.0)
+                sal = q[2].number_input("Formation water salinity (wt %)", -1.0, 35.0,
+                                        float(ci.formation_water_salinity_wt_pct) if ci.formation_water_salinity_wt_pct is not None else -1.0, 0.5)
+                ba = q[3].number_input("Barium (mg/l)", -1.0, 5000.0,
+                                       float(ci.barium_mg_l) if ci.barium_mg_l is not None else -1.0, 10.0)
+                q = st.columns(4)
+                mat = q[0].selectbox("Flowline material", ["carbon steel", "carbon steel + inhibitor",
+                                                            "13Cr CRA", "clad / lined CRA"],
+                                     index=["carbon steel", "carbon steel + inhibitor", "13Cr CRA",
+                                            "clad / lined CRA"].index(ci.material)
+                                     if ci.material in ("carbon steel", "carbon steel + inhibitor",
+                                                        "13Cr CRA", "clad / lined CRA") else 0)
+                sw = q[1].checkbox("Seawater injection (no sulphate removal)", bool(ci.sulphate_injection))
+                sand = q[2].checkbox("Sand expected", bool(ci.sand_expected))
+                tan = q[3].number_input("TAN (mg KOH/g)", -1.0, 10.0,
+                                        float(ci.tan_mg_koh_g) if ci.tan_mg_koh_g is not None else -1.0, 0.1)
+                if st.form_submit_button("Run production chemistry screen", type="primary"):
+                    none_if = lambda v, sentinel=-1.0: None if v <= sentinel else float(v)  # noqa: E731
+                    S.chem_inputs = tb_chemistry.ChemistryInputs(
+                        wax_appearance_c=None if wat <= -99 else float(wat),
+                        pour_point_c=None if pour <= -99 else float(pour),
+                        co2_mol_pct=none_if(co2), h2s_ppm=none_if(h2s),
+                        asphaltene_wt_pct=none_if(asph), saturation_pressure_bara=none_if(psat),
+                        formation_water_salinity_wt_pct=none_if(sal), barium_mg_l=none_if(ba),
+                        material=mat, sulphate_injection=bool(sw), sand_expected=bool(sand),
+                        tan_mg_koh_g=none_if(tan), inhibitor=S.fa_settings.inhibitor)
+                    st.rerun()
 
-        edges_res = list(FA_RES.edges.values())
-        t_min = min((r.t_out_c for r in edges_res), default=S.fa_settings.seabed_temp_c)
-        p_min = min((r.p_out_bara for r in edges_res), default=S.fa_settings.arrival_bara)
-        km_total = sum(r.length_m for r in edges_res) / 1000.0
-        # The screen judges on the produced stream, so use the field-wide blend of
-        # the per-well inputs rather than any single well.
-        w_in = tb_fa.well_inputs(LAY)
-        tot_oil = sum(w.oil_sm3_d for w in w_in.values()) or 1.0
-        wc_field = (sum(w.oil_sm3_d * w.water_cut / max(1 - w.water_cut, 1e-6) for w in w_in.values())
-                    / (tot_oil + sum(w.oil_sm3_d * w.water_cut / max(1 - w.water_cut, 1e-6)
-                                     for w in w_in.values()))) if w_in else 0.1
-        fluid0 = tb_multiphase.Fluid(
-            api=sum(w.oil_sm3_d * w.api for w in w_in.values()) / tot_oil if w_in else 38.0,
-            gas_sg=sum(w.oil_sm3_d * w.gas_sg for w in w_in.values()) / tot_oil if w_in else 0.70,
-            gor_scf_stb=(sum(w.oil_sm3_d * w.gor_sm3_sm3 for w in w_in.values()) / tot_oil * 5.6146
-                         if w_in else 1500.0),
-            water_cut=min(max(wc_field, 0.0), 0.95))
-        water_field_sm3_d = sum(w.oil_sm3_d * w.water_cut / max(1 - w.water_cut, 1e-6)
-                                for w in w_in.values())
-        rows_ch = tb_chemistry.screen(
-            fluid0, S.get("chem_inputs") or tb_chemistry.ChemistryInputs(),
-            min_temp_c=t_min, arrival_temp_c=(h0["arrival_t_c"] if FA_RES.host else t_min),
-            seabed_temp_c=S.fa_settings.seabed_temp_c, min_pressure_bara=p_min,
-            water_cut=fluid0.water_cut,
-            hydrate_margin_c=None if min_margin != min_margin else float(min_margin),
-            tieback_km=km_total)
-        counts = tb_chemistry.summary(rows_ch)
-        vd = tb_chemistry.verdict(rows_ch)
-        (st.error if counts[tb_chemistry.HIGH] else
-         st.warning if counts[tb_chemistry.UNKNOWN] else st.success)(vd)
-        kc = st.columns(4)
-        kc[0].metric("High", counts[tb_chemistry.HIGH])
-        kc[1].metric("Medium", counts[tb_chemistry.MEDIUM])
-        kc[2].metric("Unknown", counts[tb_chemistry.UNKNOWN])
-        kc[3].metric("Low", counts[tb_chemistry.LOW])
-        st.dataframe(pd.DataFrame(rows_ch), hide_index=True, **STRETCH,
-                     column_config={"issue": "Threat", "risk": "Risk", "basis": "Judged on",
-                                    "why": "Why it matters", "mitigation": "What to do",
-                                    "data_needed": "Data still needed"})
-        gaps = tb_chemistry.data_gaps(rows_ch)
-        if gaps:
-            with st.expander(f"Fluid work this screen is asking for ({len(gaps)} items)"):
-                for gtext in gaps:
-                    st.markdown(f"- {gtext}")
+            edges_res = list(FA_RES.edges.values())
+            t_min = min((r.t_out_c for r in edges_res), default=S.fa_settings.seabed_temp_c)
+            p_min = min((r.p_out_bara for r in edges_res), default=S.fa_settings.arrival_bara)
+            km_total = sum(r.length_m for r in edges_res) / 1000.0
+            # The screen judges on the produced stream, so use the field-wide blend of
+            # the per-well inputs rather than any single well.
+            w_in = tb_fa.well_inputs(LAY)
+            tot_oil = sum(w.oil_sm3_d for w in w_in.values()) or 1.0
+            wc_field = (sum(w.oil_sm3_d * w.water_cut / max(1 - w.water_cut, 1e-6) for w in w_in.values())
+                        / (tot_oil + sum(w.oil_sm3_d * w.water_cut / max(1 - w.water_cut, 1e-6)
+                                         for w in w_in.values()))) if w_in else 0.1
+            fluid0 = tb_multiphase.Fluid(
+                api=sum(w.oil_sm3_d * w.api for w in w_in.values()) / tot_oil if w_in else 38.0,
+                gas_sg=sum(w.oil_sm3_d * w.gas_sg for w in w_in.values()) / tot_oil if w_in else 0.70,
+                gor_scf_stb=(sum(w.oil_sm3_d * w.gor_sm3_sm3 for w in w_in.values()) / tot_oil * 5.6146
+                             if w_in else 1500.0),
+                water_cut=min(max(wc_field, 0.0), 0.95))
+            water_field_sm3_d = sum(w.oil_sm3_d * w.water_cut / max(1 - w.water_cut, 1e-6)
+                                    for w in w_in.values())
+            rows_ch = tb_chemistry.screen(
+                fluid0, S.get("chem_inputs") or tb_chemistry.ChemistryInputs(),
+                min_temp_c=t_min, arrival_temp_c=(h0["arrival_t_c"] if FA_RES.host else t_min),
+                seabed_temp_c=S.fa_settings.seabed_temp_c, min_pressure_bara=p_min,
+                water_cut=fluid0.water_cut,
+                hydrate_margin_c=None if min_margin != min_margin else float(min_margin),
+                tieback_km=km_total)
+            counts = tb_chemistry.summary(rows_ch)
+            vd = tb_chemistry.verdict(rows_ch)
+            (st.error if counts[tb_chemistry.HIGH] else
+             st.warning if counts[tb_chemistry.UNKNOWN] else st.success)(vd)
+            kc = st.columns(4)
+            kc[0].metric("High", counts[tb_chemistry.HIGH])
+            kc[1].metric("Medium", counts[tb_chemistry.MEDIUM])
+            kc[2].metric("Unknown", counts[tb_chemistry.UNKNOWN])
+            kc[3].metric("Low", counts[tb_chemistry.LOW])
+            st.dataframe(pd.DataFrame(rows_ch), hide_index=True, **STRETCH,
+                         column_config={"issue": "Threat", "risk": "Risk", "basis": "Judged on",
+                                        "why": "Why it matters", "mitigation": "What to do",
+                                        "data_needed": "Data still needed"})
+            gaps = tb_chemistry.data_gaps(rows_ch)
+            if gaps:
+                with st.expander(f"Fluid work this screen is asking for ({len(gaps)} items)"):
+                    for gtext in gaps:
+                        st.markdown(f"- {gtext}")
 
-        # ── MEG or methanol ──
-        st.markdown("#### Hydrate inhibitor — MEG or methanol?")
-        water_sm3_d = water_field_sm3_d
-        ic = st.columns(4)
-        subc = ic[0].number_input("Subcooling to inhibit (°C)", 0.0, 40.0,
-                                  float(max(0.0, -min_margin + 3.0)) if min_margin == min_margin else 8.0,
-                                  0.5, key=f"subc_{REV}",
-                                  help="How far inside the hydrate curve the coldest point sits, "
-                                       "plus the margin you want to keep")
-        wrate = ic[1].number_input("Free water (Sm³/d)", 0.0, 20000.0,
-                                   float(water_sm3_d) if water_sm3_d else 200.0, 10.0, key=f"wr_{REV}")
-        duty = ic[2].selectbox("Duty", ["continuous", "start-up and shutdown only"], key=f"duty_{REV}")
-        life = ic[3].number_input("Field life (years)", 1.0, 40.0, 15.0, 1.0, key=f"life_{REV}")
-        ic2 = st.columns(3)
-        has_meg = ic2[0].checkbox("Host already has a MEG system", False, key=f"hasmeg_{REV}")
-        meg_capex = ic2[1].number_input("MEG plant (MUSD)", 0.0, 400.0, 45.0, 5.0, key=f"megcapex_{REV}")
-        meoh_loss = ic2[2].slider("Methanol lost to gas + condensate", 0.0, 0.8, 0.25, 0.05,
-                                  key=f"mloss_{REV}",
-                                  help="From a thermodynamic flash — indicative until you have one")
-        cfluid = S.get("chem_inputs") or tb_chemistry.ChemistryInputs()
-        case = tb_chemistry.InhibitorCase(
-            subcooling_c=float(subc), water_rate_sm3_d=float(wrate), duty=duty,
-            field_life_years=float(life), host_has_meg_system=bool(has_meg),
-            meg_unit_capex_musd=float(meg_capex), methanol_loss_fraction=float(meoh_loss),
-            tieback_km=km_total, co2_mol_pct=float(cfluid.co2_mol_pct or 0.0),
-            formation_water_salinity_wt_pct=float(cfluid.formation_water_salinity_wt_pct or 3.5),
-            condensate_rate_sm3_d=float(h0.get("liquid_sm3_d", 0.0)) if FA_RES.host and fluid0.api > 45 else 0.0)
-        rec = tb_chemistry.recommend_inhibitor(case)
-        st.info(f"**{rec['recommended']}** — {rec['because']}")
-        duties = rec["duties"]
-        st.dataframe(pd.DataFrame([{
-            "Inhibitor": d.inhibitor,
-            "Required in water (wt %)": round(d.wt_pct, 1),
-            "Injected at (wt %)": round(d.lean_wt_pct, 0),
-            "Injection (m³/d)": round(d.injection_m3_d, 1),
-            "Make-up (te/yr)": round(d.annual_te, 0),
-            "Chemical (MUSD/yr)": round(d.annual_cost_musd, 2),
-            "Life cost incl. plant (MUSD)": round(rec["life_cost_musd"][d.inhibitor], 1),
-            "Correlation valid": "yes" if d.correlation_valid else "NO — see note",
-            "Note": d.note,
-        } for d in duties.values()]), hide_index=True, **STRETCH)
-        nb = tb_chemistry.nielsen_bucklin_wt_pct(float(subc))
-        hm = tb_chemistry.hammerschmidt_wt_pct(float(subc), "Methanol")
-        st.caption(f"Methanol cross-check: Hammerschmidt {hm:.1f} wt %, Nielsen-Bucklin {nb:.1f} wt % "
-                   f"— they part company above about 25 wt %, where only Nielsen-Bucklin is still valid.")
-        ac = st.columns(2)
-        ac[0].markdown("**The case for MEG**\n\n" + "\n".join(f"- {s}" for s in rec["for_meg"]))
-        ac[1].markdown("**The case for methanol**\n\n" + "\n".join(f"- {s}" for s in rec["for_methanol"]))
-        st.caption(rec["caveat"])
+            # ── MEG or methanol ──
+            st.markdown("#### Hydrate inhibitor — MEG or methanol?")
+            water_sm3_d = water_field_sm3_d
+            ic = st.columns(4)
+            subc = ic[0].number_input("Subcooling to inhibit (°C)", 0.0, 40.0,
+                                      float(max(0.0, -min_margin + 3.0)) if min_margin == min_margin else 8.0,
+                                      0.5, key=f"subc_{REV}",
+                                      help="How far inside the hydrate curve the coldest point sits, "
+                                           "plus the margin you want to keep")
+            wrate = ic[1].number_input("Free water (Sm³/d)", 0.0, 20000.0,
+                                       float(water_sm3_d) if water_sm3_d else 200.0, 10.0, key=f"wr_{REV}")
+            duty = ic[2].selectbox("Duty", ["continuous", "start-up and shutdown only"], key=f"duty_{REV}")
+            life = ic[3].number_input("Field life (years)", 1.0, 40.0, 15.0, 1.0, key=f"life_{REV}")
+            ic2 = st.columns(3)
+            has_meg = ic2[0].checkbox("Host already has a MEG system", False, key=f"hasmeg_{REV}")
+            meg_capex = ic2[1].number_input("MEG plant (MUSD)", 0.0, 400.0, 45.0, 5.0, key=f"megcapex_{REV}")
+            meoh_loss = ic2[2].slider("Methanol lost to gas + condensate", 0.0, 0.8, 0.25, 0.05,
+                                      key=f"mloss_{REV}",
+                                      help="From a thermodynamic flash — indicative until you have one")
+            cfluid = S.get("chem_inputs") or tb_chemistry.ChemistryInputs()
+            case = tb_chemistry.InhibitorCase(
+                subcooling_c=float(subc), water_rate_sm3_d=float(wrate), duty=duty,
+                field_life_years=float(life), host_has_meg_system=bool(has_meg),
+                meg_unit_capex_musd=float(meg_capex), methanol_loss_fraction=float(meoh_loss),
+                tieback_km=km_total, co2_mol_pct=float(cfluid.co2_mol_pct or 0.0),
+                formation_water_salinity_wt_pct=float(cfluid.formation_water_salinity_wt_pct or 3.5),
+                condensate_rate_sm3_d=float(h0.get("liquid_sm3_d", 0.0)) if FA_RES.host and fluid0.api > 45 else 0.0)
+            rec = tb_chemistry.recommend_inhibitor(case)
+            st.info(f"**{rec['recommended']}** — {rec['because']}")
+            duties = rec["duties"]
+            st.dataframe(pd.DataFrame([{
+                "Inhibitor": d.inhibitor,
+                "Required in water (wt %)": round(d.wt_pct, 1),
+                "Injected at (wt %)": round(d.lean_wt_pct, 0),
+                "Injection (m³/d)": round(d.injection_m3_d, 1),
+                "Make-up (te/yr)": round(d.annual_te, 0),
+                "Chemical (MUSD/yr)": round(d.annual_cost_musd, 2),
+                "Life cost incl. plant (MUSD)": round(rec["life_cost_musd"][d.inhibitor], 1),
+                "Correlation valid": "yes" if d.correlation_valid else "NO — see note",
+                "Note": d.note,
+            } for d in duties.values()]), hide_index=True, **STRETCH)
+            nb = tb_chemistry.nielsen_bucklin_wt_pct(float(subc))
+            hm = tb_chemistry.hammerschmidt_wt_pct(float(subc), "Methanol")
+            st.caption(f"Methanol cross-check: Hammerschmidt {hm:.1f} wt %, Nielsen-Bucklin {nb:.1f} wt % "
+                       f"— they part company above about 25 wt %, where only Nielsen-Bucklin is still valid.")
+            ac = st.columns(2)
+            ac[0].markdown("**The case for MEG**\n\n" + "\n".join(f"- {s}" for s in rec["for_meg"]))
+            ac[1].markdown("**The case for methanol**\n\n" + "\n".join(f"- {s}" for s in rec["for_methanol"]))
+            st.caption(rec["caveat"])
 
         st.download_button("Download line results (CSV)", ldf.to_csv(index=False), "tieback_flow_assurance_lines.csv")
 

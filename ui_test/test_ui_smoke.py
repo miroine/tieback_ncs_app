@@ -707,4 +707,37 @@ def stale_override_is_ignored():
     return True
 S.check("an override for an activity that no longer exists is ignored", stale_override_is_ignored)
 
+def a_stale_module_names_itself_instead_of_crashing():
+    """Reported from the deployment: tieback_app.py called tb_bathymetry.diagnose
+    against an older tb_bathymetry.py and the whole page died with an
+    AttributeError. A half-finished upload must disable one feature and say which
+    file is behind, not take the app down."""
+    import tb_bathymetry as _b
+    saved = _b.diagnose
+    del _b.diagnose
+    try:
+        # press the very button whose handler called the missing function
+        run(press={"Load demo", "Test EMODnet connection"})
+        hard = [m for m in errs() if "AttributeError" in str(m)]
+        assert not hard, hard
+        banner = [m for m in errs() if "out of date" in str(m)]
+        assert banner, f"no staleness banner: {errs()}"
+        assert "tb_bathymetry" in str(banner[0]), banner[0]
+        assert "diagnose" in str(banner[0]), banner[0]
+        # and the rest of the app still drew
+        assert ss.layout.nodes, "the layout should still load"
+    finally:
+        _b.diagnose = saved
+    run()
+    assert not [m for m in errs() if "out of date" in str(m)], "banner should clear once current"
+    return True
+S.check("a stale module disables its feature and names itself", a_stale_module_names_itself_instead_of_crashing)
+
+
+def all_modules_current_in_this_build():
+    run(press={"Load demo"})
+    assert not [m for m in errs() if "out of date" in str(m)], errs()
+    return True
+S.check("this build reports every module current", all_modules_current_in_this_build)
+
 sys.exit(0 if S.report() else 1)

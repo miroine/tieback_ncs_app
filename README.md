@@ -189,6 +189,15 @@ status the decision was based on, and the filters can be switched off to see eve
 If an NCS layer comes back empty the app now says so: a layout near the median line often has no
 Norwegian facility inside the default 40 km radius.
 
+## Deploying — upload the whole folder
+`tieback_app.py` calls into the `tb_*.py` modules, so a partial upload leaves a current app calling a
+function an older module does not have. That used to crash the page with an `AttributeError` that read
+like an application bug. Every cross-module call is now declared in `REQUIRED_API` in `tieback_app.py`
+and checked once at start-up: an out-of-date file raises a banner naming the file and the missing
+functions, the feature that needs it is turned off, and the rest of the app carries on. `ui_test/` is
+part of the app too — its stub Streamlit has to mirror the API the app calls, so it moves in the same
+commit.
+
 ## If the app fails to start
 The sidebar has a **Diagnostics** panel: app version, Python and Streamlit versions, whether the demo
 file is present and what its first line is, how many templates were found, and whether any module is
@@ -213,7 +222,7 @@ When deploying to Streamlit Community Cloud, upload the whole folder — `test_f
 | ncs / import / grid surfaces / flow assurance | 23 / 43 / 83 / 43 |
 | multiphase / thermal / bathymetry | 31 / 25 / 37 |
 | JS core logic / component protocol simulation | 49 / 44 |
-| Headless UI (stub Streamlit, scripted interactions) | 71 |
+| Headless UI (stub Streamlit, scripted interactions) | 73 |
 
 The protocol test runs the real component script against a fake DOM and fake Leaflet; the UI test
 executes `tieback_app.py` with a stub Streamlit. Neither replaces a check in a real browser.
