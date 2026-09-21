@@ -1167,7 +1167,9 @@ with tab_layout:
     m2.metric("Structures", int(q["category"].isin(tb_schedule.STRUCTURE_KINDS).sum()) if len(q) else 0)
     m3.metric("Flowlines", f"{km('flowline'):.1f} km")
     m4.metric("Umbilicals", f"{km('umbilical'):.1f} km")
-    m5.metric("Checks", f"{n_err} errors · {n_warn} warnings" if (n_err or n_warn) else "All clear")
+    m5.metric("Checks", "—" if not LAY.nodes else
+              (f"{n_err} errors · {n_warn} warnings" if (n_err or n_warn) else "All clear"),
+              help="Nothing to check on an empty map" if not LAY.nodes else None)
 
     # Concepts are chosen in the sidebar; this is the key to what is on the map.
     if S.get("ghost_cases"):
