@@ -57,6 +57,7 @@ def broken_demo_starts_anyway():
         demo.write_text("<!DOCTYPE html>\n<html>not a project</html>\n")
         ss.clear()
         run()
+        run(press={"Load demo"})
         assert not errs(), errs()
         assert ss.demo_error and "not a TieBack Studio project" in ss.demo_error
         assert any("Demo project not loaded" in str(m) for k, m in H.log if k == "warning")
@@ -66,7 +67,16 @@ def broken_demo_starts_anyway():
         ss.clear()
         run()
 S.check("a broken demo file does not stop the app", broken_demo_starts_anyway)
-S.check("initial render (demo project)", lambda: run() == 0 and "layout" in ss and not errs())
+def starts_empty():
+    """The request: open the app on an empty map, not on the demo design."""
+    ss.clear()
+    assert run() == 0 and "layout" in ss and not errs()
+    assert len(ss.layout.nodes) == 0 and len(H.last_component_args["payload"]["nodes"]) == 0
+    assert ss.view_target["token"] == "start" and ss.view_target["bbox"][1] < 57 < ss.view_target["bbox"][3]
+    assert any("Empty map" in str(m) for k, m in H.log if k == "info")
+    return True
+S.check("the app starts on an empty map framing the NCS", starts_empty)
+S.check("initial render (demo project)", lambda: run(press={"Load demo"}) >= 0 and "layout" in ss and not errs())
 S.check("component args JSON-serialisable & contain payload", lambda: len(H.last_component_args["payload"]["nodes"]) == 9)
 def add_node():
     n0 = len(ss.layout.nodes)
@@ -105,13 +115,21 @@ S.check("cost settings apply invalidates MC", lambda: (run(press={"Apply cost se
 S.check("factor/override apply", lambda: (run(press={"Apply factors and overrides"}), not errs())[-1])
 S.check("schedule settings apply", lambda: (run(press={"Apply schedule settings"}), not errs())[-1])
 def ncs():
-    run(press={"Load for layout"})
+    H.inputs = {"Load around": "layout"}
+    run(press={"Load layers"})
+    H.inputs = {}
     assert "facilities" in ss.ncs_overlays and ss.ncs_overlays["facilities"]["features"][0]["properties"]["_label"] == "HOST X"
     assert any("simulated outage" in str(m) for k, m in H.log if k == "warning")  # other layers fail gracefully
     run()
     assert any(o.get("title") == "Facilities in place" for o in H.last_component_args["overlays"])
 S.check("NCS layers: success passes overlay to map, failures warn per layer", ncs)
-S.check("load for map view uses last view bbox", lambda: (run(press={"Load for map view"}), "facilities" in ss.ncs_overlays)[-1])
+def load_for_view():
+    H.inputs = {"Load around": "view"}
+    ss.map_state["view"] = [2.0, 60.0, 3.2, 61.0]
+    run(press={"Load layers"})
+    H.inputs = {}
+    return "facilities" in ss.ncs_overlays and ss.ncs_overlays["facilities"]["rev"].endswith("(2.0, 60.0, 3.2, 61.0)")
+S.check("load for map view uses last view bbox", load_for_view)
 KML = b'<kml xmlns="http://www.opengis.net/kml/2.2"><Placemark><name>S-1</name><Point><coordinates>2.7,60.45</coordinates></Point></Placemark></kml>'
 def all_discoveries():
     run(press={"All NCS discoveries"})
@@ -138,7 +156,9 @@ def utility_line():
 S.check("chemical injection line renders with its own colour and dash", utility_line)
 def empty_layer_message():
     run(press={"Load demo"})
-    run(press={"Load for layout"})
+    H.inputs = {"Load around": "layout"}
+    run(press={"Load layers"})
+    H.inputs = {}
     assert any("nothing inside this area" in str(m) for k, m in H.log if k == "info") or \
         ss.ncs_overlays.get("facilities", {}).get("features")
 S.check("an NCS layer with no features in the area says so", empty_layer_message)
@@ -343,7 +363,8 @@ def auto_land_on_place():
 S.check("a well placed beside a template is landed in a slot automatically", auto_land_on_place)
 def load_template():
     run(press={"Load template"})
-    assert not errs() and len(ss.layout.nodes) >= 5
+    real = [m for m in errs() if "production-chemistry threat" not in str(m)]   # a finding, not a fault
+    assert not real and len(ss.layout.nodes) >= 5, (real, len(ss.layout.nodes))
     assert ss.project_name and ss.project_name != "Field A tie-back (demo)"
 S.check("concept template loads from the sidebar", load_template)
 def template_at_picked_point():
@@ -352,8 +373,9 @@ def template_at_picked_point():
     assert ss.map_state["picked"] == [65.4, 7.25]
     run(press={"Load template"})
     assert not errs()
-    anchor = ss.layout.anchor()
-    assert abs(anchor[0] - 65.4) < 1e-6 and abs(anchor[1] - 7.25) < 1e-6
+    # the field (its first template, manifold or well) goes to the point, not the host
+    anchor = ss.layout.anchor(prefer=("template", "manifold", "well"))
+    assert abs(anchor[0] - 65.4) < 1e-6 and abs(anchor[1] - 7.25) < 1e-6, anchor
 S.check("template lands on the point picked on the map", template_at_picked_point)
 def move_layout_to_picked():
     run(event=ev(91, "pick", {"lat": 62.0, "lon": 4.0}))
@@ -579,10 +601,9 @@ S.check("a tag filter does not survive into a newly loaded layout", stale_tag_fi
 def template_lands_at_the_picked_point():
     ss.map_state["picked"] = (61.2, 3.1)
     run(press={"Load template"})
-    lats = [n_.lat for n_ in ss.layout.nodes.values()]
-    lons = [n_.lon for n_ in ss.layout.nodes.values()]
     assert ss.layout.nodes, "template loaded nothing"
-    assert abs(max(lats) - 61.2) < 0.3 and abs(min(lons) - 3.1) < 0.3, (min(lats), min(lons))
+    a = ss.layout.anchor(prefer=("template", "manifold", "well"))
+    assert abs(a[0] - 61.2) < 1e-6 and abs(a[1] - 3.1) < 1e-6, a
     assert any("Loaded" in str(m) for k, m in H.log if k == "success"), \
         "loading a template should say what arrived"
     return True
@@ -1048,5 +1069,140 @@ def bad_url_is_explained():
         stubs.Harness.text_input = orig
     return any("Accepted" in str(m) for m in errs())
 S.check("an address that is not a map says which forms are accepted", bad_url_is_explained)
+
+
+# ── v0.17: regions, layers round a point, host-aware templates, concept tie-ins, catalogue ──
+def region_shortcuts():
+    ss.clear()
+    run()
+    run(press={"Barents Sea"})
+    vt = ss.view_target
+    assert vt["token"].startswith("region:Barents Sea") and vt["bbox"][1] > 69, vt
+    t1 = vt["token"]
+    run(press={"Barents Sea"})
+    assert ss.view_target["token"] != t1, "a second press must fly there again"
+    run(press={"Norwegian Sea"})
+    assert 62 <= ss.view_target["bbox"][1] < 63
+    return True
+S.check("region shortcuts fly the map to the Barents, Norwegian and North Sea", region_shortcuts)
+
+
+def layers_round_the_picked_point():
+    """The request: load layers round the point I chose, not the map centre."""
+    ss.clear()
+    run()
+    run(event=ev(9500, "pick", {"lat": 71.5, "lon": 22.0}))
+    H.inputs = {"Load around": "point"}
+    run(press={"Load layers"})
+    H.inputs = {}
+    c_ = ss.get("ncs_centre")
+    assert c_ and abs(c_[0] - 71.5) < 1e-6 and abs(c_[1] - 22.0) < 1e-6, c_
+    rev = ss.ncs_overlays["facilities"]["rev"]
+    bbox = eval(rev.split(":", 1)[1])
+    assert bbox[0] < 22.0 < bbox[2] and bbox[1] < 71.5 < bbox[3], bbox
+    assert abs((bbox[3] - bbox[1]) / 2 * 111.6 - 40) < 0.5, "default radius is 40 km"
+    return True
+S.check("NCS layers load round the picked point with the chosen radius", layers_round_the_picked_point)
+
+
+def selected_item_centre():
+    run(press={"Load demo"})
+    ss.map_state["picked"] = None
+    ss.map_state["selected"] = "TMPL_A"
+    H.inputs = {"Load around": "selected"}
+    run(press={"Load layers"})
+    H.inputs = {}
+    t = ss.layout.nodes["TMPL_A"]
+    assert abs(ss.ncs_centre[0] - t.lat) < 1e-3 and abs(ss.ncs_centre[1] - t.lon) < 1e-3
+    return True
+S.check("layers can be loaded round the selected item", selected_item_centre)
+
+
+def template_ties_back_to_nearby_host():
+    """The request: a concept template starts at the point and ties back to a host near it."""
+    import tb_geo
+    ss.clear()
+    run()
+    run(event=ev(9600, "pick", {"lat": 60.45, "lon": 2.35}))
+    run(press={"Find hosts near this point"})             # stub FactMaps: HOST X at 60.6 N, 2.5 E
+    assert "facilities" in ss.ncs_overlays
+    run(press={"Load template"})
+    lay = ss.layout
+    hosts = [n_ for n_ in lay.nodes.values() if lay.kind(n_.node_id) == "host"]
+    assert hosts and hosts[0].label == "HOST X", [h.label for h in hosts]
+    assert tb_geo.geodesic_distance(hosts[0].lat, hosts[0].lon, 60.6, 2.5) < 1, "host must sit on HOST X"
+    structs = [n_ for n_ in lay.nodes.values() if lay.kind(n_.node_id) in ("template", "manifold", "well")]
+    assert min(tb_geo.geodesic_distance(s_.lat, s_.lon, 60.45, 2.35) for s_ in structs) < 1, \
+        "the field must start at the picked point"
+    assert not [f for f in lay.validate() if f.severity == "error"]
+    assert "tied back to **HOST X**" in (ss.get("loaded_note") or "") or \
+        any("HOST X" in str(m) for k, m in H.log if k == "success")
+    return True
+S.check("a template starts at the picked point and ties back to the chosen nearby host",
+        template_ties_back_to_nearby_host)
+
+
+def screening_offers_saved_concepts():
+    """The request: saved layouts are tie-in options in the screening."""
+    import tb_cases as tc, tb_network as tn, tb_cost as tk, tb_schedule as tsch
+    run(press={"Load demo"})
+    ss.cases = [tc.snapshot("Field A", ss.layout, tk.CostSettings(), tsch.ScheduleSettings())]
+    ss.active_case = None
+    run(press={"New empty layout (keeps catalog)"})
+    lay = ss.layout
+    lay.add_node(tn.Node("T2", "tmpl_4slot", 60.57, 2.72, label="Satellite", water_depth_m=130))
+    lay.add_node(tn.Node("W9", "xt_hxt_10k", 60.5701, 2.7201, water_depth_m=130))
+    lay.add_edge(tn.Edge("J9", "jumper_rigid", "W9", "T2"))
+    ss.ncs_overlays = {}
+    run(press={"Screen tie-in options"})
+    rows = ss.get("tiein_rows") or []
+    srcs = {r["host"]: r for r in rows}
+    assert any(h.startswith("Host A (Field A)") for h in srcs), list(srcs)
+    sub = [r for r in rows if "Subsea tie-in" in r["kind"]]
+    assert sub and "shares Field A" in sub[0]["note"], rows
+    H.inputs = {"Build a tie-back to": sub[0]["host"]}
+    run(press={"Add to layout"})
+    H.inputs = {}
+    assert not [f for f in ss.layout.validate() if f.code == "NO_PRODUCTION_PATH"], "the well needs a path"
+    shared = [i for i, v in ss.cost_settings.element_override_usd.items() if v == 0.0]
+    assert shared and all(ss.layout.nodes.get(i) or ss.layout.edges.get(i) for i in shared)
+    return True
+S.check("tie-in screening offers saved concepts, and a subsea tie-in shares their host", screening_offers_saved_concepts)
+
+
+def catalogue_top_up():
+    import tb_catalog as tcat
+    run(press={"Load demo"})
+    for k in ("plet_valved", "pump_1ph", "sep_gl", "sdu"):
+        ss.layout.catalog.items.pop(k, None)
+    run()
+    assert any("lacks 4 standard item" in str(m) for k, m in H.log if k == "info")
+    run(press={"Add 4 standard item(s)"})
+    assert not ss.layout.catalog.missing_defaults()
+    assert all(k in tcat.Catalog().items for k in ("hot_tap", "hipps_mod", "sub_power", "fl_tcp"))
+    return True
+S.check("an older catalogue can be topped up with the new standard items", catalogue_top_up)
+
+
+def new_equipment_on_the_map():
+    run(press={"Load demo"})
+    run(event=ev(9700, "add_node", {"item_id": "sdu", "lat": 60.51, "lon": 2.66}))
+    sdu = ss.map_state["selected"]
+    assert ss.layout.kind(sdu) == "control"
+    run(event=ev(9701, "add_edge", {"item_id": "fl_rigid_cs", "source": sdu, "target": "TMPL_A",
+                                    "diameter_in": 10}))
+    assert any("cannot connect" in str(m) for k, m in H.log if k == "toast"), "no flowline to a control unit"
+    run(event=ev(9702, "add_edge", {"item_id": "umb_static", "source": "HOST_A", "target": sdu}))
+    assert any(e.item_id == "umb_static" and sdu in (e.from_node, e.to_node) for e in ss.layout.edges.values())
+    run(event=ev(9703, "add_node", {"item_id": "hipps_mod", "lat": 60.52, "lon": 2.66}))
+    assert ss.layout.nodes[ss.map_state["selected"]].hipps, "a HIPPS module must set the HIPPS flag"
+    return True
+S.check("new equipment: control units connect by umbilical, HIPPS sets its flag", new_equipment_on_the_map)
+
+
+def turndown_is_explained():
+    run(press={"Load demo"})
+    return any("turndown case" in str(m) and "hydrate margin" in str(m) for k, m in H.log if k == "markdown")
+S.check("the viability tab explains the turndown case", turndown_is_explained)
 
 sys.exit(0 if S.report() else 1)

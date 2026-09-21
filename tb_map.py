@@ -31,7 +31,7 @@ COMPONENT_DIR = Path(__file__).parent / "tb_map_component"
 ID_PREFIX = {
     "well": "W", "template": "TMPL", "manifold": "MF", "plet": "PLET", "plem": "PLEM",
     "ilt": "ILT", "ssiv": "SSIV", "boosting": "MPP", "compression": "COMP",
-    "separation": "SEP", "riser_base": "RB", "host": "HOST",
+    "separation": "SEP", "riser_base": "RB", "host": "HOST", "control": "SCU",
     "flowline": "FL", "umbilical": "UMB", "jumper": "J", "riser": "RIS", "power_cable": "PC",
     "utility_line": "UL",
 }
@@ -275,7 +275,8 @@ def apply_event(layout: "net.Layout", event: Optional[dict], state: dict) -> dic
             nid = next_id(ID_PREFIX.get(it.category, "N"), list(layout.nodes) + list(layout.edges))
             la, lo = from_display(layout, float(p["lat"]), float(p["lon"]))
             layout.add_node(net.Node(nid, it.item_id, la, lo,
-                                     label=str(p.get("label") or nid), phase=int(p.get("phase", 1))))
+                                     label=str(p.get("label") or nid), phase=int(p.get("phase", 1)),
+                                     hipps=it.item_id.startswith("hipps")))
             res.update(changed=True, selected=nid, message=f"Added {it.name} {nid}")
         elif typ == "move_many":
             ids = [str(x) for x in (p.get("ids") or []) if x in layout.nodes]

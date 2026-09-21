@@ -48,7 +48,7 @@ import tb_tiein
 import tb_viability
 import tb_well
 
-APP_VERSION = "0.16.0"
+APP_VERSION = "0.17.0"
 HERE = Path(__file__).parent
 DEMO_FILE = HERE / "test_fixtures" / "demo_field_a_tieback.yaml"
 
@@ -228,7 +228,8 @@ REQUIRED_API = {
     "tb_bathymetry": ["diagnose", "diagnosis_message", "depth_profile", "fetch_route_profiles"],
     "tb_cases": ["concept_overlay", "color_for", "snapshot", "restore"],
     "tb_chemistry": ["screen", "recommend_inhibitor", "ChemistryInputs", "InhibitorCase"],
-    "tb_mapextras": ["make_sketch", "classify_url", "make_bookmark", "sketches", "describe"],
+    "tb_mapextras": ["make_sketch", "classify_url", "make_bookmark", "sketches", "describe",
+                     "region_view", "layer_centre", "bbox_around_point"],
     "tb_share": ["encode", "decode", "build_payload", "restore_payload", "LocalStore",
                  "protect", "unprotect", "generate_code", "is_protected"],
     "tb_fluids": ["well_fluid", "reservoirs", "set_well_fluid", "assign_reservoir",
@@ -237,10 +238,10 @@ REQUIRED_API = {
     "tb_import": ["as_upload_list", "read_uploads", "read_shapefile_parts"],
     "tb_schedule": ["apply_overrides", "build_from_layout"],
     "tb_map": ["render_map", "DisplaySettings"],
-    "tb_network": ["place_at", "by_tags", "set_tags"],
+    "tb_network": ["place_at", "by_tags", "set_tags", "place_split"],
     "tb_project": ["project_from_yaml_full"],
     "tb_flowassurance": ["solve", "well_inputs"],
-    "tb_tiein": ["screen"],
+    "tb_tiein": ["screen", "candidates_from_cases", "near", "shared_ids"],
     "tb_basis": ["design_basis"],
     "tb_report": ["build_report"],
     "tb_viability": ["viability"],
@@ -337,7 +338,10 @@ def init_state():
     ss.last_upload = None
     ss.last_layer_upload = None
     ss.catalog_source = ""
-    set_project(*load_demo())
+    # start on an empty map framing the whole shelf; the demo is one click away
+    set_project(*empty_project())
+    if has_api("tb_mapextras", "region_view"):
+        ss.view_target = {"token": "start", "bbox": tb_mapextras.region_view("Whole NCS")}
 
 
 init_state()
@@ -667,46 +671,95 @@ with st.sidebar:
         view = S.map_state.get("view")
         where = ["Picked point on the map", "Centre of the current map view", "Template's own coordinates"]
         avail = [w for w in where if (w != where[0] or picked) and (w != where[1] or view)]
-        place_mode = st.radio("Place it at", avail, key=f"tplwhere_{REV}",
-                              help="Use the map's 'Pick point' tool to choose a spot, then load the template there")
+        place_mode = st.radio("Place the field at", avail, key=f"tplwhere_{REV}",
+                              help="Use the map's 'Pick point' tool to choose a spot, then load the template "
+                                   "there. The template's wells and structures go to that point.")
         if picked:
             st.caption(f"Picked point: {picked[0]:.5f}°N, {picked[1]:.5f}°E")
         else:
             st.caption("No point picked yet — use 'Pick point' on the map toolbar.")
+        # the point in WGS84 (host candidates are WGS84)
+        field_pt = None
+        if place_mode == where[0] and picked:
+            field_pt = tuple(tb_map.to_display(LAY, float(picked[0]), float(picked[1])))
+        elif place_mode == where[1] and view:
+            field_pt = ((view[1] + view[3]) / 2, (view[0] + view[2]) / 2)
+        host_choice = None
+        if field_pt and has_api("tb_tiein", "near", "candidates_from_cases") and hasattr(tb_network.Layout, "place_split"):
+            fac = [k for k in ("facilities", "facilities_all") if k in S.ncs_overlays]
+            pool = []
+            for k in fac:
+                pool += tb_tiein.candidates_from_overlay(S.ncs_overlays[k], True)
+            pool += tb_tiein.candidates_from_layout(LAY)
+            pool += tb_tiein.candidates_from_cases(S.get("cases") or [], subsea=False)
+            nearby = tb_tiein.near(pool, field_pt[0], field_pt[1], 150.0)
+            opts = [None] + list(range(len(nearby)))
+            fmt = lambda i: ("Template's own host (keep its tie-back distance)" if i is None  # noqa: E731
+                             else f"{nearby[i][0].name} · {nearby[i][0].kind.title() or 'host'} — "
+                                  f"{nearby[i][1]:.1f} km")
+            hi = st.selectbox("Tie back to", opts, format_func=fmt, key=f"tplhost_{REV}",
+                              index=1 if nearby else 0,
+                              help="Hosts within 150 km of the point: Sodir facilities loaded on the map, "
+                                   "hosts in this layout and in saved concepts. The template's host, riser "
+                                   "base and host-end PLET go to the chosen host; the lines between are "
+                                   "redrawn straight.")
+            if hi is not None:
+                host_choice = nearby[hi][0]
+            if not fac:
+                if st.button("Find hosts near this point",
+                             help="Loads Sodir's 'Facilities in place' within 100 km of the point"):
+                    bb = tuple(round(v, 4) for v in tb_mapextras.bbox_around_point(field_pt[0], field_pt[1], 100))
+                    with st.spinner("Fetching Sodir facilities…"):
+                        try:
+                            fc = fetch_ncs_cached("facilities", bb)
+                        except Exception as exc:  # noqa: BLE001
+                            st.error(f"Facilities: {exc}")
+                        else:
+                            S.ncs_overlays["facilities"] = {**fc, "rev": f"facilities:{bb}"}
+                            st.rerun()
+                st.caption("No facility layer loaded — only hosts in this layout and saved concepts are offered.")
+            elif not nearby:
+                st.caption("No host within 150 km of this point.")
+
+        def _template_layout():
+            lay = tb_network.Layout.from_dict(yaml.safe_load((tpl_dir / pick).read_text()),
+                                              tb_catalog.Catalog())
+            if field_pt is None:
+                return lay, ""
+            fl = tb_map.from_display(lay, *field_pt)
+            if host_choice is not None:
+                hl = tb_map.from_display(lay, host_choice.lat, host_choice.lon)
+                r = lay.place_split(fl[0], fl[1], hl[0], hl[1], host_label=host_choice.name,
+                                    host_depth_m=host_choice.water_depth_m or None)
+                return lay, f", tied back to **{host_choice.name}** ({len(r['stretched'])} line(s) re-routed)"
+            if hasattr(tb_network.Layout, "place_split"):
+                lay.place_split(fl[0], fl[1])
+            else:
+                lay.place_at(*fl)
+            return lay, ""
+
         tc = st.columns(2)
         if tc[0].button("Load template", help="Replaces the layout on screen"):
             try:
-                lay = tb_network.Layout.from_dict(yaml.safe_load((tpl_dir / pick).read_text()),
-                                                  tb_catalog.Catalog())
-                if place_mode == where[0] and picked:
-                    lay.place_at(float(picked[0]), float(picked[1]))
-                elif place_mode == where[1] and view:
-                    lay.place_at((view[1] + view[3]) / 2, (view[0] + view[2]) / 2)
+                lay, how = _template_layout()
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Template failed to load: {exc}")
             else:
                 set_project(names[pick], lay, tb_cost.CostSettings(), tb_schedule.ScheduleSettings(),
                             tb_fa.FASettings())
                 S.loaded_note = (f"Loaded **{names[pick]}** — {len(lay.nodes)} items, "
-                                 f"{len(lay.edges)} lines, centred on "
-                                 f"{sum(n_.lat for n_ in lay.nodes.values()) / max(len(lay.nodes), 1):.4f}°N, "
-                                 f"{sum(n_.lon for n_ in lay.nodes.values()) / max(len(lay.nodes), 1):.4f}°E")
+                                 f"{len(lay.edges)} lines{how}.")
                 st.rerun()
         if tc[1].button("Add as new concept", help="Keeps the current layout as a concept and "
                                                    "loads this template alongside it"):
             try:
-                lay = tb_network.Layout.from_dict(yaml.safe_load((tpl_dir / pick).read_text()),
-                                                  tb_catalog.Catalog())
-                if place_mode == where[0] and picked:
-                    lay.place_at(float(picked[0]), float(picked[1]))
-                elif place_mode == where[1] and view:
-                    lay.place_at((view[1] + view[3]) / 2, (view[0] + view[2]) / 2)
+                lay, how = _template_layout()
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Template failed to load: {exc}")
             else:
                 new = _load_as_concept(names[pick], lay, tb_cost.CostSettings(),
                                        tb_schedule.ScheduleSettings(), tb_fa.FASettings())
-                S.loaded_note = (f"Loaded **{new}** as a new concept — {len(lay.nodes)} items. "
+                S.loaded_note = (f"Loaded **{new}** as a new concept — {len(lay.nodes)} items{how}. "
                                  f"{len(S.cases)} concepts saved.")
                 st.rerun()
     if st.button("New empty layout (keeps catalog)"):
@@ -845,12 +898,29 @@ with st.sidebar:
     chosen = st.multiselect("Layers", layer_keys,
                             default=[k for k in layer_keys if tb_ncs.NCS_LAYERS[k].default_on],
                             format_func=lambda k: tb_ncs.NCS_LAYERS[k].title)
-    buffer_km = st.slider("Area around layout (km)", 5, 150, 40, 5)
-    b1, b2 = st.columns(2)
-    load_layout_area = b1.button("Load for layout")
+    sel_id = S.map_state.get("selected")
+    sel_pos = (LAY.nodes[sel_id].lat, LAY.nodes[sel_id].lon) if sel_id in LAY.nodes else None
+    around_opts = {"point": "Picked point (or selected item)", "selected": "Selected item",
+                   "layout": "Whole layout", "view": "Current map view"}
+    around = st.radio("Load around", list(around_opts), format_func=lambda k: around_opts[k],
+                      key="ncs_around", help="Use *Pick point* on the map toolbar to choose the spot, or "
+                                             "select an item on the map.")
+    buffer_km = st.slider("Radius (km)" if around in ("point", "selected") else "Margin around it (km)",
+                          5, 150, 40, 5, disabled=(around == "view"))
     view = S.map_state.get("view")
-    load_view = b2.button("Load for map view", disabled=not view,
-                          help="Pan or interact with the map first so its view is known")
+    lay_pts = [tb_map.to_display(LAY, n_.lat, n_.lon) for n_ in LAY.nodes.values()]
+    picked_wgs = (tb_map.to_display(LAY, *S.map_state["picked"]) if S.map_state.get("picked") else None)
+    sel_wgs = tb_map.to_display(LAY, *sel_pos) if sel_pos else None
+    centre = (tb_mapextras.layer_centre(around, picked_wgs, sel_wgs, lay_pts, view)
+              if has_api("tb_mapextras", "layer_centre") else None)
+    if centre is None:
+        st.caption({"point": "No point picked and nothing selected — use *Pick point* on the map toolbar.",
+                    "selected": "Nothing selected — click an item on the map.",
+                    "layout": "The layout is empty — pick a point instead.",
+                    "view": "Pan or zoom the map first so its view is known."}[around])
+    else:
+        st.caption(f"Centre {centre[0]:.4f}°N, {centre[1]:.4f}°E")
+    load_layers = st.button("Load layers", type="primary", disabled=centre is None or not chosen)
     load_all_disc = st.button("All NCS discoveries", help="Every discovery on the shelf, coloured by main "
                                                           "hydrocarbon type as in FactMaps")
     if st.button("Clear NCS layers"):
@@ -915,12 +985,14 @@ with st.sidebar:
         (st.success if rep["depth_sample"]["ok"] else st.error)(msg)
         with st.expander("Raw response"):
             st.json(rep)
-    if load_layout_area or load_view:
-        if load_view:
+    if load_layers and centre is not None:
+        if around == "view":
             bbox = tuple(round(v, 4) for v in view)
+        elif around == "layout":
+            bbox = tuple(round(v, 4) for v in tb_ncs.bbox_around(lay_pts, buffer_km))
         else:
-            pts = [(n.lat, n.lon) for n in LAY.nodes.values()] or [(60.5, 2.8)]
-            bbox = tuple(round(v, 4) for v in tb_ncs.bbox_around(pts, buffer_km))
+            bbox = tuple(round(v, 4) for v in tb_mapextras.bbox_around_point(centre[0], centre[1], buffer_km))
+        S.ncs_centre = centre
         S.ncs_overlays = {}
         with st.spinner("Fetching Sodir FactMaps layers…"):
             for k in chosen:
@@ -1110,6 +1182,21 @@ with tab_layout:
                 f'<span style="width:22px;border-top:3px dashed {tb_cases.color_for(S.cases, nm)}"></span>'
                 f'<span style="font-size:13px">{nm}</span></span>' for nm in S.ghost_cases)
             + "</div>", unsafe_allow_html=True)
+
+    if has_api("tb_mapextras", "region_view"):
+        rc = st.columns([0.8] + [1] * len(tb_mapextras.REGIONS) + [1.6])
+        rc[0].markdown("<div style='padding-top:8px;font-size:13px'><b>Go to</b></div>",
+                       unsafe_allow_html=True)
+        for i_, rname in enumerate(tb_mapextras.REGIONS):
+            if rc[i_ + 1].button(rname, key=f"region_{rname}"):
+                S.region_clicks = S.get("region_clicks", 0) + 1
+                S.view_target = {"token": f"region:{rname}:{S.region_clicks}",
+                                 "bbox": tb_mapextras.region_view(rname)}
+                S.map_state["view"] = tb_mapextras.region_view(rname)
+    if not LAY.nodes:
+        st.info("**Empty map.** Go to a region above, then either click *Pick point* on the map toolbar and "
+                "start from a concept template in the sidebar (it can tie back to a nearby host), or place "
+                "equipment with the toolbar. *Load demo* in the sidebar opens the example field.")
 
     cc = st.columns([1, 1, 1, 3])
     if cc[0].button("Undo", disabled=not S.get("undo"),
@@ -1580,12 +1667,20 @@ with tab_layout:
                 raw += tb_tiein.candidates_from_overlay(S.ncs_overlays[k], ti_surface,
                                                         active_only=ti_active, fixed_only=ti_fixed)
             raw += tb_tiein.candidates_from_layout(LAY)
+            n_saved = len([c_ for c_ in (S.get("cases") or []) if c_.get("name") != S.get("active_case")])
+            use_cases = st.checkbox(f"Include saved concepts ({n_saved})", bool(n_saved), key=f"ti_cases_{REV}",
+                                    disabled=not n_saved or not has_api("tb_tiein", "candidates_from_cases"),
+                                    help="Offers each saved concept's host, and its templates, manifolds and "
+                                         "PLEMs as subsea tie-in points — tying in there shares that "
+                                         "concept's line and host.")
+            if use_cases and n_saved:
+                raw += tb_tiein.candidates_from_cases(S.cases, exclude=S.get("active_case") or "")
             cands = tb_tiein.dedupe(raw)
             if fac_layers and len(raw) != len(cands):
                 cc[2].caption(f"{len(raw) - len(cands)} duplicate facility record(s) merged across layers")
             if not cands:
-                st.info("No candidate hosts yet. Load the Sodir facility layers in the sidebar (or add a "
-                        "host to the layout) and screen again.")
+                st.info("No candidate hosts yet. Load the Sodir facility layers in the sidebar, add a host "
+                        "to the layout, or save another concept, and screen again.")
             elif st.button("Screen tie-in options", type="primary"):
                 ts = tb_tiein.TieInSettings(diameter_in=ti_dia, max_distance_km=ti_max)
                 with st.spinner(f"Screening {len(cands)} candidate host(s)…"):
@@ -1598,6 +1693,10 @@ with tab_layout:
                     st.warning(f"No host within {ti_max:.0f} km of {src_node}.")
                 else:
                     tdf = pd.DataFrame(rows).drop(columns=["lat", "lon"], errors="ignore")
+                    if any(str(r.get("source", "")).startswith("concept") for r in rows):
+                        st.caption("Rows from saved concepts: a *Subsea tie-in* shares that concept's line, "
+                                   "riser and host — its capex is only the new flowline, PLETs, jumpers and "
+                                   "umbilical, and its flow solve carries both concepts' wells together.")
                     st.dataframe(tdf, hide_index=True, **STRETCH, column_config={
                         c_: st.column_config.NumberColumn(format="%.1f") for c_ in tdf.columns
                         if tdf[c_].dtype.kind == "f"})
@@ -1617,6 +1716,13 @@ with tab_layout:
                         except Exception as exc:  # noqa: BLE001
                             st.error(str(exc))
                         else:
+                            if cand.subsea and has_api("tb_tiein", "shared_ids"):
+                                # copied from the other concept: already costed there
+                                for sid_ in tb_tiein.shared_ids(LAY):
+                                    S.cost_settings.element_override_usd[sid_] = 0.0
+                                S.loaded_note = (f"Tied **{src_node}** into {cand.name}. The path to its host "
+                                                 f"was copied from concept *{cand.concept}* and is priced at "
+                                                 f"zero here (it is costed in that concept).")
                             S.tiein_rows = None
                             bump()
                             S.fit_token += 1
@@ -1839,6 +1945,25 @@ with tab_cat:
     st.markdown('<div class="tb-flag">Default rates are indicative placeholders for demonstration. '
                 'Replace them with a project cost library before using results.</div>', unsafe_allow_html=True)
     st.write("")
+    missing_std = CAT.missing_defaults() if hasattr(CAT, "missing_defaults") else []
+    if missing_std:
+        mc = st.columns([3, 1])
+        mc[0].info(f"This catalogue lacks {len(missing_std)} standard item(s) added in newer versions — e.g. "
+                   + ", ".join(tb_catalog.Catalog().get(i).name for i in missing_std[:4])
+                   + ("…" if len(missing_std) > 4 else "") + ". Your existing items and rates are not changed.")
+        if mc[1].button(f"Add {len(missing_std)} standard item(s)"):
+            CAT.add_missing_defaults()
+            bump()
+            st.rerun()
+    with st.expander("What is in the catalogue"):
+        by_kind = {}
+        for i_ in CAT.items.values():
+            by_kind.setdefault(i_.category, []).append(i_.name)
+        st.markdown("\n".join(f"- **{k.replace('_', ' ').title()}** — {', '.join(v)}"
+                               for k, v in by_kind.items()))
+        st.caption("Place any of them from the map toolbar (point items under *Add*, lines under *Connect*). "
+                   "Subsea control units (SDU, UTA, power distribution, chemical storage) connect by "
+                   "umbilical, power cable or utility line, not by flowline.")
     items_df = pd.DataFrame([{**{k: v for k, v in vars(i).items() if k != "uncertainty"},
                               "unc_low": i.uncertainty[0], "unc_ml": i.uncertainty[1], "unc_high": i.uncertainty[2]}
                              for i in CAT.items.values()])
@@ -2778,9 +2903,29 @@ with tab_viab:
                "rates and settings. SI units throughout.")
     if S.get("active_case") and S.active_case != "(working layout)":
         st.info(f"Active concept: **{S.active_case}**")
+    with st.expander("What is the turndown case?"):
+        st.markdown(
+            "A tie-back is sized for its **design rate** — the plateau. But it will not always flow at "
+            "plateau: production declines, wells are choked back or shut in for tests, and the host may "
+            "cut the rate it takes. That lower rate is the **turndown case**, set here as a fraction of "
+            "design (0.5 = the field flowing at half its plateau rate).\n\n"
+            "Why it matters: flowing slower makes the fluid spend longer in the cold line, so it arrives "
+            "**colder**. A line that stays out of the hydrate region at plateau can drop into it at low "
+            "rate. The check re-solves the same layout with every well's rate scaled by the fraction and "
+            "reports the **hydrate margin** — how many °C the coldest point in the line stays above the "
+            "hydrate-formation temperature:\n\n"
+            "- **≥ 3 °C** — pass: the line runs safely at that rate.\n"
+            "- **0–3 °C** — to resolve: too close for comfort.\n"
+            "- **< 0 °C** — blocking: at that rate the line operates inside the hydrate region.\n\n"
+            "If it fails, either the field must not be run below that rate, or the line needs insulation, "
+            "heating (DEH) or continuous inhibitor (MEG/methanol — see *Flow assurance*). A good choice for "
+            "the fraction is the lowest rate you expect late in life or during a well test — often "
+            "0.3–0.5. The *Flow assurance* tab shows the full rate sensitivity (1.0, 0.7, 0.5, 0.3).")
     cc = st.columns([1, 3])
-    td_frac = cc[0].slider("Turndown case", 0.1, 0.9, 0.5, 0.1, key=f"viab_td_{REV}",
-                           help="Fraction of design rate used for the turndown checks")
+    td_frac = cc[0].slider("Turndown case (fraction of design rate)", 0.1, 0.9, 0.5, 0.1,
+                           key=f"viab_td_{REV}",
+                           help="The lower rate the hydrate check is repeated at — 0.5 means every well "
+                                "flowing at half its design rate. See 'What is the turndown case?' above.")
     vsig = md5(LAY.to_dict(), vars(S.fa_settings), vars(S.cost_settings), td_frac)
     if cc[1].button("Run viability check", type="primary") or S.get("viab_sig") == vsig:
         if S.get("viab_sig") != vsig:

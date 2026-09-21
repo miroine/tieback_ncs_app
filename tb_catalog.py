@@ -23,7 +23,7 @@ import yaml
 # Node categories (point equipment) and edge categories (linear equipment)
 NODE_KINDS = (
     "well", "template", "manifold", "plet", "plem", "ilt", "ssiv",
-    "boosting", "compression", "separation", "riser_base", "host",
+    "boosting", "compression", "separation", "riser_base", "host", "control",
 )
 EDGE_KINDS = ("flowline", "umbilical", "jumper", "riser", "power_cable", "utility_line")
 
@@ -58,8 +58,9 @@ EDGE_RULES: Dict[str, Dict[str, tuple]] = {
     "riser": {"riser_base": ("host",), "host": ("riser_base", "plet", "plem", "ssiv"),
               "plet": ("host",), "plem": ("host",), "ssiv": ("host",)},
     "umbilical": {k: NODE_KINDS for k in NODE_KINDS},
-    "power_cable": {k: ("boosting", "compression", "separation", "host", "template", "manifold")
-                    for k in ("boosting", "compression", "separation", "host", "template", "manifold")},
+    "power_cable": {k: ("boosting", "compression", "separation", "host", "template", "manifold", "control")
+                    for k in ("boosting", "compression", "separation", "host", "template", "manifold",
+                              "control")},
     "utility_line": {k: NODE_KINDS for k in NODE_KINDS},
 }
 
@@ -178,6 +179,71 @@ DEFAULT_ITEMS = [
                 fabrication_usd=70e6, install_spread="hlv", install_days=10, lead_time_months=36,
                 weight_te=900, uncertainty=(0.85, 1.0, 1.6), symbol="pump",
                 footprint_l_m=45, footprint_w_m=25),
+    # ── more pipeline-end, in-line and protection equipment ──
+    CatalogItem("plet_valved", "PLET with isolation valve", "plet", procurement_usd=3.2e6,
+                fabrication_usd=1.4e6, install_spread="plv", install_days=1.5, lead_time_months=14,
+                weight_te=45, symbol="plet", footprint_l_m=14, footprint_w_m=7,
+                notes="Remote-operated valve lets the line be isolated at the end structure"),
+    CatalogItem("plet_pig", "PLET with subsea pig launcher/receiver", "plet", procurement_usd=4.5e6,
+                fabrication_usd=2.0e6, install_spread="csv", install_days=2, lead_time_months=16,
+                weight_te=70, symbol="plet", footprint_l_m=18, footprint_w_m=8,
+                notes="For single-line (non-looped) systems that still need pigging"),
+    CatalogItem("wye_pig", "Piggable wye (Y-piece)", "ilt", procurement_usd=3.0e6, fabrication_usd=1.2e6,
+                install_spread="plv", install_days=1, lead_time_months=14, weight_te=30, symbol="ilt",
+                notes="Joins two lines into one while keeping it piggable"),
+    CatalogItem("hot_tap", "Hot-tap tie-in to an operating pipeline", "ilt", procurement_usd=6.0e6,
+                fabrication_usd=2.0e6, install_spread="csv", install_days=8, lead_time_months=18,
+                weight_te=35, uncertainty=(0.9, 1.0, 1.5), symbol="ilt",
+                notes="Tee welded/clamped onto a live line; includes hot-tap machine and diving/ROV spread time"),
+    CatalogItem("hipps_mod", "HIPPS module (subsea)", "ssiv", procurement_usd=12e6, fabrication_usd=3e6,
+                install_spread="csv", install_days=2, lead_time_months=24, weight_te=90, symbol="ssiv",
+                footprint_l_m=10, footprint_w_m=8,
+                notes="Tick HIPPS on the node so lines downstream may be de-rated"),
+    # ── boosting ──
+    CatalogItem("pump_1ph", "Single-phase booster pump station (liquid)", "boosting", procurement_usd=45e6,
+                fabrication_usd=15e6, install_spread="hlv", install_days=5, lead_time_months=30,
+                weight_te=250, uncertainty=(0.9, 1.0, 1.5), symbol="pump", footprint_l_m=18, footprint_w_m=12,
+                notes="Centrifugal pump for oil or water with low gas fraction (typically GVF < 15 %)"),
+    CatalogItem("pump_mp1", "Multiphase pump module (single, retrievable)", "boosting", procurement_usd=50e6,
+                fabrication_usd=15e6, install_spread="hlv", install_days=4, lead_time_months=30,
+                weight_te=180, uncertainty=(0.9, 1.0, 1.5), symbol="pump", footprint_l_m=16, footprint_w_m=12,
+                notes="Helico-axial or twin-screw; handles high gas fractions without separation"),
+    CatalogItem("winj_pump", "Subsea raw-seawater injection pump", "boosting", procurement_usd=55e6,
+                fabrication_usd=15e6, install_spread="hlv", install_days=5, lead_time_months=30,
+                weight_te=220, uncertainty=(0.9, 1.0, 1.6), symbol="pump", footprint_l_m=20, footprint_w_m=12,
+                notes="Filters and injects seawater at the seabed — no injection line from the host"),
+    # ── compression and separation ──
+    CatalogItem("wgc_mod", "Wet-gas compressor module (single train)", "compression", procurement_usd=200e6,
+                fabrication_usd=60e6, install_spread="hlv", install_days=8, lead_time_months=40,
+                weight_te=700, uncertainty=(0.85, 1.0, 1.6), symbol="pump", footprint_l_m=35, footprint_w_m=20,
+                notes="Compact wet-gas compression without upstream separation"),
+    CatalogItem("sep_gl", "Gas–liquid separator with liquid pump", "separation", procurement_usd=130e6,
+                fabrication_usd=45e6, install_spread="hlv", install_days=8, lead_time_months=36,
+                weight_te=650, uncertainty=(0.85, 1.0, 1.6), symbol="pump", footprint_l_m=35, footprint_w_m=20,
+                notes="Separates gas from liquid, pumps the liquid; gas flows freely — for long, low-energy tie-backs"),
+    CatalogItem("sep_inline", "Compact in-line separator / de-watering unit", "separation",
+                procurement_usd=60e6, fabrication_usd=20e6, install_spread="hlv", install_days=5,
+                lead_time_months=30, weight_te=300, uncertainty=(0.85, 1.0, 1.7), symbol="pump",
+                footprint_l_m=25, footprint_w_m=10,
+                notes="Pipe-type separator removing bulk water for reinjection or disposal"),
+    # ── control, power and utilities at the seabed ──
+    CatalogItem("sdu", "Subsea distribution unit (SDU)", "control", procurement_usd=3.5e6,
+                fabrication_usd=1.0e6, install_spread="csv", install_days=1.5, lead_time_months=16,
+                weight_te=30, symbol="control", footprint_l_m=8, footprint_w_m=6,
+                notes="Splits hydraulic, chemical, power and signal lines from the umbilical to several structures"),
+    CatalogItem("uta", "Umbilical termination assembly (UTA)", "control", procurement_usd=2.0e6,
+                fabrication_usd=0.8e6, install_spread="ulv", install_days=1, lead_time_months=16,
+                weight_te=15, symbol="control", footprint_l_m=6, footprint_w_m=4,
+                notes="Terminates the umbilical at the field; flying leads run on to the trees and structures"),
+    CatalogItem("sub_power", "Subsea power distribution (transformer + VSD)", "control",
+                procurement_usd=55e6, fabrication_usd=15e6, install_spread="hlv", install_days=4,
+                lead_time_months=36, weight_te=280, uncertainty=(0.85, 1.0, 1.6), symbol="control",
+                footprint_l_m=20, footprint_w_m=12,
+                notes="Step-down transformer and variable-speed drives for pumps or compressors at long step-out"),
+    CatalogItem("chem_store", "Subsea chemical storage & injection unit", "control", procurement_usd=35e6,
+                fabrication_usd=10e6, install_spread="hlv", install_days=3, lead_time_months=30,
+                weight_te=200, uncertainty=(0.85, 1.0, 1.6), symbol="control", footprint_l_m=18,
+                footprint_w_m=10, notes="Stores and doses chemicals at the seabed; refilled by vessel"),
     CatalogItem("riser_base", "Riser base", "riser_base", procurement_usd=3.0e6, fabrication_usd=2.0e6,
                 install_spread="csv", install_days=2, lead_time_months=14, weight_te=120, symbol="riser_base",
                 footprint_l_m=14, footprint_w_m=14),
@@ -213,6 +279,15 @@ DEFAULT_ITEMS = [
                 procurement_usd=210, fabrication_usd=0, install_spread="csv", install_days=0.3,
                 lead_time_months=14, min_diameter_in=2, max_diameter_in=16, weight_te=70,
                 rating_psi=7500, line_color="#3E8A91", line_dash="", wall_thickness_in=0.0, insulation_mm=25.0, coating_mm=8.0),
+    CatalogItem("fl_tcp", "Thermoplastic composite pipe (TCP) flowline", "flowline", cost_basis="per_inch_m",
+                procurement_usd=230, fabrication_usd=0, install_spread="csv", install_days=0.25,
+                lead_time_months=12, min_diameter_in=2, max_diameter_in=10, weight_te=30, rating_psi=10000,
+                line_color="#2E7D6F", line_dash="", wall_thickness_in=0.0, insulation_mm=15.0, coating_mm=0.0,
+                notes="Light, spoolable, corrosion-free; installed from a construction vessel"),
+    CatalogItem("jumper_flex", "Flexible jumper", "jumper", cost_basis="unit",
+                procurement_usd=0.6e6, fabrication_usd=0.1e6, install_spread="csv", install_days=1.0,
+                lead_time_months=10, weight_te=10, line_color="#3E8A91",
+                notes="Tolerant of metrology error; no spool fabrication after survey"),
     CatalogItem("umb_static", "Static steel-tube umbilical", "umbilical", cost_basis="per_m",
                 procurement_usd=900, fabrication_usd=0, install_spread="ulv", install_days=0.25,
                 lead_time_months=18, weight_te=25, line_color="#E9A23B", line_dash="8 6"),
@@ -275,6 +350,21 @@ class Catalog:
         if item.item_id in self.items:
             raise ValueError(f"duplicate catalog id '{item.item_id}'")
         self.items[item.item_id] = item
+
+    def missing_defaults(self) -> List[str]:
+        """Built-in items this catalogue does not have (e.g. one saved by an older version)."""
+        return [i.item_id for i in DEFAULT_ITEMS if i.item_id not in self.items]
+
+    def add_missing_defaults(self) -> List[str]:
+        """Add the built-in items this catalogue lacks. Existing items and rates are untouched."""
+        added = self.missing_defaults()
+        for i in DEFAULT_ITEMS:
+            if i.item_id in added:
+                self.add(copy.deepcopy(i))
+        for s in DEFAULT_SPREADS:
+            if s.key not in self.spreads:
+                self.spreads[s.key] = copy.deepcopy(s)
+        return added
 
     def get(self, item_id: str) -> CatalogItem:
         try:

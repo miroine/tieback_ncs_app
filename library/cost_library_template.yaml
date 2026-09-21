@@ -436,6 +436,433 @@ items:
   wall_thickness_in: 0.0
   insulation_mm: 0.0
   coating_mm: 0.0
+- item_id: plet_valved
+  name: PLET with isolation valve
+  category: plet
+  cost_basis: unit
+  procurement_usd: 3200000.0
+  fabrication_usd: 1400000.0
+  engineering_frac: 0.08
+  install_spread: plv
+  install_days: 1.5
+  lead_time_months: 14
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 45
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: Remote-operated valve lets the line be isolated at the end structure
+  symbol: plet
+  footprint_l_m: 14
+  footprint_w_m: 7
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: plet_pig
+  name: PLET with subsea pig launcher/receiver
+  category: plet
+  cost_basis: unit
+  procurement_usd: 4500000.0
+  fabrication_usd: 2000000.0
+  engineering_frac: 0.08
+  install_spread: csv
+  install_days: 2
+  lead_time_months: 16
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 70
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: For single-line (non-looped) systems that still need pigging
+  symbol: plet
+  footprint_l_m: 18
+  footprint_w_m: 8
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: wye_pig
+  name: Piggable wye (Y-piece)
+  category: ilt
+  cost_basis: unit
+  procurement_usd: 3000000.0
+  fabrication_usd: 1200000.0
+  engineering_frac: 0.08
+  install_spread: plv
+  install_days: 1
+  lead_time_months: 14
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 30
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: Joins two lines into one while keeping it piggable
+  symbol: ilt
+  footprint_l_m: 0.0
+  footprint_w_m: 0.0
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: hot_tap
+  name: Hot-tap tie-in to an operating pipeline
+  category: ilt
+  cost_basis: unit
+  procurement_usd: 6000000.0
+  fabrication_usd: 2000000.0
+  engineering_frac: 0.08
+  install_spread: csv
+  install_days: 8
+  lead_time_months: 18
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 35
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.5
+  notes: Tee welded/clamped onto a live line; includes hot-tap machine and diving/ROV
+    spread time
+  symbol: ilt
+  footprint_l_m: 0.0
+  footprint_w_m: 0.0
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: hipps_mod
+  name: HIPPS module (subsea)
+  category: ssiv
+  cost_basis: unit
+  procurement_usd: 12000000.0
+  fabrication_usd: 3000000.0
+  engineering_frac: 0.08
+  install_spread: csv
+  install_days: 2
+  lead_time_months: 24
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 90
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: Tick HIPPS on the node so lines downstream may be de-rated
+  symbol: ssiv
+  footprint_l_m: 10
+  footprint_w_m: 8
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: pump_1ph
+  name: Single-phase booster pump station (liquid)
+  category: boosting
+  cost_basis: unit
+  procurement_usd: 45000000.0
+  fabrication_usd: 15000000.0
+  engineering_frac: 0.08
+  install_spread: hlv
+  install_days: 5
+  lead_time_months: 30
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 250
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.5
+  notes: Centrifugal pump for oil or water with low gas fraction (typically GVF <
+    15 %)
+  symbol: pump
+  footprint_l_m: 18
+  footprint_w_m: 12
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: pump_mp1
+  name: Multiphase pump module (single, retrievable)
+  category: boosting
+  cost_basis: unit
+  procurement_usd: 50000000.0
+  fabrication_usd: 15000000.0
+  engineering_frac: 0.08
+  install_spread: hlv
+  install_days: 4
+  lead_time_months: 30
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 180
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.5
+  notes: Helico-axial or twin-screw; handles high gas fractions without separation
+  symbol: pump
+  footprint_l_m: 16
+  footprint_w_m: 12
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: winj_pump
+  name: Subsea raw-seawater injection pump
+  category: boosting
+  cost_basis: unit
+  procurement_usd: 55000000.0
+  fabrication_usd: 15000000.0
+  engineering_frac: 0.08
+  install_spread: hlv
+  install_days: 5
+  lead_time_months: 30
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 220
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.6
+  notes: "Filters and injects seawater at the seabed \u2014 no injection line from\
+    \ the host"
+  symbol: pump
+  footprint_l_m: 20
+  footprint_w_m: 12
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: wgc_mod
+  name: Wet-gas compressor module (single train)
+  category: compression
+  cost_basis: unit
+  procurement_usd: 200000000.0
+  fabrication_usd: 60000000.0
+  engineering_frac: 0.08
+  install_spread: hlv
+  install_days: 8
+  lead_time_months: 40
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 700
+  uncertainty:
+  - 0.85
+  - 1.0
+  - 1.6
+  notes: Compact wet-gas compression without upstream separation
+  symbol: pump
+  footprint_l_m: 35
+  footprint_w_m: 20
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: sep_gl
+  name: "Gas\u2013liquid separator with liquid pump"
+  category: separation
+  cost_basis: unit
+  procurement_usd: 130000000.0
+  fabrication_usd: 45000000.0
+  engineering_frac: 0.08
+  install_spread: hlv
+  install_days: 8
+  lead_time_months: 36
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 650
+  uncertainty:
+  - 0.85
+  - 1.0
+  - 1.6
+  notes: "Separates gas from liquid, pumps the liquid; gas flows freely \u2014 for\
+    \ long, low-energy tie-backs"
+  symbol: pump
+  footprint_l_m: 35
+  footprint_w_m: 20
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: sep_inline
+  name: Compact in-line separator / de-watering unit
+  category: separation
+  cost_basis: unit
+  procurement_usd: 60000000.0
+  fabrication_usd: 20000000.0
+  engineering_frac: 0.08
+  install_spread: hlv
+  install_days: 5
+  lead_time_months: 30
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 300
+  uncertainty:
+  - 0.85
+  - 1.0
+  - 1.7
+  notes: Pipe-type separator removing bulk water for reinjection or disposal
+  symbol: pump
+  footprint_l_m: 25
+  footprint_w_m: 10
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: sdu
+  name: Subsea distribution unit (SDU)
+  category: control
+  cost_basis: unit
+  procurement_usd: 3500000.0
+  fabrication_usd: 1000000.0
+  engineering_frac: 0.08
+  install_spread: csv
+  install_days: 1.5
+  lead_time_months: 16
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 30
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: Splits hydraulic, chemical, power and signal lines from the umbilical to
+    several structures
+  symbol: control
+  footprint_l_m: 8
+  footprint_w_m: 6
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: uta
+  name: Umbilical termination assembly (UTA)
+  category: control
+  cost_basis: unit
+  procurement_usd: 2000000.0
+  fabrication_usd: 800000.0
+  engineering_frac: 0.08
+  install_spread: ulv
+  install_days: 1
+  lead_time_months: 16
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 15
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: Terminates the umbilical at the field; flying leads run on to the trees and
+    structures
+  symbol: control
+  footprint_l_m: 6
+  footprint_w_m: 4
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: sub_power
+  name: Subsea power distribution (transformer + VSD)
+  category: control
+  cost_basis: unit
+  procurement_usd: 55000000.0
+  fabrication_usd: 15000000.0
+  engineering_frac: 0.08
+  install_spread: hlv
+  install_days: 4
+  lead_time_months: 36
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 280
+  uncertainty:
+  - 0.85
+  - 1.0
+  - 1.6
+  notes: Step-down transformer and variable-speed drives for pumps or compressors
+    at long step-out
+  symbol: control
+  footprint_l_m: 20
+  footprint_w_m: 12
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
+- item_id: chem_store
+  name: Subsea chemical storage & injection unit
+  category: control
+  cost_basis: unit
+  procurement_usd: 35000000.0
+  fabrication_usd: 10000000.0
+  engineering_frac: 0.08
+  install_spread: hlv
+  install_days: 3
+  lead_time_months: 30
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 200
+  uncertainty:
+  - 0.85
+  - 1.0
+  - 1.6
+  notes: Stores and doses chemicals at the seabed; refilled by vessel
+  symbol: control
+  footprint_l_m: 18
+  footprint_w_m: 10
+  line_color: ''
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
 - item_id: riser_base
   name: Riser base
   category: riser_base
@@ -688,6 +1115,62 @@ items:
   wall_thickness_in: 0.0
   insulation_mm: 25.0
   coating_mm: 8.0
+- item_id: fl_tcp
+  name: Thermoplastic composite pipe (TCP) flowline
+  category: flowline
+  cost_basis: per_inch_m
+  procurement_usd: 230
+  fabrication_usd: 0
+  engineering_frac: 0.08
+  install_spread: csv
+  install_days: 0.25
+  lead_time_months: 12
+  rating_psi: 10000
+  slots: 0
+  max_diameter_in: 10
+  min_diameter_in: 2
+  weight_te: 30
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: Light, spoolable, corrosion-free; installed from a construction vessel
+  symbol: ''
+  footprint_l_m: 0.0
+  footprint_w_m: 0.0
+  line_color: '#2E7D6F'
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 15.0
+  coating_mm: 0.0
+- item_id: jumper_flex
+  name: Flexible jumper
+  category: jumper
+  cost_basis: unit
+  procurement_usd: 600000.0
+  fabrication_usd: 100000.0
+  engineering_frac: 0.08
+  install_spread: csv
+  install_days: 1.0
+  lead_time_months: 10
+  rating_psi: 10000.0
+  slots: 0
+  max_diameter_in: 0.0
+  min_diameter_in: 0.0
+  weight_te: 10
+  uncertainty:
+  - 0.9
+  - 1.0
+  - 1.3
+  notes: Tolerant of metrology error; no spool fabrication after survey
+  symbol: ''
+  footprint_l_m: 0.0
+  footprint_w_m: 0.0
+  line_color: '#3E8A91'
+  line_dash: ''
+  wall_thickness_in: 0.0
+  insulation_mm: 0.0
+  coating_mm: 0.0
 - item_id: umb_static
   name: Static steel-tube umbilical
   category: umbilical

@@ -355,3 +355,65 @@ def fetch_arcgis_features(layer_url: str, bbox, session, max_features: int = 500
 EXTRA_BASEMAPS = ("Ocean (Esri)", "Satellite (Esri)", "Topographic (Esri)", "Light grey (Esri)",
                   "Dark grey (Esri)", "OpenStreetMap", "Sjøkart (Kartverket)", "Topografisk (Kartverket)",
                   "Gråtone (Kartverket)")
+
+
+# ───────────────────────────── NCS regions ─────────────────────────────────
+# (west, south, east, north) in degrees — the same order as a map view. They
+# frame each sea's Norwegian licensed area, not the sea's full extent.
+REGIONS = {
+    "Whole NCS": (-1.0, 55.8, 37.5, 75.5),
+    "North Sea": (1.0, 56.0, 8.5, 62.3),
+    "Norwegian Sea": (1.5, 62.0, 17.0, 69.8),
+    "Barents Sea": (14.0, 69.6, 38.0, 74.8),
+}
+
+
+def region_view(name: str) -> list:
+    if name not in REGIONS:
+        raise KeyError(f"unknown region '{name}' — known: {', '.join(REGIONS)}")
+    return list(REGIONS[name])
+
+
+def region_of(lat: float, lon: float) -> str:
+    """Which NCS sea a point lies in ('' outside all of them). Seas are tried smallest first."""
+    for name in ("North Sea", "Norwegian Sea", "Barents Sea"):
+        w, s, e, n = REGIONS[name]
+        if s <= lat <= n and w <= lon <= e:
+            return name
+    return ""
+
+
+# ──────────────────────── where to load map layers ─────────────────────────
+
+def layer_centre(mode: str, picked=None, selected_pos=None, layout_points=None, view=None):
+    """(lat, lon) round which to load map layers, or None when that source is not available.
+
+    mode: "point" (picked point, else selected item), "selected", "layout" (middle
+    of the layout), "view" (middle of the map view).
+    """
+    def ok(p):
+        return p is not None and len(p) == 2 and all(v is not None for v in p)
+    if mode == "point":
+        return tuple(picked) if ok(picked) else (tuple(selected_pos) if ok(selected_pos) else None)
+    if mode == "selected":
+        return tuple(selected_pos) if ok(selected_pos) else None
+    if mode == "layout":
+        pts = [p for p in (layout_points or []) if ok(p)]
+        if not pts:
+            return None
+        return (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts))
+    if mode == "view":
+        return ((view[1] + view[3]) / 2, (view[0] + view[2]) / 2) if view and len(view) == 4 else None
+    raise ValueError(f"unknown mode '{mode}'")
+
+
+def bbox_around_point(lat: float, lon: float, radius_km: float):
+    """(west, south, east, north) of a square of half-side `radius_km` round a point."""
+    if radius_km <= 0:
+        raise ValueError("radius must be positive")
+    # length of one degree on the WGS84 ellipsoid at this latitude (km)
+    p = math.radians(lat)
+    km_lat = (111132.954 - 559.822 * math.cos(2 * p) + 1.175 * math.cos(4 * p)) / 1000.0
+    km_lon = max((111412.84 * math.cos(p) - 93.5 * math.cos(3 * p)) / 1000.0, 0.5)
+    dlat, dlon = radius_km / km_lat, radius_km / km_lon
+    return (lon - dlon, max(lat - dlat, -90.0), lon + dlon, min(lat + dlat, 90.0))

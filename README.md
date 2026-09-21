@@ -102,10 +102,20 @@ from the production-path checks and the flow-assurance network but are costed an
 Internal units: metres, inches (ID), psi, days, USD.
 
 ## Starting points
+The app opens on an **empty map** framing the whole shelf. *Go to* above the map jumps to the **North
+Sea**, **Norwegian Sea** or **Barents Sea** (or back to the whole NCS); *Load demo* in the sidebar opens
+the example field.
+
 - `templates/` — five concept templates (satellite, daisy chain, dual flowline loop, phased with
-  boosting, deepwater FPSO cluster). Load one from the sidebar, placed at the point you picked on the
-  map, at the centre of the current view, or at its own coordinates. Placement keeps distances, so a
-  concept moved from 60°N to 71°N holds its line lengths.
+  boosting, deepwater FPSO cluster). Load one from the sidebar at the point you picked on the map, at the
+  centre of the view, or at its own coordinates. The **field** — its first template, manifold or well —
+  goes to that point. **Tie back to** lists the hosts within 150 km of it, nearest first: Sodir
+  facilities loaded on the map, hosts in the layout, and hosts in saved concepts (*Find hosts near this
+  point* loads Sodir's facilities round it if none are loaded). The template's host, riser base and
+  host-end PLET move onto the chosen host, taking its name and water depth; the lines between field and
+  host are redrawn straight at the new distance. *Template's own host* keeps the template's tie-back
+  distance instead. Placement keeps the field's shape in metres, so a concept moved from 60°N to 71°N
+  holds its line lengths.
 - `library/cost_library_template.yaml` and `.xlsx` — cost catalog to fill in with your own rates
   (YAML, Excel or CSV all import from the Equipment catalog tab).
 - `tools/pvt_studio_selftest.py` — run against PVT Studio's `nodal.py` to check the Beggs-Brill fixes.
@@ -249,6 +259,10 @@ will still overlap on the map — that is the geometry, not the drawing. The **C
 deliverability and flow-assurance margins side by side, with deltas against a baseline.
 
 ## Map layers and grid surfaces
+*NCS map layers* load **around** a spot you choose: the point picked on the map (or, if none, the
+selected item), the selected item, the whole layout, or the current map view. The radius is the distance
+on the ground from that spot, so at 71°N the box is correctly wider in longitude.
+
 *Import map layer* in the sidebar takes several files at once. A shapefile can be a `.zip` or the loose
 parts — select `blocks.shp` together with its `.dbf` and `.prj` and they are matched by stem into one
 layer. A shapefile carries no coordinate system of its own, so without a `.prj` you must choose the
@@ -284,6 +298,14 @@ they are physically removed), mobile units are dropped, and the same facility lo
 layers is merged on its NPDID — or on name and position where no NPDID is published. Each row shows the
 status the decision was based on, and the filters can be switched off to see everything.
 
+**Saved concepts are candidates too** (*Include saved concepts*). Each one offers its host, and its
+templates, manifolds and PLEMs as *subsea tie-in* points. A subsea tie-in shares that concept's line,
+riser and host: the trial ties the structure into the other concept's structure with a new flowline and
+solves both concepts' wells together, so back-pressure and host capacity reflect the shared system,
+while the capex counts only the new flowline, PLETs, jumpers and umbilical. *Add to layout* copies that
+concept's path to its host into the working layout (so the wells have somewhere to flow) and prices the
+copied items at zero here, since they are costed in their own concept.
+
 If an NCS layer comes back empty the app now says so: a layout near the median line often has no
 Norwegian facility inside the default 40 km radius.
 
@@ -316,11 +338,12 @@ When deploying to Streamlit Community Cloud, upload the whole folder — `test_f
 | well (IPR/VLP) / cost spreadsheet IO / cases / report | 22 / 12 / 19 / 7 |
 | production chemistry / reservoirs and well fluids / map tools and sharing | 52 / 52 / 66 |
 | tie-in screening / design basis / viability | 21 / 21 / 14 |
+| share links (incl. code protection) / regions, templates-to-host, concept tie-ins, new equipment | 27 / 26 |
 | map bridge (incl. duplicate) | 52 |
 | ncs / import / grid surfaces / flow assurance | 23 / 43 / 83 / 43 |
 | multiphase / thermal / bathymetry | 31 / 25 / 37 |
 | JS core logic / component protocol simulation | 61 / 66 |
-| Headless UI (stub Streamlit, scripted interactions) | 88 |
+| Headless UI (stub Streamlit, scripted interactions) | 100 |
 
 The protocol test runs the real component script against a fake DOM and fake Leaflet; the UI test
 executes `tieback_app.py` with a stub Streamlit. Neither replaces a check in a real browser.
@@ -328,6 +351,29 @@ executes `tieback_app.py` with a stub Streamlit. Neither replaces a check in a r
 `ui_test/stubs.py` is part of the app, not scaffolding around it: it has to mirror the Streamlit API the
 app actually calls. When you update the app, update `ui_test/` in the same commit — a stub that is a
 version behind fails the build with an error in the app's own code rather than in the harness.
+
+## Viability: the turndown case
+A tie-back is sized for its design (plateau) rate, but runs slower in late life, during well tests or
+when the host cuts back. Slower flow spends longer in the cold line and arrives colder, so a line that
+is clear of hydrates at plateau can fall into the hydrate region at low rate. The *Turndown case* slider
+sets that lower rate as a fraction of design (0.5 = half rate); the check re-solves the layout with every
+well scaled by it and reports the hydrate margin at the coldest point: **≥ 3 °C** passes, **0–3 °C** is
+to resolve, **below 0 °C** blocks. The fix is a minimum operating rate, insulation, heating or
+continuous inhibition. The *Flow assurance* tab runs the full sensitivity (1.0, 0.7, 0.5, 0.3).
+
+## Equipment catalogue
+Besides trees, templates, manifolds, PLET/PLEM, in-line tees, SSIVs, riser bases, hosts and the linear
+items, the catalogue has: PLET with isolation valve, PLET with subsea pig launcher/receiver, piggable
+wye, hot-tap tie-in to an operating pipeline, subsea HIPPS module (placing it sets the node's HIPPS
+flag); single-phase booster pump, single multiphase pump module, the 2-pump multiphase station, subsea
+raw-seawater injection pump; wet-gas compressor module and the full compression station; gas–liquid
+separator with liquid pump, compact in-line separator / de-watering unit, and separation with water
+reinjection; and a new **control** group — subsea distribution unit (SDU), umbilical termination
+assembly (UTA), subsea power distribution (transformer + VSD) and subsea chemical storage & injection —
+which connect by umbilical, power cable or utility line, not by flowline. Also a thermoplastic composite
+(TCP) flowline and a flexible jumper. Rates are indicative placeholders like the rest. A project saved by
+an older version lacks the new items; the Equipment catalog tab offers to add them without touching the
+project's own rates.
 
 ## Known limits
 - Flow assurance draws a longitudinal section (seabed, line and riser with pressure/temperature) and a

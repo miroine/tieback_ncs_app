@@ -160,6 +160,88 @@ class Layout:
         for e in self.edges.values():
             e.route = [moved(la, lo) for la, lo in e.route]
 
+    def host_side(self, host_id: str, radius_m: float = 1500.0) -> List[str]:
+        """The host and the items sitting at it (riser base, host-end PLET…): they move with the host."""
+        from tb_geo import geodesic_distance
+        h = self.nodes[host_id]
+        return [n.node_id for n in self.nodes.values()
+                if n.node_id == host_id
+                or (self.kind(n.node_id) not in ("well", "template", "manifold", "host")
+                    and geodesic_distance(h.lat, h.lon, n.lat, n.lon) <= radius_m)]
+
+    def place_split(self, field_lat: float, field_lon: float,
+                    host_lat: Optional[float] = None, host_lon: Optional[float] = None,
+                    host_id: Optional[str] = None, host_label: str = "",
+                    host_depth_m: Optional[float] = None) -> dict:
+        """Put a concept's subsea part at the field and its host at a real host.
+
+        The subsea part (wells, templates, manifolds and what sits among them)
+        keeps its shape and is anchored on its first template/manifold at
+        (field_lat, field_lon). The host, with the riser base and PLET beside it,
+        moves as one to (host_lat, host_lon). Lines between the two groups are
+        re-drawn straight (their bends belonged to the template's geometry);
+        lines inside a group keep their bends. Without a host position the whole
+        layout moves to the field point, keeping its own tie-back distance.
+        """
+        import math as _m
+        if not self.nodes:
+            return {"host": None, "moved": 0, "stretched": []}
+        hosts = [n for n in self.nodes if self.kind(n) == "host"]
+        hid = host_id if host_id in self.nodes else (hosts[0] if hosts else None)
+        if hid is None or host_lat is None or host_lon is None:
+            subsea = [n for n in self.nodes if n not in (self.host_side(hid) if hid else [])]
+            anchor = next(((self.nodes[n].lat, self.nodes[n].lon) for k in ("template", "manifold", "well")
+                           for n in subsea if self.kind(n) == k), None)
+            self.place_at(field_lat, field_lon, anchor_point=anchor)
+            return {"host": hid, "moved": len(self.nodes), "stretched": []}
+        near_host = set(self.host_side(hid))
+        subsea = [n for n in self.nodes if n not in near_host]
+
+        def mover(anchor, lat, lon):
+            k_src = _m.cos(_m.radians(anchor[0])) or 1e-9
+            k_dst = _m.cos(_m.radians(lat)) or 1e-9
+
+            def f(la, lo):
+                dy = (la - anchor[0]) * 110540.0
+                dx = (lo - anchor[1]) * 111320.0 * k_src
+                return lat + dy / 110540.0, lon + dx / (111320.0 * k_dst)
+            return f
+
+        anchor_s = next(((self.nodes[n].lat, self.nodes[n].lon) for k in ("template", "manifold", "well")
+                         for n in subsea if self.kind(n) == k), None)
+        if anchor_s is None and subsea:
+            anchor_s = (sum(self.nodes[n].lat for n in subsea) / len(subsea),
+                        sum(self.nodes[n].lon for n in subsea) / len(subsea))
+        h0 = (self.nodes[hid].lat, self.nodes[hid].lon)
+        move_s = mover(anchor_s, field_lat, field_lon) if anchor_s else None
+        move_h = mover(h0, host_lat, host_lon)
+        for n in subsea:
+            nd = self.nodes[n]
+            nd.lat, nd.lon = move_s(nd.lat, nd.lon)
+        for n in near_host:
+            nd = self.nodes[n]
+            nd.lat, nd.lon = move_h(nd.lat, nd.lon)
+        stretched = []
+        for e in self.edges.values():
+            a_h, b_h = e.from_node in near_host, e.to_node in near_host
+            if a_h and b_h:
+                e.route = [move_h(la, lo) for la, lo in e.route]
+            elif not a_h and not b_h:
+                e.route = [move_s(la, lo) for la, lo in e.route] if move_s else e.route
+            else:
+                e.route = []
+                if e.length_m is not None and self.catalog.get(e.item_id).category != "riser":
+                    e.length_m = None           # a fixed length belonged to the old distance
+                stretched.append(e.edge_id)
+        h = self.nodes[hid]
+        if host_label:
+            h.label = host_label[:40]
+        if host_depth_m:
+            for n in near_host:
+                if n != hid and self.kind(n) != "host":
+                    self.nodes[n].water_depth_m = float(host_depth_m)
+        return {"host": hid, "moved": len(self.nodes), "stretched": stretched}
+
     # ── template slots, tags, multi-element moves ──
     SLOT_ITEM = "slot_tiein"
 
@@ -609,7 +691,8 @@ class Layout:
             for h in hosts:
                 powered |= self.reachable(h, ("power_cable", "umbilical"))
             for nid in self.nodes:
-                if self.kind(nid) in ("boosting", "compression", "separation") and nid not in powered:
+                if (self.kind(nid) in ("boosting", "compression", "separation")
+                        or self.nodes[nid].item_id == "sub_power") and nid not in powered:
                     F.append(Finding("warning", "NO_POWER", "Active subsea unit has no power supply path.", nid))
         return F
 

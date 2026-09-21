@@ -69,6 +69,8 @@ class Harness:
     def selectbox(self, label, options, index=0, format_func=str, **k):
         options = list(options)
         for o in options: format_func(o)
+        if label in self.inputs and self.inputs[label] in options:
+            return self.inputs[label]
         return options[index] if options else None
     def radio(self, label, options, index=0, **k):
         options = list(options)

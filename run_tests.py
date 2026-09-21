@@ -1,7 +1,7 @@
 """Run all TieBack Studio test suites (Python engine, bridge, JS component, headless UI)."""
 import shutil, subprocess, sys
 PY = ["test_geo.py", "test_catalog.py", "test_network.py", "test_schedule.py", "test_cost.py",
-      "test_ncs.py", "test_import.py", "test_grid.py", "test_map.py", "test_multiphase.py", "test_thermal.py", "test_bathymetry.py", "test_well.py", "test_costio.py", "test_cases.py", "test_report.py", "test_tiein.py", "test_basis.py", "test_viability.py", "test_chemistry.py", "test_fluids.py", "test_mapextras.py", "test_share.py",
+      "test_ncs.py", "test_import.py", "test_grid.py", "test_map.py", "test_multiphase.py", "test_thermal.py", "test_bathymetry.py", "test_well.py", "test_costio.py", "test_cases.py", "test_report.py", "test_tiein.py", "test_basis.py", "test_viability.py", "test_chemistry.py", "test_fluids.py", "test_mapextras.py", "test_share.py", "test_v017.py",
       "test_flowassurance.py", "ui_test/test_ui_smoke.py"]
 JS = ["tb_map_component/core.test.js", "tb_map_component/protocol.test.js"]
 ok = True

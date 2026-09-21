@@ -147,7 +147,7 @@ class Schedule:
 # ─────────────────────────── layout-driven network ─────────────────────────
 
 STRUCTURE_KINDS = ("template", "manifold", "plet", "plem", "ilt", "ssiv", "riser_base",
-                   "boosting", "compression", "separation")
+                   "boosting", "compression", "separation", "control")
 PIPELAY_KINDS = ("flowline", "riser")
 CABLE_KINDS = ("umbilical", "power_cable")
 

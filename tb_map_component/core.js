@@ -26,6 +26,7 @@
     compression: { color: "#C4561B", size: 30 },
     separation:  { color: "#8C6D1F", size: 30 },
     riser_base:  { color: "#6F6F6F", size: 18 },
+    control:     { color: "#B3801A", size: 18 },
     jacket:      { color: "#EB0037", size: 34 },
     semisub:     { color: "#EB0037", size: 36 },
     fpso:        { color: "#EB0037", size: 38 },
@@ -210,6 +211,9 @@
     S.pump = '<rect x="' + p + '" y="' + (c - z * 0.3) + '" width="' + z + '" height="' + z * 0.6 + '" rx="2"/>' +
       '<circle cx="' + (c - z * 0.18) + '" cy="' + c + '" r="' + z * 0.17 + '" fill="#fff"/>' +
       '<circle cx="' + (c + z * 0.18) + '" cy="' + c + '" r="' + z * 0.17 + '" fill="#fff"/>';
+    // control / distribution unit: a diamond with a white "hub" — lines fan out from it
+    S.control = '<polygon points="' + c + ',' + p + ' ' + (p + z) + ',' + c + ' ' + c + ',' + (p + z) + ' ' + p + ',' + c + '"/>' +
+      '<circle cx="' + c + '" cy="' + c + '" r="' + z * 0.14 + '" fill="#fff"/>';
     S.riser_base = '<rect x="' + p + '" y="' + p + '" width="' + z + '" height="' + z + '" rx="2"/>' +
       '<circle cx="' + c + '" cy="' + c + '" r="' + z * 0.22 + '" fill="#fff"/>';
     // Markings that sit on a white deck need their own dark ink — inheriting the
