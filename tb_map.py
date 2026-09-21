@@ -63,6 +63,9 @@ class DisplaySettings:
     thickness_by_diameter: bool = True  # thicker line for a bigger bore
     color_mode: str = "item"           # item | fluid | phase | checks
     fluid_colors: Dict[str, str] = field(default_factory=lambda: dict(FLUID_COLORS))
+    basemap: str = "Ocean (Esri)"                                   # the base map last chosen
+    bookmarks: List[dict] = field(default_factory=list)            # named views (tb_mapextras)
+    custom_layers: List[dict] = field(default_factory=list)        # maps added by URL
 
     def __post_init__(self):
         if self.color_mode not in COLOR_MODES:
@@ -72,19 +75,33 @@ class DisplaySettings:
                 raise ValueError(f"{name} must be between 0.2 and 4")
 
 
-def fluid_of(layout, edge) -> str:
-    """Stated fluid/service, else the default for that item or category."""
+PRODUCTION_LINE_KINDS = ("flowline", "riser", "jumper")
+
+
+def fluid_of(layout, edge, edge_wells=None) -> str:
+    """What a line carries: stated on the line, else what its wells produce, else
+    the catalogue default for the item.
+
+    The middle step is what makes a gas well's flowline draw red and an oil
+    well's green without anyone setting it line by line; commingled oil and gas
+    wells give multiphase.
+    """
     f = (edge.attrs.get("fluid") or "").strip().lower()
     if f in FLUIDS:
         return f
     it = layout.catalog.get(edge.item_id)
+    if it.item_id not in ITEM_FLUID and it.category in PRODUCTION_LINE_KINDS:
+        import tb_fluids
+        inferred = tb_fluids.line_fluid(layout, edge, edge_wells)
+        if inferred in FLUIDS:
+            return inferred
     return ITEM_FLUID.get(it.item_id) or CATEGORY_FLUID.get(it.category, "other")
 
 
-def edge_color(layout, edge, display: "DisplaySettings", severity: str) -> str:
+def edge_color(layout, edge, display: "DisplaySettings", severity: str, edge_wells=None) -> str:
     it = layout.catalog.get(edge.item_id)
     if display.color_mode == "fluid":
-        return display.fluid_colors.get(fluid_of(layout, edge), FLUID_COLORS["other"])
+        return display.fluid_colors.get(fluid_of(layout, edge, edge_wells), FLUID_COLORS["other"])
     if display.color_mode == "phase":
         return PHASE_COLORS[(int(edge.phase) - 1) % len(PHASE_COLORS)]
     if display.color_mode == "checks":
@@ -127,10 +144,14 @@ def build_payload(layout: "net.Layout", findings=None, display: Optional["Displa
     `visible` (element ids) comes from the tag filter — elements outside it are sent
     with hidden=True so the map leaves them out without losing them.
     """
+    import tb_fluids
     findings = layout.validate() if findings is None else findings
     display = display or DisplaySettings()
     sev = severity_map(findings)
     cat = layout.catalog
+    edge_wells = tb_fluids.wells_by_edge(layout)          # once, not once per line
+    well_fl = {nid: tb_fluids.well_fluid(layout, nid) for nid in layout.nodes
+               if layout.kind(nid) == "well"}
     nodes = [dict(id=n.node_id, label=n.label or n.node_id, item_id=n.item_id,
                   item=cat.get(n.item_id).name, kind=cat.get(n.item_id).category,
                   symbol=cat.get(n.item_id).symbol or cat.get(n.item_id).category,
@@ -140,6 +161,12 @@ def build_payload(layout: "net.Layout", findings=None, display: Optional["Displa
                   phase=n.phase, hipps=n.hipps, tags=layout.tags(n.node_id),
                   hidden=(visible is not None and n.node_id not in visible),
                   in_structure=n.attrs.get("in_structure", ""),
+                  fluid=well_fl.get(n.node_id, ("", ""))[0],
+                  fluid_source=well_fl.get(n.node_id, ("", ""))[1],
+                  fluid_color=(tb_fluids.FLUID_COLORS.get(well_fl[n.node_id][0], "")
+                               if n.node_id in well_fl and tb_fluids.is_assigned(well_fl[n.node_id][1])
+                               else ""),
+                  reservoir=n.attrs.get("reservoir", ""),
                   severity=sev.get(n.node_id, "")) for n in layout.nodes.values()]
     edges = [dict(id=e.edge_id, label=e.label or e.edge_id, item_id=e.item_id,
                   item=cat.get(e.item_id).name, kind=cat.get(e.item_id).category,
@@ -147,17 +174,19 @@ def build_payload(layout: "net.Layout", findings=None, display: Optional["Displa
                   route=[list(to_display(layout, float(a), float(b))) for a, b in e.route],
                   shape=[list(to_display(layout, float(a), float(b))) for a, b in layout.edge_shape(e)],
                   smooth=bool(e.attrs.get("smooth")),
-                  color=edge_color(layout, e, display, sev.get(e.edge_id, "")),
-                  dash=cat.get(e.item_id).line_dash, fluid=fluid_of(layout, e),
+                  color=edge_color(layout, e, display, sev.get(e.edge_id, ""), edge_wells),
+                  dash=cat.get(e.item_id).line_dash, fluid=fluid_of(layout, e, edge_wells),
                   length_m=round(layout.edge_length(e), 1), phase=e.phase,
                   tags=layout.tags(e.edge_id),
                   hidden=(visible is not None and (e.edge_id not in visible
                                                    or e.from_node not in visible or e.to_node not in visible)),
                   severity=sev.get(e.edge_id, "")) for e in layout.edges.values()]
-    return {"nodes": nodes, "edges": edges,
+    import tb_mapextras as mx
+    annotations = [dict(s, measure=mx.describe(s)) for s in mx.sketches(layout)]
+    return {"nodes": nodes, "edges": edges, "annotations": annotations,
             "display": {"symbol_scale": float(display.symbol_scale), "line_scale": float(display.line_scale),
                         "thickness_by_diameter": bool(display.thickness_by_diameter),
-                        "color_mode": display.color_mode}}
+                        "color_mode": display.color_mode, "basemap": display.basemap}}
 
 
 def build_palette(catalog) -> dict:
@@ -183,6 +212,41 @@ def default_diameter(item) -> float:
     if item.max_diameter_in <= 0:
         return 0.0
     return float(min(max(10.0, item.min_diameter_in), item.max_diameter_in))
+
+
+
+DUPLICATE_GAP_M = 300.0      # clearance between the original and its copy
+DUPLICATE_MIN_M = 500.0
+
+
+def duplicate_offset(layout, node_ids, gap_m: float = DUPLICATE_GAP_M) -> tuple:
+    """(dlat, dlon) that puts a copy of these nodes just east of the originals.
+
+    The step is the selection's own east-west extent plus a gap, so duplicating a
+    whole cluster lands it beside itself instead of on top of itself.
+    """
+    import math
+    pts = [(layout.nodes[n].lat, layout.nodes[n].lon) for n in node_ids if n in layout.nodes]
+    if not pts:
+        return 0.0, 0.0
+    lat0 = sum(p[0] for p in pts) / len(pts)
+    m_per_deg_lon = 111_320.0 * math.cos(math.radians(lat0))
+    width_m = (max(p[1] for p in pts) - min(p[1] for p in pts)) * m_per_deg_lon
+    step_m = max(width_m + gap_m, DUPLICATE_MIN_M)
+    return 0.0, step_m / m_per_deg_lon
+
+
+def duplicate_elements(layout, node_ids, with_group: bool = True, dlat=None, dlon=None) -> dict:
+    """Duplicate on the layout with map-style ids. Returns {old: new}."""
+    ids = [n for n in node_ids if n in layout.nodes]
+    group = list(ids)
+    if with_group:
+        for nid in ids:
+            group += [g for g in layout.jumper_group(nid) if g not in group]
+    if dlat is None or dlon is None:
+        dlat, dlon = duplicate_offset(layout, group)
+    return layout.duplicate(ids, dlat, dlon, with_group=with_group,
+                            new_id=lambda kind, used: next_id(ID_PREFIX.get(kind, "N"), used))
 
 
 def apply_event(layout: "net.Layout", event: Optional[dict], state: dict) -> dict:
@@ -266,6 +330,30 @@ def apply_event(layout: "net.Layout", event: Optional[dict], state: dict) -> dic
             layout.edges[eid].route = [from_display(layout, la, lo) for la, lo in route]
             layout.edges[eid].length_m = None
             res.update(changed=True, selected=eid)
+        elif typ == "duplicate":
+            ids = [str(x) for x in (p.get("ids") or []) if x in layout.nodes]
+            if not ids:
+                raise KeyError("nothing selected to duplicate")
+            nodes_before = set(layout.nodes)
+            mapping = duplicate_elements(layout, ids, with_group=bool(p.get("with_group", True)))
+            new_nodes = [v for k, v in mapping.items() if k in nodes_before]
+            n_lines = len(mapping) - len(new_nodes)
+            state["select_many"] = new_nodes
+            res.update(changed=True, selected=mapping.get(ids[0]),
+                       message=f"Duplicated {len(new_nodes)} item(s) and {n_lines} line(s) — "
+                               f"the copy is selected; drag it with Move to place it")
+        elif typ == "add_annotation":
+            import tb_mapextras as mx
+            sk = mx.make_sketch(p.get("kind", ""), coords=p.get("coords"), center=p.get("center"),
+                                radius_m=float(p.get("radius_m") or 0.0), label=p.get("label", ""),
+                                existing=len(mx.sketches(layout)))
+            mx.add_sketch(layout, sk)
+            res.update(changed=True, message=f"Sketch added: {mx.describe(sk)}")
+        elif typ == "delete_annotation":
+            import tb_mapextras as mx
+            if not mx.remove_sketch(layout, str(p.get("id", ""))):
+                raise KeyError(f"unknown sketch {p.get('id')}")
+            res.update(changed=True, message="Sketch removed")
         elif typ == "delete":
             eid = p["id"]
             if eid in layout.nodes:
@@ -278,8 +366,8 @@ def apply_event(layout: "net.Layout", event: Optional[dict], state: dict) -> dic
         elif typ == "select":
             sid = p.get("id")
             res["selected"] = sid if (sid in layout.nodes or sid in layout.edges) else None
-        elif typ == "view":
-            pass
+        elif typ in ("view", "display", "basemap", "bookmark"):
+            pass                       # handled by apply_display_event; nothing to do to the layout
         else:
             raise ValueError(f"unknown event type '{typ}'")
     except (KeyError, ValueError) as exc:
@@ -291,11 +379,47 @@ def apply_event(layout: "net.Layout", event: Optional[dict], state: dict) -> dic
 _component_func = None
 
 
-def apply_display_event(display: "DisplaySettings", event: Optional[dict]) -> bool:
-    """Apply a toolbar size change from the map. Returns True if anything changed."""
-    if not event or event.get("type") != "display":
+def is_new_event(event: Optional[dict], state: Optional[dict]) -> bool:
+    """False for an event already applied. Streamlit hands the component's last
+    value back on every rerun, so without this an event is applied again and again."""
+    if not event or state is None:
+        return bool(event)
+    try:
+        nonce, seq = str(event.get("nonce", "")), int(event.get("seq", -1))
+    except (TypeError, ValueError):
         return False
+    return seq > (state.get("seen") or {}).get(nonce, -1)
+
+
+def apply_display_event(display: "DisplaySettings", event: Optional[dict],
+                        state: Optional[dict] = None) -> bool:
+    """Apply a drawing change from the map — symbol/line size, the base map chosen,
+    or a bookmarked view. Returns True if anything changed.
+
+    Pass the map `state` so a re-delivered event is ignored: a size change is
+    harmless to repeat, a bookmark is not — each repeat would add another one.
+    """
+    if not event or not is_new_event(event, state):
+        return False
+    typ = event.get("type")
     p = event.get("payload") or {}
+    if typ == "basemap":
+        name = str(p.get("name") or "")
+        if name and name != display.basemap:
+            display.basemap = name
+            return True
+        return False
+    if typ == "bookmark":
+        import tb_mapextras as mx
+        try:
+            bm = mx.make_bookmark(p.get("view") or event.get("view"), p.get("name", ""),
+                                  p.get("basemap") or display.basemap, len(display.bookmarks))
+        except ValueError:
+            return False
+        display.bookmarks.append(bm)
+        return True
+    if typ != "display":
+        return False
     changed = False
     for name in ("symbol_scale", "line_scale"):
         if name in p:
@@ -308,7 +432,8 @@ def apply_display_event(display: "DisplaySettings", event: Optional[dict]) -> bo
 
 def render_map(payload: dict, palette: dict, overlays: List[dict], selected: Optional[str],
                height: int = 620, fit_token: int = 0, key: str = "tieback_map",
-               rasters: Optional[List[dict]] = None):
+               rasters: Optional[List[dict]] = None, custom_layers: Optional[List[dict]] = None,
+               view_target: Optional[dict] = None):
     """Render the component (Streamlit only). Returns the latest event or None.
 
     `rasters` are image overlays (imported grids) — {title, url, bounds, opacity}.
@@ -320,8 +445,10 @@ def render_map(payload: dict, palette: dict, overlays: List[dict], selected: Opt
     if _component_func is None:
         _component_func = components.declare_component("tieback_map", path=str(COMPONENT_DIR))
     rasters = list(rasters or [])
+    custom_layers = list(custom_layers or [])
     rev = content_rev(payload, [o.get("rev", o.get("layer")) for o in overlays],
-                      [r.get("rev", r.get("title")) for r in rasters])
+                      [r.get("rev", r.get("title")) for r in rasters], custom_layers)
     return _component_func(payload=payload, palette=palette, rules=EDGE_RULES, overlays=overlays,
-                           rasters=rasters, selected=selected, height=height, rev=rev,
+                           rasters=rasters, custom_layers=custom_layers, view_target=view_target or {},
+                           selected=selected, height=height, rev=rev,
                            fit_token=fit_token, key=key, default=None)

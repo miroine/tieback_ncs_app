@@ -125,11 +125,21 @@ def blend(streams: List[Tuple[mp.Fluid, float, float]]) -> Tuple[mp.Fluid, float
                     salinity_wt_pct=sal, sigma_dyn_cm=sig), q_o, q_w
 
 
+INJECTOR_WELL_FLUIDS = ("water injector", "gas injector")
+
+
 def well_inputs(layout) -> Dict[str, WellFA]:
-    """Read (or default) per-well inputs from node attrs."""
+    """Read (or default) per-well inputs from node attrs — producers only.
+
+    An injector is fed from the host and puts nothing into the production
+    network; solving it as a producer would add a phantom stream to every line
+    and to the host intake.
+    """
     out = {}
     for n in layout.nodes.values():
         if layout.kind(n.node_id) != "well":
+            continue
+        if str(n.attrs.get("well_fluid", "")).lower() in INJECTOR_WELL_FLUIDS:
             continue
         d = n.attrs.get("fa") or {}
         valid = {k: v for k, v in d.items() if k in WellFA.__dataclass_fields__}

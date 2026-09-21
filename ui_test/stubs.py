@@ -27,6 +27,14 @@ class Harness:
         for n in ("TextColumn", "SelectboxColumn", "NumberColumn", "CheckboxColumn"):
             setattr(cc, n, lambda *a, **k: dict(a=a, k=k))
         self.column_config = cc
+        # real Streamlit: st.query_params is dict-like (.get → str | None), st.context carries the
+        # request headers, st.secrets is dict-like. Tests set these directly.
+        self.query_params = {}
+        self.context = types.SimpleNamespace(headers={"Host": "tieback.test.app"}, url=None)
+        self.secrets = {}
+        self.inputs = {}   # label → value a test "types" into a text_input / picks in a radio
+    def link_button(self, label, url, **k):
+        self.log.append(("link_button", url)); return None
     # layout
     def set_page_config(self, **k): pass
     def columns(self, spec, **k): return [Ctx(self) for _ in range(spec if isinstance(spec, int) else len(spec))]
@@ -49,7 +57,7 @@ class Harness:
             self.press.discard(label); self.pressed_log.append(label); return True
         return False
     button = form_submit_button = _btn
-    def text_input(self, label, value="", **k): return value
+    def text_input(self, label, value="", **k): return self.inputs.get(label, value)
     def number_input(self, label, min_value=None, max_value=None, value=None, step=None, **k):
         v = min_value if value is None else value
         nums = [x for x in (min_value, max_value, v, step) if x is not None]
@@ -62,7 +70,9 @@ class Harness:
         options = list(options)
         for o in options: format_func(o)
         return options[index] if options else None
-    def radio(self, label, options, index=0, **k): return list(options)[index]
+    def radio(self, label, options, index=0, **k):
+        options = list(options)
+        return self.inputs[label] if self.inputs.get(label) in options else options[index]
     def multiselect(self, label, options, default=None, format_func=str, **k):
         for o in options: format_func(o)
         return list(default or [])

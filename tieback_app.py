@@ -28,6 +28,9 @@ import tb_bathymetry
 import tb_cases
 import tb_catalog
 import tb_chemistry
+import tb_fluids
+import tb_mapextras
+import tb_share
 import tb_multiphase
 import tb_cost
 import tb_costio
@@ -45,7 +48,7 @@ import tb_tiein
 import tb_viability
 import tb_well
 
-APP_VERSION = "0.13.1"
+APP_VERSION = "0.16.0"
 HERE = Path(__file__).parent
 DEMO_FILE = HERE / "test_fixtures" / "demo_field_a_tieback.yaml"
 
@@ -225,6 +228,11 @@ REQUIRED_API = {
     "tb_bathymetry": ["diagnose", "diagnosis_message", "depth_profile", "fetch_route_profiles"],
     "tb_cases": ["concept_overlay", "color_for", "snapshot", "restore"],
     "tb_chemistry": ["screen", "recommend_inhibitor", "ChemistryInputs", "InhibitorCase"],
+    "tb_mapextras": ["make_sketch", "classify_url", "make_bookmark", "sketches", "describe"],
+    "tb_share": ["encode", "decode", "build_payload", "restore_payload", "LocalStore",
+                 "protect", "unprotect", "generate_code", "is_protected"],
+    "tb_fluids": ["well_fluid", "reservoirs", "set_well_fluid", "assign_reservoir",
+                  "apply_reservoir_to_wells", "fluid_table", "gas_well_rates"],
     "tb_grid": ["read_grid", "image_overlay", "contour_features", "sniff"],
     "tb_import": ["as_upload_list", "read_uploads", "read_shapefile_parts"],
     "tb_schedule": ["apply_overrides", "build_from_layout"],
@@ -333,6 +341,86 @@ def init_state():
 
 
 init_state()
+
+
+def _app_url() -> str:
+    """The address this app is being used at, for building a share link."""
+    try:
+        u = getattr(st.context, "url", None)
+        if u:
+            return str(u).split("?")[0].rstrip("/")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        h = st.context.headers.get("Host") or st.context.headers.get("host")
+        if h:
+            return ("http://" if h.startswith(("localhost", "127.0.0.1")) else "https://") + h
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _share_store():
+    """Where short links are kept: a secret gist if a token is configured, else this server's disk."""
+    token = ""
+    try:
+        token = st.secrets.get("github_gist_token", "") or ""
+    except Exception:  # noqa: BLE001 — no secrets file at all is normal
+        token = ""
+    if token:
+        import requests as _rq
+        return tb_share.GistStore(token, _rq.Session())
+    return tb_share.LocalStore(HERE / ".shared_designs")
+
+
+def _apply_shared(got: dict, key: str, protected: bool = False):
+    """Load a restored payload into this session and show the 'shared design' banner."""
+    ss = st.session_state
+    set_project(*tb_project.project_from_yaml_full(got["project_yaml"]))
+    if got["cases"]:
+        ss.cases = got["cases"]
+        ss.active_case = got["active_case"] or None
+        ss.ghost_cases = []
+    if got["view"]:
+        ss.view_target = {"token": f"link:{key[:16]}", "bbox": got["view"]}
+    ss.shared_from = {"when": got.get("created_utc", ""), "note": got.get("note", ""),
+                      "author": got.get("author", ""), "concepts": len(got["cases"]),
+                      "protected": protected}
+
+
+def _open_shared_link():
+    """A colleague's link: open the design it carries, once per browser session.
+
+    Runs before anything reads the layout, so the first thing drawn is the
+    shared design — not the demo followed by a jump. A protected link is held
+    in `pending_link` until the code is entered (see the prompt under the title).
+    """
+    ss = st.session_state
+    try:
+        qp = st.query_params
+        design, share = qp.get("design"), qp.get("share")
+    except Exception:  # noqa: BLE001 — older Streamlit / no query params
+        return
+    key = design or share
+    if not key or ss.get("opened_link") == key[:64]:
+        return
+    ss.opened_link = key[:64]
+    try:
+        if design:
+            token = design
+        else:
+            store = _share_store()
+            token = store.load_token(share) if hasattr(store, "load_token") else \
+                tb_share.encode(store.load(share))
+        if has_api("tb_share", "is_protected") and tb_share.is_protected(token):
+            ss.pending_link = {"key": key, "token": token, "tries": 0}
+            return
+        _apply_shared(tb_share.restore_payload(tb_share.decode(token)), key)
+    except Exception as exc:  # noqa: BLE001 — a bad link must not stop the app
+        ss.shared_error = str(exc)
+
+
+_open_shared_link()
 S = st.session_state
 LAY: tb_network.Layout = S.layout
 CAT: tb_catalog.Catalog = LAY.catalog
@@ -359,6 +447,42 @@ st.markdown(f"""<div class="tb-title"><h1>TieBack Studio</h1>
 <span>{S.project_name} · subsea tie-back concept design for the Norwegian Continental Shelf</span></div>""",
             unsafe_allow_html=True)
 
+if S.get("pending_link"):
+    pl = S.pending_link
+    st.info("**Someone shared a protected design with you.** Enter the access code they sent you "
+            "(usually by a separate message) to open it.", icon="🔐")
+    with st.form("open_protected_link"):
+        entered = st.text_input("Access code", "", type="password",
+                                placeholder="e.g. K7QM-9XRT-4HPW-2DNC, or the password you were given")
+        pc = st.columns(2)
+        want_open = pc[0].form_submit_button("Open design", type="primary")
+        want_drop = pc[1].form_submit_button("Cancel")
+    if want_drop:
+        S.pending_link = None
+        st.rerun()
+    if want_open:
+        try:
+            got = tb_share.restore_payload(tb_share.unprotect(pl["token"], entered))
+        except Exception as exc:  # noqa: BLE001 — wrong code, damaged link…
+            pl["tries"] = int(pl.get("tries", 0)) + 1
+            st.error(str(exc) + (f" ({pl['tries']} tries)" if pl["tries"] > 1 else ""))
+        else:
+            _apply_shared(got, pl["key"], protected=True)
+            S.pending_link = None
+            st.rerun()
+if S.get("shared_from"):
+    sf = S.shared_from
+    st.info("**You opened a shared design.** This is your own copy — change what you like; the person who "
+            "sent it will not see your edits, and later changes of theirs need a new link."
+            + (f"  \n*Note from the sender:* {sf['note']}" if sf.get("note") else "")
+            + (f"  \nIncludes {sf['concepts']} saved concept(s)." if sf.get("concepts") else "")
+            + (f"  \nShared {sf['when'][:16].replace('T', ' ')} UTC." if sf.get("when") else "")
+            + ("  \n🔐 Opened with an access code." if sf.get("protected") else ""))
+if S.get("shared_error"):
+    st.error(f"The shared link could not be opened: {S.shared_error}")
+    if st.button("Dismiss"):
+        S.shared_error = ""
+        st.rerun()
 if STALE:
     st.error(
         "**Part of this deployment is out of date.** These files are older than "
@@ -409,6 +533,125 @@ with st.sidebar:
         if st.button("Load demo"):
             set_project(*load_demo())
             st.rerun()
+
+    # ── share: a link that opens exactly this design ──
+    if has_api("tb_share", "encode", "build_payload"):
+        with st.expander("Share this design"):
+            st.caption("Makes a link that opens this design — layout, reservoirs, sketches, bookmarks, "
+                       "base map and settings, at the view you are looking at. Whoever opens it gets their "
+                       "own copy; your design is not changed by what they do.")
+            can_protect = has_api("tb_share", "protect", "generate_code") and tb_share.crypto_available()
+            modes = (["Protect with a code (recommended)"] if can_protect else []) + \
+                ["No code — anonymised data only"]
+            mode = st.radio("Protection", modes, index=0, key="share_mode",
+                            help="With a code, the design is encrypted inside the link; only someone "
+                                 "who also has the code can open it.")
+            protected = mode.startswith("Protect")
+            code, code_err = "", ""
+            if protected:
+                how = st.radio("Code", ["Generate a code", "Choose my own password"], index=0,
+                               key="share_code_kind", horizontal=True)
+                if how.startswith("Generate"):
+                    if not S.get("share_gen_code") or st.button("New code"):
+                        S.share_gen_code = tb_share.generate_code()
+                    code = S.share_gen_code
+                    st.caption(f"Access code: **`{code}`** — 80 random bits; case and dashes do not "
+                               f"matter when it is typed in.")
+                else:
+                    code = st.text_input("Password", "", type="password", key="share_password",
+                                         help=f"At least {tb_share.MIN_PASSWORD_CHARS} characters. A few "
+                                              f"unrelated words is good; it is case-sensitive.")
+                    code_err = tb_share.password_problem(code) if code else "enter a password"
+                    if code:
+                        if code_err:
+                            st.warning(f"Password not accepted: {code_err}.")
+                        else:
+                            st.caption("Password accepted.")
+            else:
+                st.warning(tb_share.CONFIDENTIALITY, icon="🔓")
+                if not can_protect:
+                    st.caption("Protected links need the `cryptography` package — it is in "
+                               "requirements.txt; redeploy to enable them.")
+            base = _app_url()
+            if not base:
+                base = st.text_input("App address", S.get("app_base_url", ""),
+                                     placeholder="https://your-app.streamlit.app",
+                                     help="The address you open this app at — it could not be read "
+                                          "automatically in this browser.")
+                S.app_base_url = base
+            inc_cases = st.checkbox(f"Include saved concepts ({len(S.get('cases') or [])})",
+                                    bool(S.get("cases")), disabled=not S.get("cases"))
+            share_note = st.text_input("Note for your colleague (optional)", "", max_chars=300,
+                                       help="Travels inside the link — encrypted when a code is used.")
+
+            def _payload():
+                return tb_share.build_payload(
+                    tb_project.project_to_yaml(S.project_name, LAY, S.cost_settings, S.sched_settings,
+                                               S.fa_settings, S.display),
+                    view=S.map_state.get("view"), cases=(S.get("cases") if inc_cases else None),
+                    active_case=S.get("active_case") or "", note=share_note)
+
+            def _token():
+                if protected:
+                    return tb_share.protect(_payload(), code, generated=how.startswith("Generate"))
+                return tb_share.encode(_payload())
+
+            blocked = not base or (protected and bool(code_err))
+            sc = st.columns(2)
+            if sc[0].button("Make link", type="primary", disabled=blocked):
+                try:
+                    S.share_link, S.share_kind = tb_share.design_link(base, _token()), "design"
+                    S.share_code = code if protected else ""
+                    S.share_code_is_pw = protected and not how.startswith("Generate")
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Could not make the link: {exc}")
+            if sc[1].button("Short link", disabled=blocked,
+                            help="Stores the design (encrypted, when a code is used) and links to it by "
+                                 "id — for designs too large to put in the address"):
+                try:
+                    store = _share_store()
+                    tok = _token()
+                    sid = store.save_token(tok) if hasattr(store, "save_token") else store.save(_payload())
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Could not store the design: {exc}")
+                else:
+                    S.share_link, S.share_kind = tb_share.short_link(base, sid), store.label
+                    S.share_durable = store.durable
+                    S.share_code = code if protected else ""
+                    S.share_code_is_pw = protected and not how.startswith("Generate")
+            if S.get("share_link"):
+                st.markdown("**Link**")
+                st.code(S.share_link, language=None)
+                if S.get("share_code"):
+                    if S.get("share_code_is_pw"):
+                        st.caption("🔐 Protected with your password. Tell your colleague the password "
+                                   "by a different channel than the link.")
+                    else:
+                        st.markdown("**Access code** — send it separately (Teams, SMS, phone), "
+                                    "never in the same message as the link")
+                        st.code(S.share_code, language=None)
+                    st.caption(tb_share.PROTECTED_NOTE)
+                if S.get("share_kind") == "design":
+                    n_ch = len(S.share_link)
+                    if tb_share.link_ok(S.share_link):
+                        st.caption(f"{n_ch:,} characters — the design is inside the link; nothing is "
+                                   f"stored anywhere.")
+                    else:
+                        st.warning(f"This link is {n_ch:,} characters. Some mail and chat tools cut long "
+                                   f"addresses, which breaks it — use Short link, or send the project file "
+                                   f"(Save project) instead.")
+                else:
+                    held = "encrypted; useless without the code" if S.get("share_code") else \
+                        "anyone with the link can read it"
+                    if S.get("share_durable"):
+                        st.caption(f"Stored in {S.share_kind} ({held}). Durable.")
+                    else:
+                        st.warning(f"Stored on {S.share_kind} ({held}). On Streamlit Community Cloud "
+                                   f"this is wiped when the app restarts or is redeployed, and the link "
+                                   f"then stops working. For a lasting short link, set a GitHub token "
+                                   f"(`github_gist_token`, gist scope) in the app's secrets.")
+                st.link_button("Open the link in a new tab", S.share_link)
+
     tpl_dir = HERE / "templates"
     tpls = sorted(tpl_dir.glob("*.yaml")) if tpl_dir.exists() else []
     if tpls:
@@ -905,9 +1148,13 @@ with tab_layout:
         else:
             st.caption(f"Tag filter active — showing {len(visible)} of {total} items")
     payload = tb_map.build_payload(LAY, findings, S.display, visible)
+    # freshly duplicated items arrive selected, once, so they can be dragged straight away
+    payload["select_many"] = S.map_state.pop("select_many", [])
+    tile_layers = [cl for cl in (S.display.custom_layers or []) if cl.get("kind") != "arcgis_features"]
     event = tb_map.render_map(payload, tb_map.build_palette(CAT), overlays, S.map_state.get("selected"),
-                              height=640, fit_token=S.fit_token, rasters=S.get("grid_rasters", []))
-    if tb_map.apply_display_event(S.display, event):
+                              height=640, fit_token=S.fit_token, rasters=S.get("grid_rasters", []),
+                              custom_layers=tile_layers, view_target=S.get("view_target") or {})
+    if tb_map.apply_display_event(S.display, event, S.map_state):
         tb_map.apply_event(LAY, event, S.map_state)      # consume it so it is not re-applied
         bump()
         st.rerun()
@@ -929,6 +1176,147 @@ with tab_layout:
                 st.toast(f"{new_id} landed in {LAY.nodes[near].label or near}", icon="⚓")
         bump()
         st.rerun()
+
+
+    # ── map tools: sketches, bookmarks, maps by URL ──
+    if has_api("tb_mapextras", "make_sketch", "classify_url", "make_bookmark"):
+        n_sk = len(tb_mapextras.sketches(LAY))
+        n_bm = len(S.display.bookmarks or [])
+        n_cl = len(S.display.custom_layers or [])
+        with st.expander(f"Map tools — {n_sk} sketch(es), {n_bm} bookmark(s), {n_cl} map(s) by URL"):
+            t_sk, t_bm, t_url = st.tabs(["Sketches", "Bookmarks", "Add a map by URL"])
+
+            with t_sk:
+                st.caption("Draw with Measure, Circle, Polygon and Line on the map toolbar. Circles are true "
+                           "circles on the ground; areas and lengths are geodesic. Sketches are saved with the "
+                           "project, its concepts and a shared link.")
+                zc = st.columns([2, 1, 1])
+                sel_now = S.map_state.get("selected")
+                zone_r = zc[1].number_input("Radius (m)", 10.0, 50000.0, 500.0, 50.0, key=f"zone_r_{REV}")
+                if zc[2].button("Circle round selected", disabled=sel_now not in LAY.nodes,
+                                help="e.g. the 500 m safety zone round a template"):
+                    record("safety zone")
+                    tb_mapextras.add_sketch(LAY, tb_mapextras.circle_around(
+                        LAY.nodes[sel_now], float(zone_r), to_display=lambda a, b: tb_map.to_display(LAY, a, b)))
+                    bump()
+                    st.rerun()
+                zc[0].caption(f"Selected: {LAY.nodes[sel_now].label or sel_now}" if sel_now in LAY.nodes
+                              else "Select an item on the map to put a circle round it.")
+                sks = tb_mapextras.sketches(LAY)
+                if sks:
+                    to_disp = lambda a, b: tb_map.to_display(LAY, a, b)      # noqa: E731
+                    sdf = pd.DataFrame([{
+                        "id": s_["id"], "label": s_.get("label", ""), "kind": s_["kind"],
+                        "measure": tb_mapextras.describe(s_),
+                        "radius_m": float(s_.get("radius_m", 0.0)) if s_["kind"] == "circle" else None,
+                        "color": s_.get("color", "#C4561B"),
+                        "inside": ", ".join(LAY.nodes[i].label or i for i in tb_mapextras.items_inside(LAY, s_, to_disp))
+                        if s_["kind"] != "line" else "",
+                        "delete": False} for s_ in sks])
+                    sed = st.data_editor(sdf, hide_index=True, key=f"sk_edit_{REV}", **STRETCH,
+                                         disabled=["id", "kind", "measure", "inside"],
+                                         column_config={
+                                             "id": None, "label": "Label", "kind": "Kind", "measure": "Size",
+                                             "radius_m": st.column_config.NumberColumn("Radius (m)", min_value=1.0, format="%.0f"),
+                                             "color": "Colour", "inside": "Equipment inside",
+                                             "delete": st.column_config.CheckboxColumn("Delete")})
+                    bc = st.columns([1, 1, 2])
+                    if bc[0].button("Apply sketch edits"):
+                        try:
+                            record("edit sketches")
+                            for r in sed.to_dict("records"):
+                                if r["delete"]:
+                                    tb_mapextras.remove_sketch(LAY, r["id"])
+                                    continue
+                                ch = {"label": r["label"], "color": r["color"]}
+                                if r["kind"] == "circle" and r["radius_m"] and r["radius_m"] == r["radius_m"]:
+                                    ch["radius_m"] = float(r["radius_m"])
+                                tb_mapextras.update_sketch(LAY, r["id"], **ch)
+                        except (KeyError, ValueError) as exc:
+                            st.error(f"Sketches not updated: {exc}")
+                        else:
+                            bump()
+                            st.rerun()
+                    bc[1].download_button("Sketches (GeoJSON)", json.dumps(tb_mapextras.sketches_geojson(LAY)),
+                                          f"{S.project_name.replace(' ', '_')}_sketches.geojson",
+                                          "application/geo+json")
+
+            with t_bm:
+                st.caption("Press Bookmark on the map toolbar to save the view you are looking at, with its "
+                           "base map. Bookmarks are saved with the project and travel in a shared link.")
+                bms = S.display.bookmarks or []
+                if not bms:
+                    st.info("No bookmarks yet.")
+                for i, bm in enumerate(list(bms)):
+                    bc = st.columns([3, 1, 1])
+                    new_name = bc[0].text_input("Name", bm["name"], key=f"bm_name_{bm['id']}_{REV}",
+                                                label_visibility="collapsed")
+                    if new_name != bm["name"]:
+                        bm["name"] = new_name.strip() or bm["name"]
+                    if bc[1].button("Go", key=f"bm_go_{bm['id']}_{REV}"):
+                        S.view_target = {"token": f"bm:{bm['id']}:{S.get('bm_clicks', 0)}", "bbox": bm["view"],
+                                         "basemap": bm.get("basemap", "")}
+                        S.bm_clicks = S.get("bm_clicks", 0) + 1
+                        st.rerun()
+                    if bc[2].button("Delete", key=f"bm_del_{bm['id']}_{REV}"):
+                        S.display.bookmarks = [b for b in bms if b["id"] != bm["id"]]
+                        st.rerun()
+
+            with t_url:
+                st.caption("Paste an address from ArcGIS Online or ArcGIS Server, a WMS, or XYZ tiles. "
+                           "It is recognised by its shape; an address that is not recognised is refused with "
+                           "the forms that are.")
+                with st.form(f"urlmap_{REV}"):
+                    url_in = st.text_input("Map address", placeholder=(
+                        "https://services.arcgisonline.com/ArcGIS/rest/services/Ocean/"
+                        "World_Ocean_Reference/MapServer"))
+                    uc = st.columns([2, 2, 1, 1])
+                    url_name = uc[0].text_input("Name (optional)")
+                    url_wms = uc[1].text_input("WMS / ArcGIS layers (optional)",
+                                               help="WMS layer name, or ArcGIS layer ids like 0,3")
+                    url_role = uc[2].selectbox("Use as", ["overlay", "base map"])
+                    url_op = uc[3].slider("Opacity", 0.1, 1.0, 0.8, 0.05)
+                    if st.form_submit_button("Add map"):
+                        try:
+                            spec = tb_mapextras.classify_url(url_in, url_name, url_role == "overlay",
+                                                             url_wms, url_op)
+                        except ValueError as exc:
+                            st.error(str(exc))
+                        else:
+                            if spec["kind"] == "arcgis_features":
+                                v = S.map_state.get("view") or (LAY.bbox() if hasattr(LAY, "bbox") else None)
+                                if not v and LAY.nodes:
+                                    lats = [tb_map.to_display(LAY, n_.lat, n_.lon)[0] for n_ in LAY.nodes.values()]
+                                    lons = [tb_map.to_display(LAY, n_.lat, n_.lon)[1] for n_ in LAY.nodes.values()]
+                                    v = [min(lons) - 0.3, min(lats) - 0.15, max(lons) + 0.3, max(lats) + 0.15]
+                                try:
+                                    with st.spinner("Fetching features in view…"):
+                                        fc_ = tb_mapextras.fetch_arcgis_features(spec["layer_url"], tuple(v), _session())
+                                except Exception as exc:  # noqa: BLE001
+                                    st.error(f"Could not fetch that layer: {exc}")
+                                else:
+                                    fc_.update(title=spec["name"], color="#7D4EBF", rev=f"url:{spec['url']}")
+                                    S.user_overlays.append(fc_)
+                                    S.display.custom_layers = (S.display.custom_layers or []) + [spec]
+                                    S.loaded_note = (f"Added {len(fc_['features'])} feature(s) from {spec['name']}"
+                                                     + (" — truncated, zoom in and add again for more"
+                                                        if fc_.get("truncated") else ""))
+                                    st.rerun()
+                            else:
+                                S.display.custom_layers = [c_ for c_ in (S.display.custom_layers or [])
+                                                           if c_.get("name") != spec["name"]] + [spec]
+                                S.loaded_note = (f"Added {spec['name']} as a {'n overlay' if spec['overlay'] else ' base map'}"
+                                                 f" — switch it in the map's layer control, top right")
+                                st.rerun()
+                cls = S.display.custom_layers or []
+                for cl in list(cls):
+                    rc = st.columns([4, 1])
+                    rc[0].caption(f"**{cl['name']}** · {cl['kind'].replace('_', ' ')} · "
+                                  f"{'overlay' if cl.get('overlay') else 'base map'} · {cl['url'][:80]}")
+                    if rc[1].button("Remove", key=f"cl_del_{abs(hash(cl['url'] + cl['name']))}_{REV}"):
+                        S.display.custom_layers = [c_ for c_ in cls if c_ is not cl]
+                        S.user_overlays = [o for o in S.user_overlays if o.get("rev") != f"url:{cl['url']}"]
+                        st.rerun()
 
     sel = S.map_state.get("selected")
     left, right = st.columns([1.1, 1])
@@ -971,10 +1359,41 @@ with tab_layout:
                 hipps = cc[3].checkbox("HIPPS", node.hipps, help="Protects everything downstream of this item")
                 sitp = st.number_input("Shut-in tubing pressure (psi)", 0.0, 25000.0, float(node.sitp_psi),
                                        step=100.0) if it.category == "well" else node.sitp_psi
+                fluid_pick, res_pick = None, None
+                if it.category == "well" and has_api("tb_fluids", "well_fluid"):
+                    now_fl, now_src = tb_fluids.well_fluid(LAY, sel)
+                    fl_opts = ["(from reservoir / GOR)"] + list(tb_fluids.WELL_FLUIDS)
+                    stated = str(node.attrs.get("well_fluid") or "")
+                    res_names = ["(none)"] + sorted(tb_fluids.reservoirs(LAY))
+                    fc = st.columns(2)
+                    fluid_pick = fc[0].selectbox(
+                        "Main fluid", fl_opts, index=fl_opts.index(stated) if stated in fl_opts else 0,
+                        help=f"Now: {now_fl} ({now_src}). Oil wells draw green, gas red, condensate "
+                             f"amber, injectors blue / purple.")
+                    res_pick = fc[1].selectbox(
+                        "Reservoir", res_names,
+                        index=res_names.index(node.attrs.get("reservoir"))
+                        if node.attrs.get("reservoir") in res_names else 0,
+                        help="Define reservoirs under 'Reservoirs and well fluids' below the map")
                 node_tags = st.text_input("Tags (comma separated)", ", ".join(LAY.tags(sel)),
                                           help="Filter the map by tag from the sidebar, e.g. "
                                                "'phase 2, option B, high priority'")
                 ok = st.form_submit_button("Apply changes", type="primary")
+            dcol = st.columns([1, 1, 2])
+            with_grp = dcol[1].checkbox("with its wells", True, key=f"dupgrp_{sel}_{REV}",
+                                        help="A structure brings the wells and modules jumpered to it")
+            if dcol[0].button("Duplicate", key=f"dup_{sel}_{REV}"):
+                record("duplicate")
+                before_n = set(LAY.nodes)
+                mp_ = tb_map.duplicate_elements(LAY, [sel], with_group=with_grp)
+                new_nodes = [v for k, v in mp_.items() if k in before_n]
+                S.map_state["selected"] = mp_.get(sel)
+                S.map_state["select_many"] = new_nodes
+                S.loaded_note = (f"Duplicated {len(new_nodes)} item(s) and {len(mp_) - len(new_nodes)} "
+                                 f"line(s) beside the original — drag the copy with Move to place it, "
+                                 f"then connect it to a host")
+                bump()
+                st.rerun()
             if ok:
                 if utm_vals:
                     lat, lon = tb_geo.utm_to_geo(utm_vals[0], utm_vals[1], int(utm_vals[2]), "N", LAY.settings.datum)
@@ -983,6 +1402,10 @@ with tab_layout:
                 node.attrs["heading_deg"] = float(heading)
                 LAY.set_tags(sel, node_tags.split(","))
                 node.phase, node.hipps, node.sitp_psi = int(phase), hipps, sitp
+                if fluid_pick is not None:
+                    tb_fluids.set_well_fluid(LAY, [sel], None if fluid_pick.startswith("(") else fluid_pick)
+                if res_pick is not None:
+                    tb_fluids.assign_reservoir(LAY, [sel], None if res_pick == "(none)" else res_pick)
                 LAY.move_node(sel, float(lat), float(lon))
                 bump()
                 st.rerun()
@@ -1274,6 +1697,142 @@ with tab_layout:
             else:
                 bump()
                 st.rerun()
+
+    # ── reservoirs and well fluids ──
+    if has_api("tb_fluids", "well_fluid", "reservoirs", "fluid_table"):
+        wells_now = [nid for nid in LAY.nodes if LAY.kind(nid) == "well"]
+        fsum = tb_fluids.summary(LAY) if wells_now else {}
+        head = (f"Reservoirs and well fluids — {tb_fluids.field_type(LAY)}"
+                if wells_now else "Reservoirs and well fluids")
+        with st.expander(head, expanded=bool(wells_now) and not LAY.reservoirs):
+            st.caption("What each well produces. Set it on the well, or point the well at a reservoir and "
+                       "it inherits that fluid; a well with neither is classified from its own GOR "
+                       "(McCain). A well nobody has characterised is left grey on the map rather than "
+                       "being drawn as oil by default.")
+            res = tb_fluids.reservoirs(LAY)
+            rdf = pd.DataFrame([{
+                "name": r.name, "fluid": r.fluid, "gor_sm3_sm3": r.gor_sm3_sm3, "api": r.api,
+                "gas_sg": r.gas_sg, "water_cut": r.water_cut, "salinity_wt_pct": r.salinity_wt_pct,
+                "pres_bara": r.pres_bara, "tres_c": r.tres_c, "co2_mol_pct": r.co2_mol_pct,
+                "h2s_ppm": r.h2s_ppm, "notes": r.notes} for r in res.values()]
+                or [], columns=["name", "fluid", "gor_sm3_sm3", "api", "gas_sg", "water_cut",
+                                "salinity_wt_pct", "pres_bara", "tres_c", "co2_mol_pct", "h2s_ppm", "notes"])
+            ac = st.columns([2, 2, 1])
+            new_name = ac[0].text_input("New reservoir", "", key=f"newres_{REV}",
+                                        placeholder="e.g. Brent, Garn, Tilje")
+            new_fl = ac[1].selectbox("Fluid", tb_fluids.RESERVOIR_FLUIDS, key=f"newresfl_{REV}",
+                                     help="Filled with typical NCS values for this fluid — "
+                                          "replace them from the PVT report")
+            if ac[2].button("Add reservoir", disabled=not new_name.strip()):
+                if new_name.strip() in res:
+                    st.error(f"A reservoir called {new_name.strip()} already exists.")
+                else:
+                    record("add reservoir")
+                    tb_fluids.set_reservoir(LAY, tb_fluids.new_reservoir(new_name.strip(), new_fl))
+                    bump()
+                    st.rerun()
+            if len(rdf):
+                red = st.data_editor(
+                    rdf, hide_index=True, key=f"res_edit_{REV}", **STRETCH,
+                    column_config={
+                        "name": st.column_config.TextColumn("Reservoir", disabled=True),
+                        "fluid": st.column_config.SelectboxColumn("Fluid", options=list(tb_fluids.RESERVOIR_FLUIDS)),
+                        "gor_sm3_sm3": st.column_config.NumberColumn("GOR Sm³/Sm³", min_value=0.0, format="%.0f"),
+                        "api": st.column_config.NumberColumn("API", min_value=5.0, max_value=80.0),
+                        "gas_sg": st.column_config.NumberColumn("Gas SG", min_value=0.55, max_value=1.5, format="%.3f"),
+                        "water_cut": st.column_config.NumberColumn("Water cut", min_value=0.0, max_value=0.99, format="%.2f"),
+                        "salinity_wt_pct": st.column_config.NumberColumn("Salinity wt %", min_value=0.0),
+                        "pres_bara": st.column_config.NumberColumn("P res (bara)", min_value=1.0, format="%.0f"),
+                        "tres_c": st.column_config.NumberColumn("T res (°C)", format="%.0f"),
+                        "co2_mol_pct": st.column_config.NumberColumn("CO₂ mol %", min_value=0.0, format="%.2f"),
+                        "h2s_ppm": st.column_config.NumberColumn("H₂S ppm", min_value=0.0, format="%.0f"),
+                        "notes": "Notes"})
+                # a stated fluid that the GOR contradicts is almost always a typo
+                clashes = []
+                for r in red.to_dict("records"):
+                    try:
+                        said = tb_fluids.classify(float(r["gor_sm3_sm3"]), float(r["api"]))
+                        if tb_fluids.RESERVOIR_TO_WELL[said] != tb_fluids.RESERVOIR_TO_WELL.get(r["fluid"]):
+                            clashes.append(f"{r['name']}: entered as {r['fluid']}, but a GOR of "
+                                           f"{float(r['gor_sm3_sm3']):,.0f} Sm³/Sm³ is a {said}")
+                    except (TypeError, ValueError, KeyError):
+                        pass
+                for msg in clashes:
+                    st.warning(msg)
+                bc = st.columns([1, 1, 2])
+                if bc[0].button("Apply reservoirs"):
+                    try:
+                        record("edit reservoirs")
+                        for r in red.to_dict("records"):
+                            vals = {k: r[k] for k in r}
+                            vals["notes"] = str(vals.get("notes") or "")
+                            tb_fluids.set_reservoir(LAY, tb_fluids.Reservoir(**vals))
+                    except (TypeError, ValueError) as exc:
+                        st.error(f"Reservoirs not applied: {exc}")
+                    else:
+                        bump()
+                        st.rerun()
+                drop = bc[1].selectbox("Remove", ["—"] + list(res), key=f"dropres_{REV}",
+                                       label_visibility="collapsed")
+                if drop != "—" and bc[2].button(f"Remove {drop}"):
+                    record("remove reservoir")
+                    freed = tb_fluids.remove_reservoir(LAY, drop)
+                    bump()
+                    st.success(f"Removed {drop}" + (f" — {len(freed)} well(s) detached" if freed else ""))
+                    st.rerun()
+
+            if wells_now:
+                st.markdown("**Wells**")
+                ftab = tb_fluids.fluid_table(LAY)
+                wdf2 = pd.DataFrame([{
+                    "id": r["id"], "well": r["label"],
+                    "main_fluid": (LAY.nodes[r["id"]].attrs.get("well_fluid") or "(from reservoir / GOR)"),
+                    "reservoir": r["reservoir"] or "(none)",
+                    "resolves_to": r["fluid"] if tb_fluids.is_assigned(r["source"]) else "not assigned",
+                    "because": r["source"]} for r in ftab])
+                wed2 = st.data_editor(
+                    wdf2, hide_index=True, key=f"wellfl_edit_{REV}", **STRETCH,
+                    disabled=["id", "well", "resolves_to", "because"],
+                    column_config={
+                        "id": "Id", "well": "Well",
+                        "main_fluid": st.column_config.SelectboxColumn(
+                            "Main fluid", options=["(from reservoir / GOR)"] + list(tb_fluids.WELL_FLUIDS)),
+                        "reservoir": st.column_config.SelectboxColumn(
+                            "Reservoir", options=["(none)"] + sorted(res)),
+                        "resolves_to": "Resolves to", "because": "Because"})
+                wc = st.columns([1, 1, 2])
+                if wc[0].button("Apply well fluids"):
+                    record("well fluids")
+                    for r in wed2.to_dict("records"):
+                        mf = str(r["main_fluid"] or "")
+                        tb_fluids.set_well_fluid(LAY, [r["id"]], None if mf.startswith("(") else mf)
+                        rs = str(r["reservoir"] or "(none)")
+                        tb_fluids.assign_reservoir(LAY, [r["id"]], None if rs == "(none)" else rs)
+                    bump()
+                    st.rerun()
+                if wc[1].button("Copy reservoir PVT to well streams",
+                                disabled=not any(LAY.nodes[w].attrs.get("reservoir") for w in wells_now),
+                                help="Sets each well's GOR, API, gas SG, water cut and salinity from its "
+                                     "reservoir. The well's own rate is kept unless it changes between "
+                                     "oil and gas."):
+                    record("reservoir PVT to wells")
+                    out_ = tb_fluids.apply_reservoir_to_wells(LAY)
+                    bump()
+                    msg = f"Flow-assurance inputs updated on {len(out_['updated'])} well(s)"
+                    if out_["rate_reset"]:
+                        msg += (f". {', '.join(out_['rate_reset'])} changed between oil and gas, so the rate "
+                                f"was reset to a typical {tb_fluids.DEFAULT_GAS_RATE_MSM3_D:g} MSm³/d gas / "
+                                f"{tb_fluids.DEFAULT_OIL_RATE_SM3_D:,.0f} Sm³/d oil — set the real rate in "
+                                f"Flow assurance.")
+                    S.loaded_note = msg
+                    st.rerun()
+                if fsum:
+                    chips = [f'<span style="display:inline-flex;align-items:center;gap:5px;margin-right:14px">'
+                             f'<span style="width:11px;height:11px;border-radius:50%;border:3px solid '
+                             f'{tb_fluids.FLUID_COLORS[k]}"></span>{v} {k}</span>'
+                             for k, v in fsum.items() if v]
+                    wc[2].markdown("".join(chips), unsafe_allow_html=True)
+
 
 # ═══════════════════════════ CATALOG ═══════════════════════════
 with tab_cat:
@@ -1677,9 +2236,23 @@ with tab_fa:
     if not wells_in:
         st.info("Add wells to the layout to run flow assurance.")
     else:
-        wdf = pd.DataFrame([dict(id=w, label=LAY.nodes[w].label or w, **vars(v)) for w, v in wells_in.items()])
-        wed = st.data_editor(wdf, hide_index=True, key=f"fa_wells_{REV}", **STRETCH, column_config={
+        has_fl = has_api("tb_fluids", "well_fluid", "cgr_from")
+        wdf = pd.DataFrame([dict(
+            id=w, label=LAY.nodes[w].label or w,
+            fluid=(tb_fluids.well_fluid(LAY, w)[0] if has_fl and tb_fluids.is_assigned(tb_fluids.well_fluid(LAY, w)[1])
+                   else "not assigned"),
+            gas_msm3_d=round(v.oil_sm3_d * v.gor_sm3_sm3 / 1e6, 3),
+            **vars(v)) for w, v in wells_in.items()])
+        n_inj = sum(1 for nid in LAY.nodes if LAY.kind(nid) == "well") - len(wells_in)
+        if n_inj:
+            st.caption(f"{n_inj} injector(s) left out — they are fed from the host and add nothing to "
+                       f"the production network.")
+        wed = st.data_editor(wdf, hide_index=True, key=f"fa_wells_{REV}", **STRETCH,
+                             disabled=["id", "label", "fluid", "gas_msm3_d"], column_config={
             "id": st.column_config.TextColumn(disabled=True), "label": st.column_config.TextColumn(disabled=True),
+            "fluid": st.column_config.TextColumn("Main fluid", disabled=True),
+            "gas_msm3_d": st.column_config.NumberColumn("Gas MSm³/d", disabled=True, format="%.3f",
+                                                        help="Oil/condensate rate × GOR"),
             "oil_sm3_d": st.column_config.NumberColumn("Oil/cond. Sm³/d", min_value=0.0, format="%.0f"),
             "water_cut": st.column_config.NumberColumn("Water cut", min_value=0.0, max_value=0.99, format="%.2f"),
             "gor_sm3_sm3": st.column_config.NumberColumn("GOR Sm³/Sm³", min_value=0.0, format="%.0f"),
@@ -1698,6 +2271,36 @@ with tab_fa:
             else:
                 bump()
                 st.rerun()
+
+        # Gas and condensate wells are thought of in gas rate, not liquid rate.
+        gas_wells = [w for w in wells_in
+                     if has_fl and tb_fluids.family(tb_fluids.well_fluid(LAY, w)[0]) == "gas"
+                     and tb_fluids.is_assigned(tb_fluids.well_fluid(LAY, w)[1])]
+        if gas_wells:
+            with st.expander(f"Enter gas wells by gas rate ({len(gas_wells)} gas / condensate well(s))"):
+                st.caption("The network model is keyed on the liquid rate; this converts a gas rate and a "
+                           "condensate-gas ratio into it. CGR is Sm³ condensate per million Sm³ gas.")
+                with st.form(f"gaswell_{REV}"):
+                    gw = st.multiselect("Wells", gas_wells, default=gas_wells,
+                                        format_func=lambda w: LAY.nodes[w].label or w)
+                    gc = st.columns(2)
+                    w0 = wells_in[gas_wells[0]]
+                    g0, cgr0 = tb_fluids.cgr_from(w0.oil_sm3_d, w0.gor_sm3_sm3)
+                    grate = gc[0].number_input("Gas rate per well (MSm³/d)", 0.01, 30.0,
+                                               float(round(max(g0, 0.01), 3)), 0.1)
+                    cgr = gc[1].number_input("CGR (Sm³/MSm³)", 0.1, 2000.0,
+                                             float(round(min(max(cgr0, 0.1), 2000.0), 1)), 5.0)
+                    if st.form_submit_button("Set gas rates"):
+                        cond, gor = tb_fluids.gas_well_rates(float(grate), float(cgr))
+                        record("gas rates")
+                        for w in gw:
+                            cur = wells_in[w]
+                            tb_fa.set_well_inputs(LAY, w, tb_fa.WellFA(**{**vars(cur),
+                                                                          "oil_sm3_d": cond, "gor_sm3_sm3": gor}))
+                        S.loaded_note = (f"{len(gw)} well(s) set to {grate:g} MSm³/d gas at CGR {cgr:g} — "
+                                         f"{cond:,.0f} Sm³/d condensate, GOR {gor:,.0f} Sm³/Sm³")
+                        bump()
+                        st.rerun()
 
     fa_edges = [e for e in LAY.edges.values() if CAT.get(e.item_id).category in ("flowline", "riser", "jumper")]
     if fa_edges:
@@ -1988,7 +2591,14 @@ with tab_fa:
         if CHEM_OK:
             st.caption("Screening on the data entered — correlations with a limited valid range and "
                        "rules of thumb. Replace with the operator's fluid analyses before FEED.")
-            ci = S.get("chem_inputs") or tb_chemistry.ChemistryInputs()
+            ci = S.get("chem_inputs")
+        if ci is None:
+            # start from what the reservoirs already say, worst case across them
+            rs_ = list(tb_fluids.reservoirs(LAY).values()) if has_api("tb_fluids", "reservoirs") else []
+            ci = tb_chemistry.ChemistryInputs(
+                co2_mol_pct=max((r.co2_mol_pct for r in rs_), default=None) if rs_ else None,
+                h2s_ppm=max((r.h2s_ppm for r in rs_), default=None) if rs_ else None,
+                formation_water_salinity_wt_pct=max((r.salinity_wt_pct for r in rs_), default=None) if rs_ else None)
             with st.form(f"chem_form_{REV}"):
                 q = st.columns(4)
                 wat = q[0].number_input("Wax appearance temp (°C)", -99.0, 90.0,

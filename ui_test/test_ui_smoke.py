@@ -30,7 +30,8 @@ class _Sess:
 req = types.ModuleType("requests"); req.Session = _Sess; sys.modules["requests"] = req
 sys.path.insert(0, os.path.join(ROOT, "ui_test"))
 from _harness import Suite
-import tb_geo, tb_cases, tb_schedule
+import tb_geo, tb_cases, tb_schedule, tb_fluids
+import tb_flowassurance as tb_fa_mod
 S = Suite("test_ui_smoke")
 SRC = open(os.path.join(ROOT, "tieback_app.py")).read()
 CODE = compile(SRC, "tieback_app.py", "exec")
@@ -739,5 +740,313 @@ def all_modules_current_in_this_build():
     assert not [m for m in errs() if "out of date" in str(m)], errs()
     return True
 S.check("this build reports every module current", all_modules_current_in_this_build)
+
+def reservoirs_and_well_fluids_from_the_ui():
+    """Add a gas reservoir, point two wells at it, and see it reach the map."""
+    drawn = {}
+    import tb_map as _tm
+    real = _tm.render_map
+    _tm.render_map = lambda payload, palette, overlays, selected, **k: (
+        drawn.update(p=payload), None)[1]
+    try:
+        run(press={"Load demo"})
+        tb_fluids.set_reservoir(ss.layout, tb_fluids.new_reservoir("Garn", "gas condensate"))
+        tb_fluids.set_reservoir(ss.layout, tb_fluids.new_reservoir("Brent", "black oil"))
+        tb_fluids.assign_reservoir(ss.layout, ["W1", "W2"], "Garn")
+        tb_fluids.assign_reservoir(ss.layout, ["W3", "W4"], "Brent")
+        run()
+        nodes = {x["id"]: x for x in drawn["p"]["nodes"]}
+        assert nodes["W1"]["fluid"] == "gas condensate", nodes["W1"]
+        assert nodes["W1"]["fluid_color"] == tb_fluids.FLUID_COLORS["gas condensate"]
+        assert nodes["W3"]["fluid"] == "oil"
+        assert "Reservoir" not in [m for k, m in H.log if k == "error"]
+    finally:
+        _tm.render_map = real
+    return True
+S.check("reservoirs assigned to wells reach the map", reservoirs_and_well_fluids_from_the_ui)
+
+
+def copy_pvt_button():
+    run(press={"Copy reservoir PVT to well streams"})
+    w = tb_fa_mod.well_inputs(ss.layout)
+    assert w["W1"].gor_sm3_sm3 == tb_fluids.RESERVOIR_PRESETS["gas condensate"]["gor_sm3_sm3"], w["W1"]
+    assert w["W3"].gor_sm3_sm3 == tb_fluids.RESERVOIR_PRESETS["black oil"]["gor_sm3_sm3"], w["W3"]
+    assert any("Flow-assurance inputs updated" in str(m) for k, m in H.log if k == "success"), \
+        "the copy should say what it did"
+    return True
+S.check("copying reservoir PVT sets each well's flow-assurance inputs", copy_pvt_button)
+
+
+def gas_rate_entry():
+    """Gas wells can be entered by gas rate and CGR."""
+    run(press={"Set gas rates"})
+    w = tb_fa_mod.well_inputs(ss.layout)
+    gas = w["W1"].oil_sm3_d * w["W1"].gor_sm3_sm3 / 1e6
+    assert gas > 0.01, gas
+    return True
+S.check("gas wells take a gas rate and CGR", gas_rate_entry)
+
+
+def injector_through_the_ui():
+    tb_fluids.set_well_fluid(ss.layout, ["W4"], "water injector")
+    run()
+    assert "W4" not in tb_fa_mod.well_inputs(ss.layout)
+    assert any("injector(s) left out" in str(m) for k, m in H.log if k == "caption"), \
+        "the flow-assurance tab should say the injector was left out"
+    hard = [m for m in errs() if "NO_PRODUCTION_PATH" in str(m)]
+    assert not hard, hard
+    return True
+S.check("an injector is left out of flow assurance, and the tab says so", injector_through_the_ui)
+
+def duplicate_from_the_map():
+    run(press={"Load demo"})
+    n0, e0 = len(ss.layout.nodes), len(ss.layout.edges)
+    run(event=ev(9100, "duplicate", {"ids": ["TMPL_A"], "with_group": True}))
+    assert len(ss.layout.nodes) == n0 + 6 and len(ss.layout.edges) == e0 + 5, \
+        (len(ss.layout.nodes), len(ss.layout.edges))
+    assert ss.get("undo"), "a duplicate must be undoable"
+    run(press={"Undo"})
+    assert len(ss.layout.nodes) == n0, "undo should remove the copy"
+    return True
+S.check("duplicate from the map toolbar, and undo it", duplicate_from_the_map)
+
+
+def duplicate_from_the_panel():
+    run(press={"Load demo"})
+    ss.map_state["selected"] = "TMPL_A"
+    n0 = len(ss.layout.nodes)
+    run(press={"Duplicate"})
+    assert len(ss.layout.nodes) == n0 + 6, len(ss.layout.nodes)
+    assert any("Duplicated 6 item(s)" in str(m) for k, m in H.log if k == "success"), \
+        [m for k, m in H.log if k == "success"]
+    return True
+S.check("duplicate from the selected-item panel", duplicate_from_the_panel)
+
+def make_and_open_a_design_link():
+    """The request: a colleague who opens the link sees exactly what I built."""
+    import tb_mapextras as _mx
+    run(press={"Load demo"})
+    _mx.add_sketch(ss.layout, _mx.make_sketch("circle", center=(60.5, 2.6), radius_m=500, label="zone"))
+    ss.display.basemap = "Sjøkart (Kartverket)"
+    ss.map_state["view"] = [2.4, 60.4, 2.8, 60.7]
+    H.inputs = {"Protection": "No code — anonymised data only"}
+    run(press={"Make link"})
+    H.inputs = {}
+    link = ss.get("share_link") or ""
+    assert link.startswith("https://tieback.test.app/?design=1."), link[:80]
+    mine = {k: (v.lat, v.lon) for k, v in ss.layout.nodes.items()}
+    # … and now a colleague, in a brand-new session, opens it
+    H.session_state.clear()
+    H.query_params = {"design": link.split("design=", 1)[1]}
+    try:
+        run()
+        theirs = {k: (v.lat, v.lon) for k, v in ss.layout.nodes.items()}
+        assert theirs == mine, "the colleague must see the same layout"
+        assert _mx.sketches(ss.layout)[0]["label"] == "zone"
+        assert ss.display.basemap == "Sjøkart (Kartverket)"
+        assert ss.view_target["bbox"] == [2.4, 60.4, 2.8, 60.7], ss.get("view_target")
+        assert any("opened a shared design" in str(m) for k, m in H.log if k == "info"), "no banner"
+        # a rerun must not reload the link over the colleague's own edits
+        ss.layout.nodes["W1"].lat += 0.01
+        run()
+        assert ss.layout.nodes["W1"].lat != mine["W1"][0], "the link was re-opened over their edit"
+    finally:
+        H.query_params = {}
+    return True
+S.check("a design link opens exactly the same design for a colleague", make_and_open_a_design_link)
+
+
+def broken_link_does_not_stop_the_app():
+    H.session_state.clear()
+    H.query_params = {"design": "1.thisIsNotADesign"}
+    try:
+        run()
+        assert any("could not be opened" in str(m) for m in errs()), errs()
+        assert ss.layout is not None
+    finally:
+        H.query_params = {}
+    return True
+S.check("a damaged link is reported and the app still starts", broken_link_does_not_stop_the_app)
+
+
+def short_link_round_trip():
+    import shutil, tb_share as _sh
+    run(press={"Load demo"})
+    ss.project_name = "Short-link test"
+    H.inputs = {"Protection": "No code — anonymised data only"}
+    run(press={"Short link"})
+    H.inputs = {}
+    link = ss.get("share_link") or ""
+    assert "/?share=" in link, link
+    assert any("wiped" in str(m) for k, m in H.log if k == "warning"), \
+        "a server-disk short link must say it does not last"
+    sid = link.split("share=", 1)[1]
+    H.session_state.clear()
+    H.query_params = {"share": sid}
+    try:
+        run()
+        assert ss.project_name == "Short-link test", ss.project_name
+    finally:
+        H.query_params = {}
+    return True
+S.check("a short link to a stored copy opens the design", short_link_round_trip)
+
+
+def protected_link_needs_the_code():
+    """The request: a link colleagues can open only with a code I give them."""
+    run(press={"Load demo"})
+    ss.project_name = "Protected test"
+    ss.share_gen_code = None
+    run(press={"Make link"})                      # protected is the default
+    link, code = ss.get("share_link") or "", ss.get("share_code") or ""
+    assert "/?design=2." in link, link[:80]
+    assert code and len(code) == 19, code
+    assert "Protected test" not in link
+    assert any("different channel" in str(m) for k, m in H.log if k == "caption"), "no advice on the code"
+    token = link.split("design=", 1)[1]
+    H.session_state.clear()
+    H.query_params = {"design": token}
+    try:
+        run()                                     # the colleague arrives: asked for the code, nothing opened
+        assert ss.get("pending_link"), "a protected link must wait for its code"
+        assert ss.project_name != "Protected test"
+        assert any("protected design" in str(m) for k, m in H.log if k == "info")
+        H.inputs = {"Access code": "AAAA-AAAA-AAAA-AAAA"}
+        run(press={"Open design"})
+        assert any("does not open" in str(m) for m in errs()), errs()
+        assert ss.project_name != "Protected test" and ss.get("pending_link")
+        H.inputs = {"Access code": code.lower().replace("-", " ")}
+        run(press={"Open design"})
+        assert not ss.get("pending_link") and ss.project_name == "Protected test", ss.project_name
+        assert ss.shared_from.get("protected")
+        run()                                     # a rerun must not ask again or reload
+        assert not ss.get("pending_link")
+    finally:
+        H.inputs, H.query_params = {}, {}
+    return True
+S.check("a protected link opens only with the right code", protected_link_needs_the_code)
+
+
+def protected_short_link_with_own_password():
+    import pathlib
+    run(press={"Load demo"})
+    ss.project_name = "Password test"
+    pw = "north sea manifold seven"
+    H.inputs = {"Code": "Choose my own password", "Password": "short"}
+    run(press={"Short link"})
+    assert any("Password not accepted" in str(m) for k, m in H.log if k == "warning")
+    ss.share_link = None
+    H.inputs = {"Code": "Choose my own password", "Password": pw}
+    run(press={"Short link"})
+    link = ss.get("share_link") or ""
+    assert "/?share=" in link, link
+    sid = link.split("share=", 1)[1]
+    stored = pathlib.Path(".shared_designs") / f"{sid}.txt"
+    assert stored.exists() and "Password test" not in stored.read_text(), "stored copy must be encrypted"
+    H.session_state.clear()
+    H.inputs, H.query_params = {}, {"share": sid}
+    try:
+        run()
+        assert ss.get("pending_link")
+        H.inputs = {"Access code": pw}
+        run(press={"Open design"})
+        assert ss.project_name == "Password test", ss.project_name
+    finally:
+        H.inputs, H.query_params = {}, {}
+    return True
+S.check("a protected short link with my own password stores ciphertext and opens", protected_short_link_with_own_password)
+
+
+def cancel_protected_link():
+    run(press={"Load demo"})
+    ss.share_gen_code = None
+    run(press={"Make link"})
+    token = ss.share_link.split("design=", 1)[1]
+    H.session_state.clear()
+    H.query_params = {"design": token}
+    try:
+        run()
+        assert ss.get("pending_link")
+        run(press={"Cancel"})
+        assert not ss.get("pending_link") and ss.layout is not None and not errs()
+    finally:
+        H.query_params = {}
+    return True
+S.check("cancelling the code prompt leaves a working app", cancel_protected_link)
+
+
+def sketch_from_the_map_and_zone_round_selected():
+    import tb_mapextras as _mx
+    run(press={"Load demo"})
+    run(event=ev(9200, "add_annotation", {"kind": "polygon", "coords": [[60.5, 2.5], [60.5, 2.7], [60.6, 2.7]]}))
+    assert len(_mx.sketches(ss.layout)) == 1
+    assert ss.get("undo"), "a sketch must be undoable"
+    ss.map_state["selected"] = "TMPL_A"
+    run(press={"Circle round selected"})
+    zones = [s_ for s_ in _mx.sketches(ss.layout) if s_["kind"] == "circle"]
+    assert zones and zones[0]["radius_m"] == 500.0 and "Template A" in zones[0]["label"], zones
+    return True
+S.check("sketch from the map, and a 500 m zone round the selected template", sketch_from_the_map_and_zone_round_selected)
+
+
+def a_sketch_does_not_land_the_selected_well():
+    """The app lands a newly *added* well in a nearby template. A sketch added while a
+    well happened to be selected must not trigger that."""
+    run(press={"Load demo"})
+    ss.layout.release_from_structure(["W1"]) if hasattr(ss.layout, "release_from_structure") else None
+    ss.map_state["selected"] = "W1"
+    before = ss.layout.nodes["W1"].attrs.get("in_structure")
+    run(event=ev(9210, "add_annotation", {"kind": "circle", "center": [60.5, 2.6], "radius_m": 300}))
+    return ss.layout.nodes["W1"].attrs.get("in_structure") == before
+S.check("adding a sketch never re-lands the selected well", a_sketch_does_not_land_the_selected_well)
+
+
+def bookmark_and_go():
+    run(press={"Load demo"})
+    ss.display.bookmarks = []
+    run(event=ev(9220, "bookmark", {"view": [2.4, 60.4, 2.8, 60.7], "basemap": "Dark grey (Esri)"}))
+    assert len(ss.display.bookmarks) == 1, ss.display.bookmarks
+    bm = ss.display.bookmarks[0]
+    assert bm["basemap"] == "Dark grey (Esri)"
+    run(press={"Go"})
+    assert ss.view_target["bbox"] == bm["view"] and ss.view_target["basemap"] == "Dark grey (Esri)"
+    return True
+S.check("bookmark a view from the map and go back to it", bookmark_and_go)
+
+
+def base_map_is_remembered():
+    run(press={"Load demo"})
+    run(event=ev(9230, "basemap", {"name": "Sjøkart (Kartverket)"}))
+    return ss.display.basemap == "Sjøkart (Kartverket)"
+S.check("the base map chosen on the map is remembered", base_map_is_remembered)
+
+
+def add_map_by_url():
+    run(press={"Load demo"})
+    ss.display.custom_layers = []
+    orig = stubs.Harness.text_input
+    stubs.Harness.text_input = lambda self, label, value="", **k: (
+        "https://services.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Reference/MapServer"
+        if label == "Map address" else value)
+    try:
+        run(press={"Add map"})
+    finally:
+        stubs.Harness.text_input = orig
+    assert ss.display.custom_layers and ss.display.custom_layers[0]["kind"] == "arcgis_export", \
+        ss.display.custom_layers
+    return True
+S.check("an ArcGIS Online map address becomes a map layer", add_map_by_url)
+
+
+def bad_url_is_explained():
+    orig = stubs.Harness.text_input
+    stubs.Harness.text_input = lambda self, label, value="", **k: (
+        "https://example.com/not/a/map" if label == "Map address" else value)
+    try:
+        run(press={"Add map"})
+    finally:
+        stubs.Harness.text_input = orig
+    return any("Accepted" in str(m) for m in errs())
+S.check("an address that is not a map says which forms are accepted", bad_url_is_explained)
 
 sys.exit(0 if S.report() else 1)

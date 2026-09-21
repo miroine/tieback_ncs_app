@@ -92,8 +92,16 @@
       <label class="small" for="lineScale" title="Line thickness">Lines</label>
       <input id="lineScale" type="range" min="0.4" max="3" step="0.1" value="1" style="width:74px" aria-label="Line thickness" />
     </div>
+    <div class="group" aria-label="Map tools">
+      <button class="tool" data-mode="measure" aria-pressed="false" title="Measure: click points along the way, double-click to finish, Esc to clear. Use Line to keep a measurement.">Measure</button>
+      <button class="tool" data-mode="circle" aria-pressed="false" title="Circle: click the centre, then click at the radius (a true circle on the ground)">Circle</button>
+      <button class="tool" data-mode="polygon" aria-pressed="false" title="Polygon: click the corners, double-click to close">Polygon</button>
+      <button class="tool" data-mode="line" aria-pressed="false" title="Line: click points, double-click to finish — saved with its length">Line</button>
+      <button class="tool" id="btnBookmark" title="Bookmark this view — it is saved with the project and a shared link">Bookmark</button>
+    </div>
     <div class="group">
       <button class="tool" data-mode="pick" aria-pressed="false" title="Click the map to set the point a concept template is placed at">Pick point</button>
+      <button class="tool" id="btnDup" disabled title="Duplicate the selection (with its wells if 'with wells' is ticked) — the copy lands beside it, selected, ready to drag">Duplicate</button>
       <button class="tool danger" id="btnDelete" disabled title="Delete selected (Del)">Delete</button>
       <button class="tool" id="btnFit" title="Zoom to layout">Zoom to layout</button>
     </div>
@@ -146,6 +154,7 @@
   map.createPane("concepts").style.zIndex = 430;
   map.createPane("edges").style.zIndex = 420;
   map.createPane("vertices").style.zIndex = 640;
+  map.createPane("sketch").style.zIndex = 440;      // your circles/polygons: above routes, below equipment
 
   const basemaps = {
     "Ocean (Esri)": L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}",
@@ -154,8 +163,22 @@
       { maxNativeZoom: 19, maxZoom: 19, attribution: "© OpenStreetMap contributors" }),
     "Satellite (Esri)": L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
       { maxNativeZoom: 18, maxZoom: 19, attribution: "Tiles © Esri" }),
+    "Topographic (Esri)": L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
+      { maxNativeZoom: 18, maxZoom: 19, attribution: "Tiles © Esri" }),
+    "Light grey (Esri)": L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+      { maxNativeZoom: 16, maxZoom: 19, attribution: "Tiles © Esri" }),
+    "Dark grey (Esri)": L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+      { maxNativeZoom: 16, maxZoom: 19, attribution: "Tiles © Esri" }),
+    // Kartverket's national cache — the official Norwegian nautical chart is the one to lay a route on
+    "Sjøkart (Kartverket)": L.tileLayer("https://cache.kartverket.no/v1/wmts/1.0.0/sjokartraster/default/webmercator/{z}/{y}/{x}.png",
+      { maxNativeZoom: 17, maxZoom: 19, attribution: "© Kartverket" }),
+    "Topografisk (Kartverket)": L.tileLayer("https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/webmercator/{z}/{y}/{x}.png",
+      { maxNativeZoom: 18, maxZoom: 19, attribution: "© Kartverket" }),
+    "Gråtone (Kartverket)": L.tileLayer("https://cache.kartverket.no/v1/wmts/1.0.0/topograatone/default/webmercator/{z}/{y}/{x}.png",
+      { maxNativeZoom: 18, maxZoom: 19, attribution: "© Kartverket" }),
   };
-  basemaps["Ocean (Esri)"].addTo(map);
+  let currentBase = "Ocean (Esri)";
+  basemaps[currentBase].addTo(map);
   // EMODnet Bathymetry (DTM ~115 m grid, depths to LAT)
   const bathy = {
     "Bathymetry (EMODnet)": L.tileLayer.wms("https://ows.emodnet-bathymetry.eu/wms", {
@@ -165,7 +188,31 @@
       layers: "contours", format: "image/png", transparent: true, opacity: 0.9, pane: "bathymetry", maxZoom: 19,
       attribution: "Bathymetry © EMODnet Bathymetry Consortium" }),
   };
+  bathy["Bathymetry (GEBCO)"] = L.tileLayer.wms("https://wms.gebco.net/mapserv?", {
+    layers: "GEBCO_LATEST", format: "image/png", transparent: true, opacity: 0.6, pane: "bathymetry", maxZoom: 19,
+    attribution: "GEBCO Compilation Group" });
+  bathy["Sea marks (OpenSeaMap)"] = L.tileLayer("https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
+    { maxNativeZoom: 18, maxZoom: 19, pane: "bathymetry", attribution: "© OpenSeaMap contributors" });
   const layerControl = L.control.layers(basemaps, bathy, { position: "topright", collapsed: true }).addTo(map);
+  // remember which base map is in use, so it is saved with the project and a shared link
+  map.on("baselayerchange", (ev) => {
+    if (!ev || !ev.name || ev.name === currentBase) return;
+    currentBase = ev.name;
+    emit("basemap", { name: ev.name });
+  });
+  function switchBase(name) {
+    const target = basemaps[name] || customBase[name];
+    if (!target || name === currentBase) return false;
+    const cur = basemaps[currentBase] || customBase[currentBase];
+    if (cur) map.removeLayer(cur);
+    target.addTo(map);
+    currentBase = name;
+    return true;
+  }
+  let customBase = {}, customOver = {}, lastViewToken = null;
+  const sketchGroup = L.layerGroup().addTo(map);     // saved sketches
+  const draftGroup = L.layerGroup().addTo(map);      // the one being drawn
+  let draft = { pts: [], center: null }, selectedSketch = null;
   L.control.scale({ metric: true, imperial: false, position: "bottomright" }).addTo(map);
   const edgeGroup = L.layerGroup().addTo(map);
   const nodeGroup = L.layerGroup().addTo(map);
@@ -195,14 +242,20 @@
     route: "Select a line, then click it to add a bend. Drag bends to reshape; right-click a bend to remove it.",
     add: "Click the map to place the chosen equipment.",
     connect: "Click the first item, then the second, to connect them.",
+    measure: "Click points to measure along them; double-click to finish, Esc to clear. Use Line to keep a measurement.",
+    circle: "Click the centre, then click again at the radius.",
+    polygon: "Click the corners; double-click to close the polygon. Esc cancels.",
+    line: "Click points; double-click to finish. The line is saved with its length.",
   };
+  const SKETCH_MODES = ["measure", "circle", "polygon", "line"];
   function setMode(m) {
+    if (mode !== m) clearDraft();
     mode = m; connectFrom = null;
     document.querySelectorAll("button[data-mode]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === m)));
     const cont = map.getContainer();
     cont.classList.remove("mode-add", "mode-connect");
     if (m === "add") cont.classList.add("mode-add");
-    if (m === "connect" || m === "pick") cont.classList.add("mode-connect");
+    if (m === "connect" || m === "pick" || SKETCH_MODES.indexOf(m) >= 0) cont.classList.add("mode-connect");
     $("hint").textContent = HINTS[m];
     const canDrag = (m === "select" || m === "move");
     Object.values(nodeMarkers).forEach((mk) => { if (mk.dragging) { canDrag ? mk.dragging.enable() : mk.dragging.disable(); } });
@@ -212,6 +265,11 @@
   document.querySelectorAll("button[data-mode]").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode)));
   $("btnFit").addEventListener("click", fitLayout);
   $("btnDelete").addEventListener("click", deleteSelected);
+  $("btnDup").addEventListener("click", duplicateSelected);
+  $("btnBookmark").addEventListener("click", () => {
+    emit("bookmark", { view: viewBox(), basemap: currentBase });
+    toast("View bookmarked — find it under Map tools below the map.", true);
+  });
   $("edgeItem").addEventListener("change", syncDiameter);
   ["symScale", "lineScale"].forEach((id) => {
     $(id).addEventListener("input", () => { drawLayout(); });                 // instant, local
@@ -222,10 +280,127 @@
   document.addEventListener("keydown", (ev) => {
     const tag = (ev.target.tagName || "").toLowerCase();
     if (tag === "input" || tag === "select") return;
-    if (ev.key === "Escape") { multi = []; setMode("select"); }
-    if ((ev.key === "Delete" || ev.key === "Backspace") && selected) { ev.preventDefault(); deleteSelected(); }
+    if (ev.key === "Escape") { multi = []; selectedSketch = null; clearDraft(); setMode("select"); drawSketches(); }
+    if ((ev.key === "Delete" || ev.key === "Backspace") && (selected || selectedSketch)) { ev.preventDefault(); deleteSelected(); }
   });
-  map.on("mousemove", (e) => { $("coords").textContent = e.latlng.lat.toFixed(5) + "°N  " + e.latlng.lng.toFixed(5) + "°E  (WGS84)"; });
+  map.on("mousemove", (e) => {
+    $("coords").textContent = e.latlng.lat.toFixed(5) + "°N  " + e.latlng.lng.toFixed(5) + "°E  (WGS84)";
+    if (SKETCH_MODES.indexOf(mode) >= 0) drawDraft([e.latlng.lat, e.latlng.lng]);
+  });
+  map.on("dblclick", (e) => { if (SKETCH_MODES.indexOf(mode) >= 0) finishDraft(); });
+
+  // ── sketching: measure, circle, polygon, line ──
+  function clearDraft() { draft = { pts: [], center: null }; draftGroup.clearLayers(); }
+  function draftStyle() { return { pane: "sketch", color: "#EB0037", weight: 2.5, dashArray: "6 4", fillOpacity: 0.08, interactive: false }; }
+  function drawDraft(cursor) {
+    draftGroup.clearLayers();
+    if (mode === "circle") {
+      if (!draft.center) return;
+      const r = cursor ? C.haversine(draft.center, cursor) : 0;
+      if (r > 0) L.polygon(C.circleRing(draft.center, r), draftStyle()).addTo(draftGroup);
+      $("hint").textContent = "Radius " + C.formatLength(r) + " — click to fix it (Esc cancels)";
+      return;
+    }
+    const pts = draft.pts.concat(cursor ? [cursor] : []);
+    if (!pts.length) return;
+    if (mode === "polygon" && pts.length >= 3) L.polygon(pts, draftStyle()).addTo(draftGroup);
+    else if (pts.length >= 2) L.polyline(pts, draftStyle()).addTo(draftGroup);
+    const len = C.polylineLength(pts);
+    let msg = C.formatLength(len);
+    if (mode === "polygon" && pts.length >= 3) msg = C.formatArea(C.geodesicArea(pts)) + " · perimeter " + C.formatLength(len + C.haversine(pts[pts.length - 1], pts[0]));
+    $("hint").textContent = (mode === "measure" ? "Distance " : "") + msg +
+      (mode === "measure" ? " — double-click to finish, Esc to clear" : " — double-click to finish");
+  }
+  function sketchClick(ll) {
+    if (mode === "circle") {
+      if (!draft.center) { draft.center = ll; drawDraft(null); return; }
+      const r = C.haversine(draft.center, ll);
+      if (r > 1) emit("add_annotation", { kind: "circle", center: draft.center, radius_m: r });
+      toast("Circle of " + C.formatLength(r) + " added", true);
+      clearDraft();
+      return;
+    }
+    const last = draft.pts[draft.pts.length - 1];
+    if (!last || C.haversine(last, ll) > 0.5) draft.pts.push(ll);     // a double-click adds its two clicks too
+    drawDraft(null);
+  }
+  function finishDraft() {
+    // the two clicks of the double-click have landed on the same spot; drop the repeat
+    const pts = [];
+    draft.pts.forEach((p) => { if (!pts.length || C.haversine(pts[pts.length - 1], p) > 0.5) pts.push(p); });
+    if (mode === "measure") {
+      if (pts.length >= 2) {
+        const len = C.polylineLength(pts);
+        toast("Measured " + C.formatLength(len), true);
+        $("hint").textContent = "Measured " + C.formatLength(len) + " over " + (pts.length - 1) + " leg(s) — click to start again";
+        draft = { pts: [], center: null };                       // keep the drawn line until the next click
+      }
+      return;
+    }
+    if (mode === "polygon" && pts.length >= 3) {
+      emit("add_annotation", { kind: "polygon", coords: pts });
+      toast("Polygon of " + C.formatArea(C.geodesicArea(pts)) + " added", true);
+    } else if (mode === "line" && pts.length >= 2) {
+      emit("add_annotation", { kind: "line", coords: pts });
+      toast("Line of " + C.formatLength(C.polylineLength(pts)) + " added", true);
+    } else {
+      toast(mode === "polygon" ? "A polygon needs at least three corners." : "A line needs at least two points.");
+    }
+    clearDraft();
+  }
+  function drawSketches() {
+    sketchGroup.clearLayers();
+    (args.payload.annotations || []).forEach((s) => {
+      const on = s.id === selectedSketch;
+      const style = { pane: "sketch", color: s.color || "#C4561B", weight: on ? 4 : 2.5,
+                      dashArray: s.kind === "circle" ? "8 5" : null, fillOpacity: s.kind === "line" ? 0 : (on ? 0.2 : 0.1) };
+      let lyr = null;
+      if (s.kind === "circle" && s.center) lyr = L.polygon(C.circleRing(s.center, s.radius_m), style);
+      else if (s.kind === "polygon" && s.coords) lyr = L.polygon(s.coords, style);
+      else if (s.kind === "line" && s.coords) lyr = L.polyline(s.coords, style);
+      if (!lyr) return;
+      lyr.bindTooltip((s.label ? "<b>" + C.escapeHtml(s.label) + "</b><br>" : "") + C.escapeHtml(s.measure || s.kind), { sticky: true });
+      lyr.on("click", (ev) => {
+        L.DomEvent.stopPropagation(ev);
+        if (mode === "select" || mode === "move") {
+          selectedSketch = s.id; select(null, false); drawSketches();
+          $("hint").textContent = (s.label || s.kind) + " — " + (s.measure || "") + ". Del removes it.";
+          updateDeleteButton();
+        } else {
+          handleMapClick(ev);                                     // drawing or placing on top of a sketch
+        }
+      });
+      lyr.addTo(sketchGroup);
+    });
+  }
+
+  // ── maps added by URL ──
+  const ArcgisExport = L.TileLayer && L.TileLayer.extend ? L.TileLayer.extend({
+    getTileUrl: function (c) { return C.arcgisExportUrl(this.options.base, c.x, c.y, c.z, this.options.agsLayers); },
+  }) : null;
+  function makeCustomLayer(spec) {
+    const common = { opacity: typeof spec.opacity === "number" ? spec.opacity : 1, maxZoom: 19,
+                     pane: spec.overlay ? "rasters" : "tilePane", attribution: C.escapeHtml(spec.name || "") };
+    if (spec.kind === "wms") return L.tileLayer.wms(spec.url, Object.assign({ layers: spec.layers, format: "image/png", transparent: true }, common));
+    if (spec.kind === "arcgis_export" && ArcgisExport) return new ArcgisExport("", Object.assign({ base: spec.url, agsLayers: spec.layers || "" }, common));
+    if (spec.kind === "xyz" || spec.kind === "arcgis_tile") return L.tileLayer(spec.url, common);
+    return null;
+  }
+  function drawCustomLayers() {
+    Object.entries(customOver).forEach(([, l]) => { map.removeLayer(l); layerControl.removeLayer(l); });
+    Object.entries(customBase).forEach(([n, l]) => { if (n === currentBase) return; layerControl.removeLayer(l); });
+    customOver = {};
+    const keepBase = customBase[currentBase] ? currentBase : null;
+    Object.keys(customBase).forEach((n) => { if (n !== keepBase) delete customBase[n]; });
+    (args.custom_layers || []).forEach((spec) => {
+      const name = spec.name || spec.url;
+      if (!spec.overlay && customBase[name]) return;             // already the base in use
+      const lyr = makeCustomLayer(spec);
+      if (!lyr) return;
+      if (spec.overlay) { lyr.addTo(map); layerControl.addOverlay(lyr, C.escapeHtml(name)); customOver[name] = lyr; }
+      else { layerControl.addBaseLayer(lyr, C.escapeHtml(name)); customBase[name] = lyr; }
+    });
+  }
 
   function fillSelect(sel, items, keep) {
     const prev = keep ? sel.value : null;
@@ -267,7 +442,7 @@
   function nodeIcon(n) {
     const svg = C.nodeSvg(n.symbol || n.kind, n.severity,
                           n.id === selected || n.id === connectFrom || multi.indexOf(n.id) >= 0,
-                          Number($("symScale").value) || 1);
+                          Number($("symScale").value) || 1, n.fluid_color || "");
     return L.divIcon({ className: "tb-node", html: svg.html, iconSize: [svg.size, svg.size], iconAnchor: [svg.size / 2, svg.size / 2] });
   }
 
@@ -276,6 +451,13 @@
     if (isEdge) {
       if (el.diameter_in) lines.push(el.diameter_in + '" ID');
       if (el.length_m) lines.push("Design length " + C.formatLength(el.length_m));
+      if (el.fluid) lines.push("Carries: " + C.escapeHtml(el.fluid));
+    } else if (el.kind === "well" && el.fluid) {
+      const known = el.fluid_color;
+      lines.push((known ? '<span style="color:' + el.fluid_color + '">●</span> ' : "") +
+                 "Main fluid: <b>" + C.escapeHtml(el.fluid) + "</b>" +
+                 '<br><span style="opacity:.7">' + C.escapeHtml(el.fluid_source || "") + "</span>");
+      if (el.reservoir) lines.push("Reservoir: " + C.escapeHtml(el.reservoir));
     }
     if (el.severity) lines.push('<span style="color:' + C.SEVERITY_COLOR[el.severity] + '">Check: ' + el.severity + "</span>");
     return lines.join("<br>");
@@ -411,7 +593,14 @@
     (args.payload.edges || []).forEach((e) => { if (edgeLines[e.id]) edgeLines[e.id].setStyle(C.edgeStyle(e, e.id === selected, displayOpts())); });
     updateDeleteButton();
   }
-  function updateDeleteButton() { $("btnDelete").disabled = !selected; }
+  function selectedNodeIds() {
+    const ids = multi.length ? multi.slice() : (selected ? [selected] : []);
+    return ids.filter((id) => !!nodeById(id));          // lines are copied with their ends
+  }
+  function updateDeleteButton() {
+    $("btnDelete").disabled = !(selected || selectedSketch);
+    $("btnDup").disabled = selectedNodeIds().length === 0;
+  }
 
   function select(id, notify) {
     selected = id;
@@ -455,6 +644,7 @@
       $("hint").textContent = HINTS.connect;
       return;
     }
+    multi = [];                        // a plain click replaces a shift-selection, as everywhere else
     select(n.id, true);
   }
 
@@ -489,6 +679,8 @@
   }
 
   function handleMapClick(ev) {
+    if (SKETCH_MODES.indexOf(mode) >= 0) { sketchClick([ev.latlng.lat, ev.latlng.lng]); return; }
+    if (selectedSketch) { selectedSketch = null; drawSketches(); }
     if (mode === "pick") {
       showPick(ev.latlng.lat, ev.latlng.lng);
       emit("pick", { lat: ev.latlng.lat, lon: ev.latlng.lng });
@@ -503,11 +695,24 @@
       return;
     }
     if (mode === "connect") { connectFrom = null; refreshSelectionStyles(); $("hint").textContent = HINTS.connect; return; }
+    if (multi.length) { multi = []; refreshSelectionStyles(); }   // clicking empty sea clears everything
     if (selected) select(null, true);
   }
   map.on("click", handleMapClick);
 
+  function duplicateSelected() {
+    const ids = selectedNodeIds();
+    if (!ids.length) return;
+    emit("duplicate", { ids: ids, with_group: !!$("grp").checked });
+    toast("Duplicating " + ids.length + (ids.length === 1 ? " item" : " items") + "…", true);
+  }
+
   function deleteSelected() {
+    if (selectedSketch) {
+      emit("delete_annotation", { id: selectedSketch });
+      selectedSketch = null; drawSketches(); updateDeleteButton();
+      return;
+    }
     if (!selected) return;
     const id = selected;
     if (nodeMarkers[id]) nodeGroup.removeLayer(nodeMarkers[id]);
@@ -595,6 +800,7 @@
       rules: a.rules || {},
       overlays: a.overlays || [],
       rasters: a.rasters || [],
+      custom_layers: a.custom_layers || [],
     };
     const disp = args.payload.display || {};
     if (disp.symbol_scale && !$("symScale").matches(":active")) $("symScale").value = disp.symbol_scale;
@@ -604,13 +810,32 @@
     syncDiameter();
     if (a.rev !== lastRev) {
       if (a.selected !== undefined) selected = a.selected;
+      const fresh = (args.payload.select_many || []).filter((id) => !!nodeById(id));
+      if (fresh.length) { multi = fresh.slice(); selected = fresh[0]; }
       drawLayout();
       drawRasters();
       drawOverlays();
+      drawCustomLayers();
+      drawSketches();
+      if (fresh.length) {
+        refreshSelectionStyles();
+        $("hint").textContent = fresh.length + " new item(s) selected — drag any of them to place the copy";
+      }
       lastRev = a.rev;
     }
     map.invalidateSize();
+    if (firstRender) {
+      const want = (args.payload.display || {}).basemap;
+      if (want) switchBase(want);                                  // the base map saved with the project
+    }
     if (firstRender || a.fit_token !== lastFit) { fitLayout(); lastFit = a.fit_token; }
+    // a bookmark or a shared link names a view to go to — it wins over fitting the layout
+    const vt = a.view_target || {};
+    if (vt.token !== undefined && vt.token !== lastViewToken && vt.bbox && vt.bbox.length === 4) {
+      map.fitBounds([[vt.bbox[1], vt.bbox[0]], [vt.bbox[3], vt.bbox[2]]], { padding: [0, 0] });
+      if (vt.basemap) switchBase(vt.basemap);
+      lastViewToken = vt.token;
+    }
     if (firstRender) { setMode("select"); firstRender = false; }
   }
 

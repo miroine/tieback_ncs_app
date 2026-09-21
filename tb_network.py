@@ -8,6 +8,9 @@ can colour map elements; nothing here raises on a merely *bad design*.
 """
 from __future__ import annotations
 
+import copy
+import re
+
 from collections import deque
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Tuple
@@ -66,12 +69,20 @@ class LayoutSettings:
     smooth_samples: int = 10             # points per span when a route is smoothed
 
 
+# Mirrors tb_fluids.INJECTOR_FLUIDS; tb_network sits below tb_fluids and cannot import it.
+INJECTOR_WELL_FLUIDS = ("water injector", "gas injector")
+
+
 class Layout:
     def __init__(self, catalog: Catalog, settings: Optional[LayoutSettings] = None):
         self.catalog = catalog
         self.settings = settings or LayoutSettings()
         self.nodes: Dict[str, Node] = {}
         self.edges: Dict[str, Edge] = {}
+        # reservoirs / fluid regions the wells produce from (see tb_fluids)
+        self.reservoirs: Dict[str, dict] = {}
+        # circles, polygons and lines sketched on the map (see tb_mapextras), WGS84
+        self.annotations: List[dict] = []
 
     # ── editing ──
     def add_node(self, node: Node) -> Node:
@@ -263,6 +274,86 @@ class Layout:
             if nid in self.nodes:
                 n = self.nodes[nid]
                 self.move_node(nid, n.lat + dlat, n.lon + dlon)
+
+    def duplicate(self, node_ids, dlat: float, dlon: float, with_group: bool = True,
+                  new_id=None) -> Dict[str, str]:
+        """Copy nodes, and every line that runs between two of them, offset by (dlat, dlon).
+
+        With `with_group`, a structure brings the wells and modules jumpered to it
+        or landed in its slots — duplicating a template gives a template with its
+        wells, not an empty frame. Lines to anything outside the copied set are
+        not copied: a duplicated cluster is not wired to the original host until
+        you connect it, which is the decision you want to make deliberately.
+
+        Carried over: equipment, labels (made unique), tags, fluid, reservoir and
+        flow-assurance inputs. Remapped: a well landed in a structure that was
+        copied lands in the copy; one whose structure was not copied is freed, so
+        it cannot double-book a slot on the original. Dropped: stored seabed
+        profiles, which describe the old route and would mislead the span check.
+
+        `new_id(kind, used)` names the copies; returns {old id: new id}.
+        """
+        ids = [n for n in node_ids if n in self.nodes]
+        if with_group:
+            for nid in list(ids):
+                for g in self.jumper_group(nid):
+                    if g not in ids:
+                        ids.append(g)
+        if not ids:
+            return {}
+        used = set(self.nodes) | set(self.edges)
+        labels = {n.label for n in self.nodes.values()} | {e.label for e in self.edges.values()}
+
+        def make_id(kind, old):
+            if new_id is not None:
+                nid = new_id(kind, used)
+            else:
+                i, nid = 2, f"{old}_{2}"
+                while nid in used:
+                    i += 1
+                    nid = f"{old}_{i}"
+            used.add(nid)
+            return nid
+
+        def copy_label(label):
+            base = re.sub(r"\s*\(\d+\)$", "", label or "").strip()
+            if not base:
+                return ""
+            i = 2
+            while f"{base} ({i})" in labels:
+                i += 1
+            out = f"{base} ({i})"
+            labels.add(out)
+            return out
+
+        mapping: Dict[str, str] = {}
+        for nid in ids:
+            src = self.nodes[nid]
+            nn = make_id(self.kind(nid), nid)
+            attrs = copy.deepcopy(src.attrs)
+            self.add_node(Node(nn, src.item_id, src.lat + dlat, src.lon + dlon,
+                               label=copy_label(src.label or nid), water_depth_m=src.water_depth_m,
+                               sitp_psi=src.sitp_psi, hipps=src.hipps, phase=src.phase, attrs=attrs))
+            mapping[nid] = nn
+        for nid, nn in mapping.items():
+            st = self.nodes[nn].attrs.get("in_structure")
+            if st:
+                if st in mapping:
+                    self.nodes[nn].attrs["in_structure"] = mapping[st]
+                else:
+                    self.nodes[nn].attrs.pop("in_structure", None)
+        for e in list(self.edges.values()):
+            if e.from_node in mapping and e.to_node in mapping:
+                ne = make_id(self.catalog.get(e.item_id).category, e.edge_id)
+                attrs = copy.deepcopy(e.attrs)
+                attrs.pop("seabed_profile", None)
+                self.add_edge(Edge(ne, e.item_id, mapping[e.from_node], mapping[e.to_node],
+                                   diameter_in=e.diameter_in,
+                                   route=[(la + dlat, lo + dlon) for la, lo in e.route],
+                                   length_m=e.length_m, phase=e.phase,
+                                   label=copy_label(e.label) if e.label else "", attrs=attrs))
+                mapping[e.edge_id] = ne
+        return mapping
 
     def jumper_group(self, node_id: str) -> List[str]:
         """Nodes tied to this one by a jumper — the wells and modules that sit on a
@@ -472,6 +563,9 @@ class Layout:
         rating_demand: Dict[str, float] = {}
         rating_hipps: Dict[str, bool] = {}
         for w in wells:
+            # an injector is fed from the host, it does not produce into it
+            if str(self.nodes[w].attrs.get("well_fluid", "")).lower() in INJECTOR_WELL_FLUIDS:
+                continue
             path = self.path_to_host(w) if hosts else None
             if path is None:
                 F.append(Finding("error", "NO_PRODUCTION_PATH", "Well has no production path to a host.", w))
@@ -544,6 +638,8 @@ class Layout:
             "settings": asdict(self.settings),
             "nodes": [asdict(n) for n in self.nodes.values()],
             "edges": [{**asdict(e), "route": [list(p) for p in e.route]} for e in self.edges.values()],
+            "reservoirs": [dict(v) for v in self.reservoirs.values()],
+            "annotations": [dict(a) for a in self.annotations],
         }
 
     def to_yaml(self) -> str:
@@ -558,4 +654,10 @@ class Layout:
             lay.add_node(Node(**n))
         for e in d.get("edges", []):
             lay.add_edge(Edge(**{**e, "route": [tuple(p) for p in e.get("route", [])]}))
+        # older files have no reservoirs — that is fine, wells fall back to GOR
+        for r in d.get("reservoirs") or []:
+            if isinstance(r, dict) and r.get("name"):
+                lay.reservoirs[str(r["name"])] = dict(r)
+        lay.annotations = [dict(a) for a in (d.get("annotations") or [])
+                           if isinstance(a, dict) and a.get("kind")]
         return lay

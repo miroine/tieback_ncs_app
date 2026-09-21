@@ -195,7 +195,8 @@ S.check("custom fluid colour is used", custom_colour)
 S.check("display block travels in the payload",
         lambda: m.build_payload(demo(), None, m.DisplaySettings(symbol_scale=2.5, line_scale=0.5,
                                                                 thickness_by_diameter=False))["display"]
-        == {"symbol_scale": 2.5, "line_scale": 0.5, "thickness_by_diameter": False, "color_mode": "item"})
+        == {"symbol_scale": 2.5, "line_scale": 0.5, "thickness_by_diameter": False, "color_mode": "item",
+            "basemap": "Ocean (Esri)"})
 S.raises("bad colour mode raises", ValueError, lambda: m.DisplaySettings(color_mode="rainbow"))
 S.raises("scale outside 0.2–4 raises", ValueError, lambda: m.DisplaySettings(symbol_scale=9.0))
 def display_event():
@@ -248,4 +249,140 @@ def project_without_schema_line():
     name, lay2, _, _, _, _ = p.project_from_yaml_full(stripped)
     assert lay2.quantities() == lay.quantities()
 S.check("project file recognised by its shape when the schema line is gone", project_without_schema_line)
+
+# ── duplicate ──────────────────────────────────────────────────────────────
+def dup_template_with_wells():
+    lay = demo()
+    before_n, before_e = len(lay.nodes), len(lay.edges)
+    mp = m.duplicate_elements(lay, ["TMPL_A"])
+    new_nodes = [v for k, v in mp.items() if k in demo().nodes]
+    # template + PLET + 4 wells, and the 5 jumpers between them
+    assert len(new_nodes) == 6, mp
+    assert len(lay.nodes) == before_n + 6 and len(lay.edges) == before_e + 5, (len(lay.nodes), len(lay.edges))
+    return True
+S.check("duplicating a template brings its wells and the jumpers between them", dup_template_with_wells)
+
+
+def dup_does_not_wire_to_host():
+    """A copied cluster is not joined to the original host — that is a deliberate
+    decision the engineer makes, not a side effect of copying."""
+    lay = demo()
+    mp = m.duplicate_elements(lay, ["TMPL_A"])
+    copies = set(mp.values())
+    for e in lay.edges.values():
+        if e.edge_id in copies:
+            assert e.from_node in copies and e.to_node in copies, (e.edge_id, e.from_node, e.to_node)
+    assert "HOST_A" not in mp, "the host must not be copied with a template"
+    return True
+S.check("the copy is not wired to the original host", dup_does_not_wire_to_host)
+
+
+def dup_without_group():
+    lay = demo()
+    mp = m.duplicate_elements(lay, ["TMPL_A"], with_group=False)
+    return list(mp) == ["TMPL_A"], mp
+S.check("without 'with wells' only the structure itself is copied",
+        lambda: list(m.duplicate_elements(demo(), ["TMPL_A"], with_group=False)) == ["TMPL_A"])
+
+
+def dup_lands_beside():
+    lay = demo()
+    group = ["TMPL_A"] + lay.jumper_group("TMPL_A")
+    west = min(lay.nodes[n].lon for n in group)
+    east = max(lay.nodes[n].lon for n in group)
+    mp = m.duplicate_elements(lay, ["TMPL_A"])
+    copies = [mp[n] for n in group]
+    assert min(lay.nodes[c_].lon for c_ in copies) > east, "the copy must land clear of the original"
+    assert abs(lay.nodes[mp["TMPL_A"]].lat - lay.nodes["TMPL_A"].lat) < 1e-12, "offset is east-west only"
+    # relative geometry is preserved
+    d0 = lay.nodes["W1"].lon - lay.nodes["TMPL_A"].lon
+    d1 = lay.nodes[mp["W1"]].lon - lay.nodes[mp["TMPL_A"]].lon
+    assert abs(d0 - d1) < 1e-12
+    return True
+S.check("the copy lands beside the original with its geometry intact", dup_lands_beside)
+
+
+def dup_unique_ids_and_labels():
+    lay = demo()
+    m.duplicate_elements(lay, ["TMPL_A"])
+    m.duplicate_elements(lay, ["TMPL_A"])
+    labels = [nd.label for nd in lay.nodes.values()]
+    assert len(labels) == len(set(labels)), sorted(labels)
+    assert "Template A (2)" in labels and "Template A (3)" in labels, sorted(labels)
+    return True
+S.check("copies get unique ids and labels, (2), (3) …", dup_unique_ids_and_labels)
+S.check("copying a copy does not stack suffixes",
+        lambda: (lambda lay: (m.duplicate_elements(lay, ["TMPL_A"], with_group=False),
+                              m.duplicate_elements(lay, ["TMPL1"], with_group=False),
+                              sorted(nd.label for nd in lay.nodes.values() if nd.label.startswith("Template A")))[2])(demo())
+        == ["Template A", "Template A (2)", "Template A (3)"])
+
+
+def dup_carries_well_data():
+    import tb_fluids as fl, tb_flowassurance as fa_
+    lay = demo()
+    fl.set_reservoir(lay, fl.new_reservoir("Garn", "gas condensate"))
+    fl.assign_reservoir(lay, ["W1"], "Garn")
+    fl.set_well_fluid(lay, ["W2"], "water injector")
+    fa_.set_well_inputs(lay, "W1", fa_.WellFA(oil_sm3_d=321.0))
+    lay.set_tags("W1", ["phase 1"])
+    mp = m.duplicate_elements(lay, ["TMPL_A"])
+    assert fl.well_fluid(lay, mp["W1"]) == ("gas condensate", "from reservoir Garn")
+    assert fl.well_fluid(lay, mp["W2"]) == ("water injector", "set on the well")
+    assert fa_.well_inputs(lay)[mp["W1"]].oil_sm3_d == 321.0
+    assert lay.tags(mp["W1"]) == ["phase 1"], lay.tags(mp["W1"])
+    # and the copy is independent of the original
+    lay.nodes[mp["W1"]].attrs["fa"]["oil_sm3_d"] = 999.0
+    assert fa_.well_inputs(lay)["W1"].oil_sm3_d == 321.0, "editing the copy changed the original"
+    return True
+S.check("a copy carries fluid, reservoir, flow inputs and tags — independently", dup_carries_well_data)
+
+
+def dup_remaps_slots():
+    lay = demo()
+    lay.nodes["W1"].attrs["in_structure"] = "TMPL_A"
+    mp = m.duplicate_elements(lay, ["TMPL_A"])
+    assert lay.nodes[mp["W1"]].attrs.get("in_structure") == mp["TMPL_A"], lay.nodes[mp["W1"]].attrs
+    # a well copied on its own must not claim a slot on the original structure
+    mp2 = m.duplicate_elements(lay, ["W1"], with_group=False)
+    assert "in_structure" not in lay.nodes[mp2["W1"]].attrs, lay.nodes[mp2["W1"]].attrs
+    return True
+S.check("slot assignments follow the copied structure, never the original", dup_remaps_slots)
+
+
+def dup_drops_seabed_profile():
+    lay = demo()
+    lay.edges["J_W1"].attrs["seabed_profile"] = [100.0, 101.0]
+    mp = m.duplicate_elements(lay, ["TMPL_A"])
+    return "seabed_profile" not in lay.edges[mp["J_W1"]].attrs
+S.check("a stored seabed profile is not copied to the new route", dup_drops_seabed_profile)
+
+
+def dup_event():
+    lay = demo()
+    st_ = {}
+    res = m.apply_event(lay, {"nonce": "N", "seq": 1, "type": "duplicate",
+                              "payload": {"ids": ["TMPL_A"], "with_group": True}}, st_)
+    assert res["changed"] and res["selected"] and res["selected"] in lay.nodes, res
+    assert len(st_["select_many"]) == 6, st_
+    assert "Duplicated 6 item(s) and 5 line(s)" in res["message"], res["message"]
+    return True
+S.check("the duplicate map event copies and selects the copy", dup_event)
+S.check("a duplicate event with nothing valid selected is an error, not a crash",
+        lambda: m.apply_event(demo(), {"nonce": "N", "seq": 1, "type": "duplicate",
+                                       "payload": {"ids": ["NOPE"]}}, {})["error"] is not None)
+
+
+def dup_selection_of_several():
+    """Multi-select duplicate of the whole tie-back: every line among the selection
+    comes with it — here the umbilical host→template, flowline, riser and jumpers."""
+    lay = demo()
+    everything = list(demo().nodes)
+    mp = m.duplicate_elements(lay, everything, with_group=False)
+    copied_lines = sorted(k for k in mp if k in demo().edges)
+    assert copied_lines == sorted(demo().edges), copied_lines
+    assert "UMB1" in mp and lay.edges[mp["UMB1"]].from_node == mp["HOST_A"], "host-side line lost"
+    return True
+S.check("duplicating several items copies the lines between them", dup_selection_of_several)
+
 sys.exit(0 if S.report() else 1)

@@ -18,12 +18,12 @@ function mkEl(tag) {
 }
 function allOptions(sel) { const out = []; (function walk(n) { n.children.forEach((c) => { if (c.tagName === "OPTION") out.push(c); walk(c); }); })(sel); return out; }
 const els = {};
-["wrap", "map", "toolbar", "nodeItem", "edgeItem", "diam", "grp", "symScale", "lineScale", "selCount", "btnDelete", "btnFit", "empty", "toast", "status", "hint", "coords"]
+["wrap", "map", "toolbar", "nodeItem", "edgeItem", "diam", "grp", "symScale", "lineScale", "selCount", "btnDelete", "btnDup", "btnBookmark", "btnFit", "empty", "toast", "status", "hint", "coords"]
   .forEach((id) => { els[id] = mkEl(id === "nodeItem" || id === "edgeItem" ? "select" : ["diam", "grp", "symScale", "lineScale"].indexOf(id) >= 0 ? "input" : "div"); });
 els.grp.checked = true;
 els.symScale.value = "1"; els.lineScale.value = "1";
 [els.symScale, els.lineScale].forEach((e) => { e.matches = () => false; });
-const modeButtons = ["select", "move", "route", "add", "connect", "pick"].map((m) => { const b = mkEl("button"); b.dataset.mode = m; return b; });
+const modeButtons = ["select", "move", "route", "add", "connect", "pick", "measure", "circle", "polygon", "line"].map((m) => { const b = mkEl("button"); b.dataset.mode = m; return b; });
 const docHandlers = {};
 const document = {
   getElementById: (id) => els[id],
@@ -42,9 +42,15 @@ const mapObj = evented({ createPane: () => ({ style: {} }), setView() { return t
 const markers = [], lines = [], polygons = [];
 const L = {
   map: (id, opts) => { mapObj.opts = opts; return mapObj; },
-  tileLayer: Object.assign((url, o) => { L._tiles = (L._tiles || []).concat([o]); return { addTo() { return this; } }; },
-    { wms: (url, o) => ({ url, o, addTo() { return this; } }) }),
-  control: { layers: (base, over) => { L._overlays = over || {}; return { addTo() { return this; }, addOverlay(l, name) { L._added = (L._added || []).concat(name); }, removeLayer() {} }; },
+  tileLayer: Object.assign((url, o) => { const l = { url, o, addTo(m) { (L._onMap = L._onMap || []).push(this); return this; } };
+      L._tiles = (L._tiles || []).concat([o]); L._tileLayers = (L._tileLayers || []).concat([l]); return l; },
+    { wms: (url, o) => { const l = { url, o, wms: true, addTo() { return this; } }; L._wms = (L._wms || []).concat([l]); return l; } }),
+  TileLayer: { extend: (proto) => function (url, o) { this.options = o; this.getTileUrl = proto.getTileUrl;
+      this.addTo = function () { return this; }; L._exports = (L._exports || []).concat([this]); } },
+  control: { layers: (base, over) => { L._bases = Object.assign({}, base || {}); L._overlays = over || {};
+      return { addTo() { return this; }, addOverlay(l, name) { L._added = (L._added || []).concat(name); },
+               addBaseLayer(l, name) { L._bases[name] = l; L._addedBase = (L._addedBase || []).concat(name); },
+               removeLayer() {} }; },
              scale: () => ({ addTo() { return this; } }) },
   layerGroup,
   divIcon: (o) => o,
@@ -53,7 +59,7 @@ const L = {
   marker: (ll, opts) => {
     let pos = { lat: ll[0], lng: ll[1] };
     const mk = evented({ opts, getLatLng: () => pos, setLatLng(p) { pos = p; }, setIcon(i) { this.icon = i; },
-      bindTooltip() { return this; },
+      bindTooltip(html) { this._tip = html; return this; },
       addTo(g) { if (g && g.layers) g.layers.push(this);
         this.dragging = { on: true, enable() { this.on = true; }, disable() { this.on = false; } }; return this; } });
     markers.push(mk); return mk;
@@ -336,6 +342,194 @@ check("concept points are drawn bigger than ordinary layer points", () => {
   small = big;
   return concept.radius === 5 && concept.pane === "concepts"
     && small.radius === 4 && small.pane === "overlays";
+});
+
+check("a well's tooltip names its fluid, where it came from, and its reservoir", () => {
+  markers.length = 0;
+  render({ payload: { nodes: [{ id: "W9", label: "G-1", item: "HXT", kind: "well", lat: 60.5, lon: 2.6,
+      severity: "", fluid: "gas", fluid_source: "from reservoir Garn", fluid_color: "#EB0037", reservoir: "Garn" }],
+      edges: [] }, palette, rules, overlays: [], selected: null, height: 500, rev: "rfluid1", fit_token: 0 });
+  const tip = markers[markers.length - 1]._tip || "";
+  return tip.indexOf("Main fluid: <b>gas</b>") >= 0 && tip.indexOf("from reservoir Garn") >= 0
+    && tip.indexOf("Reservoir: Garn") >= 0;
+});
+check("the well icon is drawn with its fluid ring", () => {
+  markers.length = 0;
+  render({ payload: { nodes: [{ id: "W9", label: "G-1", item: "HXT", kind: "well", symbol: "xt", lat: 60.5, lon: 2.6,
+      severity: "", fluid: "gas", fluid_color: "#EB0037" }], edges: [] },
+    palette, rules, overlays: [], selected: null, height: 500, rev: "rfluid2", fit_token: 0 });
+  const mk = markers[markers.length - 1];
+  return mk.opts.icon.html.indexOf('stroke="#EB0037"') >= 0;
+});
+
+const esc = () => (docHandlers.keydown || []).forEach((f) => f({ key: "Escape", target: {} }));
+check("Duplicate is disabled with nothing selected", () => {
+  esc();
+  render({ payload, palette, rules, overlays: [], selected: null, height: 500, rev: "rdup0", fit_token: 0 });
+  return els.btnDup.disabled === true;
+});
+check("Duplicate sends the selected structure and the 'with wells' choice", () => {
+  esc();
+  render({ payload, palette, rules, overlays: [], selected: "T1", height: 500, rev: "rdup1", fit_token: 0 });
+  els.grp.checked = true;
+  els.btnDup.handlers.click[0]();
+  const v = values().pop();
+  return v.type === "duplicate" && v.payload.ids.length === 1 && v.payload.ids[0] === "T1"
+    && v.payload.with_group === true;
+});
+check("Duplicate sends a multi-selection as one event", () => {
+  esc();
+  markers.length = 0;
+  render({ payload, palette, rules, overlays: [], selected: null, height: 500, rev: "rdup2", fit_token: 0 });
+  markers.forEach((mk) => mk.fire("click", { originalEvent: { shiftKey: true } }));
+  els.btnDup.handlers.click[0]();
+  const v = values().pop();
+  return v.type === "duplicate" && v.payload.ids.length === 2;
+});
+check("a plain click replaces a shift-selection, so Duplicate copies only what you see selected", () => {
+  esc();
+  markers.length = 0;
+  render({ payload, palette, rules, overlays: [], selected: null, height: 500, rev: "rdup2b", fit_token: 0 });
+  markers.forEach((mk) => mk.fire("click", { originalEvent: { shiftKey: true } }));   // select both
+  markers[0].fire("click", {});                                                    // then plain-click one
+  els.btnDup.handlers.click[0]();
+  const v = values().pop();
+  return v.type === "duplicate" && v.payload.ids.length === 1;
+});
+check("freshly duplicated items arrive selected, ready to drag", () => {
+  esc();
+  const p2 = { nodes: payload.nodes.concat([{ id: "T9", label: "Template (2)", item: "Tmpl", kind: "template",
+      lat: 60.51, lon: 2.65, severity: "" }, { id: "W9", label: "A-1 (2)", item: "HXT", kind: "well",
+      lat: 60.5, lon: 2.64, severity: "" }]), edges: payload.edges, select_many: ["T9", "W9"] };
+  render({ payload: p2, palette, rules, overlays: [], selected: "T9", height: 500, rev: "rdup3", fit_token: 0 });
+  return els.selCount.textContent === "2 selected" && els.btnDup.disabled === false;
+});
+// ── map tools: measure, circle, polygon, line, bookmark, base maps, URL layers ──
+const modeBtn = (m) => modeButtons.find((b) => b.dataset.mode === m).handlers.click[0]();
+const clickAt = (lat, lng) => mapObj.fire("click", { latlng: { lat, lng } });
+const dbl = () => mapObj.fire("dblclick", { latlng: { lat: 0, lng: 0 } });
+function freshMap(extra) {
+  esc();
+  render(Object.assign({ payload: Object.assign({}, payload, { annotations: [] }), palette, rules, overlays: [],
+    selected: null, height: 500, rev: "rtools" + Math.random(), fit_token: 0 }, extra || {}));
+}
+check("measure reports the distance and saves nothing", () => {
+  freshMap();
+  modeBtn("measure");
+  const n0 = values().length;
+  clickAt(60.0, 2.0); clickAt(60.0, 2.1); clickAt(60.0, 2.1); dbl();       // a double-click lands twice
+  const expect = C.haversine([60, 2], [60, 2.1]);
+  return values().length === n0 && els.hint.textContent.indexOf(C.formatLength(expect)) >= 0
+    && els.hint.textContent.indexOf("1 leg") >= 0;
+});
+check("a circle is saved with its ground radius", () => {
+  freshMap();
+  modeBtn("circle");
+  clickAt(60.0, 2.0); clickAt(60.0, 2.018);
+  const v = values().pop();
+  const r = C.haversine([60, 2], [60, 2.018]);
+  return v.type === "add_annotation" && v.payload.kind === "circle" && Math.abs(v.payload.radius_m - r) < 1e-6
+    && v.payload.center[0] === 60;
+});
+check("a polygon is saved on double-click, without the double-click's repeated corner", () => {
+  freshMap();
+  modeBtn("polygon");
+  clickAt(60.0, 2.0); clickAt(60.0, 2.1); clickAt(60.05, 2.05); clickAt(60.05, 2.05); dbl();
+  const v = values().pop();
+  return v.type === "add_annotation" && v.payload.kind === "polygon" && v.payload.coords.length === 3;
+});
+check("a polygon needs three corners", () => {
+  freshMap();
+  modeBtn("polygon");
+  const n0 = values().length;
+  clickAt(60.0, 2.0); clickAt(60.0, 2.1); dbl();
+  return values().length === n0;
+});
+check("a line is saved with its points", () => {
+  freshMap();
+  modeBtn("line");
+  clickAt(60.0, 2.0); clickAt(60.02, 2.05); clickAt(60.04, 2.07); dbl();
+  const v = values().pop();
+  return v.type === "add_annotation" && v.payload.kind === "line" && v.payload.coords.length === 3;
+});
+check("Esc abandons a half-drawn polygon", () => {
+  freshMap();
+  modeBtn("polygon");
+  const n0 = values().length;
+  clickAt(60.0, 2.0); clickAt(60.0, 2.1);
+  esc();
+  modeBtn("polygon"); clickAt(60.3, 2.3); dbl();
+  return values().length === n0;                     // nothing from the abandoned one, nothing from 1 point
+});
+check("Bookmark sends the current view and base map", () => {
+  freshMap();
+  els.btnBookmark.handlers.click[0]();
+  const v = values().pop();
+  return v.type === "bookmark" && v.payload.view.length === 4 && v.payload.basemap === "Ocean (Esri)";
+});
+check("saved sketches are drawn, and a selected one is deleted with Delete", () => {
+  polygons.length = 0;
+  esc();
+  render({ payload: Object.assign({}, payload, { annotations: [
+      { id: "SK1", kind: "circle", center: [60.5, 2.6], radius_m: 500, label: "500 m zone", color: "#C4561B", measure: "circle r = 500 m" },
+      { id: "SK2", kind: "polygon", coords: [[60, 2], [60, 2.1], [60.1, 2.1]], label: "", measure: "polygon" }] }),
+    palette, rules, overlays: [], selected: null, height: 500, rev: "rsk1", fit_token: 0 });
+  const circle = polygons.find((p) => p.pts.length === 72);
+  if (!circle || polygons.length < 2) return false;
+  circle.fire("click", {});
+  els.btnDelete.handlers.click[0]();
+  const v = values().pop();
+  return v.type === "delete_annotation" && v.payload.id === "SK1";
+});
+check("placing equipment on top of a sketch still places it", () => {
+  polygons.length = 0;
+  esc();
+  render({ payload: Object.assign({}, payload, { annotations: [
+      { id: "SK1", kind: "polygon", coords: [[60, 2], [60, 2.2], [60.2, 2.2]], measure: "polygon" }] }),
+    palette, rules, overlays: [], selected: null, height: 500, rev: "rsk2", fit_token: 0 });
+  modeBtn("add");
+  polygons[polygons.length - 1].fire("click", { latlng: { lat: 60.1, lng: 2.15 } });
+  const v = values().pop();
+  return v.type === "add_node" && v.payload.lat === 60.1;
+});
+check("changing the base map is remembered", () => {
+  freshMap();
+  mapObj.fire("baselayerchange", { name: "Sjøkart (Kartverket)" });
+  const v = values().pop();
+  return v.type === "basemap" && v.payload.name === "Sjøkart (Kartverket)";
+});
+check("Kartverket nautical chart and Esri base maps are offered", () => {
+  return ["Sjøkart (Kartverket)", "Topographic (Esri)", "Light grey (Esri)", "Dark grey (Esri)", "Satellite (Esri)"]
+    .every((n) => n in L._bases);
+});
+check("maps added by URL: XYZ and WMS as overlays, ArcGIS service drawn with export", () => {
+  L._wms = []; L._exports = []; L._added = [];
+  freshMap({ custom_layers: [
+    { kind: "xyz", url: "https://tiles.example.com/{z}/{x}/{y}.png", name: "My tiles", overlay: true, opacity: 0.8 },
+    { kind: "wms", url: "https://example.com/wms", layers: "depth", name: "Depth WMS", overlay: true },
+    { kind: "arcgis_export", url: "https://example.com/arcgis/rest/services/Pipes/MapServer", name: "Pipes", overlay: true, layers: "" }] });
+  const ex = L._exports[L._exports.length - 1];
+  const tileUrl = ex.getTileUrl.call(ex, { x: 1, y: 1, z: 1 });
+  return (L._added || []).indexOf("My tiles") >= 0 && (L._added || []).indexOf("Depth WMS") >= 0
+    && L._wms.some((w) => w.o.layers === "depth")
+    && tileUrl.indexOf("https://example.com/arcgis/rest/services/Pipes/MapServer/export?bbox=") === 0;
+});
+check("a map added by URL as a base map joins the base-map list", () => {
+  L._addedBase = [];
+  freshMap({ custom_layers: [{ kind: "arcgis_tile", url: "https://x.com/arcgis/rest/services/B/MapServer/tile/{z}/{y}/{x}",
+                               name: "Company base", overlay: false }] });
+  return (L._addedBase || []).indexOf("Company base") >= 0;
+});
+check("a bookmark's view is flown to, and wins over fitting the layout", () => {
+  mapObj.fitted = null;
+  freshMap({ view_target: { token: 77, bbox: [1.0, 59.0, 3.0, 61.0] }, fit_token: 5 });
+  const b = mapObj.fitted;
+  return b && b[0][0] === 59.0 && b[0][1] === 1.0 && b[1][0] === 61.0 && b[1][1] === 3.0;
+});
+check("the same view target is not flown to twice", () => {
+  mapObj.fitted = null;
+  freshMap({ view_target: { token: 77, bbox: [1.0, 59.0, 3.0, 61.0] }, fit_token: 5 });   // same fit token too
+  return mapObj.fitted === null;
 });
 
 console.log("protocol.test.js: " + pass + " passed, " + fail.length + " failed");

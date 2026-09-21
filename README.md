@@ -76,6 +76,9 @@ from the production-path checks and the flow-assurance network but are costed an
 | `tb_map.py`, `tb_map_component/` | Custom bi-directional Leaflet component (Streamlit v1 protocol, no npm build) and the Python event reducer |
 | `tb_tiein.py` | Tie-in screening: Sodir facilities or layout hosts as candidate hosts, distance and bearing, trial tie-back costed and solved, and one-click attach to the layout |
 | `tb_basis.py` | Design basis checklist in SI units (m, bar, °C, Sm³/d, tonn, MNOK) with entered / default / missing / to-resolve status |
+| `tb_mapextras.py` | Sketches on the map (true-ground circles, polygons, lines, geodesic lengths and areas, what equipment falls inside), bookmarks, and map layers by URL — ArcGIS tiled, map and image services, ArcGIS feature layers, WMS and XYZ, recognised by their shape |
+| `tb_share.py` | Share links: the whole design compressed into the address (`?design=`), or a short link to a stored copy (`?share=`, on the server's disk or in a secret GitHub gist); protected links (`2.`) encrypted with AES-256-GCM under an scrypt-derived access code or password; catalogue sent as a diff to the default; damaged and oversized links refused in words |
+| `tb_fluids.py` | Reservoirs and each well's main fluid (oil, gas, gas condensate, water or gas injector): stated on the well, inherited from its reservoir, or classified from GOR by McCain's ranges — always reported with which of the three it came from; lines take the fluid of the wells upstream; reservoir PVT copied into the well streams; gas wells by gas rate and CGR |
 | `tb_chemistry.py` | Production chemistry: MEG vs methanol sizing and recommendation (Hammerschmidt inverted, Nielsen-Bucklin cross-check, regeneration credit, life cost), and a screen for wax, asphaltenes, scale, emulsions, corrosion, souring, sand and naphthenates that names the test when the data is missing |
 | `tb_viability.py` | Concept viability checklist: layout integrity, deliverability, hydrate margin at design rate and turndown, cool-down, erosion, slugging, spans, schedule float and cost spread, each with a target and what to do if it is not met |
 | `tb_cases.py` | Concept cases: snapshot a whole project, compare cases on cost, schedule and flow assurance, save/load case sets |
@@ -107,6 +110,101 @@ Internal units: metres, inches (ID), psi, days, USD.
   (YAML, Excel or CSV all import from the Equipment catalog tab).
 - `tools/pvt_studio_selftest.py` — run against PVT Studio's `nodal.py` to check the Beggs-Brill fixes.
 - `docs/ROADMAP.md` — the improvement plan, easiest first.
+
+## Map tools
+The toolbar has **Measure**, **Circle**, **Polygon** and **Line**. Measure is a scratch tool: click along
+the way, double-click to finish, Esc to clear — nothing is saved. Circle, Polygon and Line are
+*sketches*: saved with the project, its concepts and a shared link, drawn above the routes and below the
+equipment, and listed under *Map tools* below the map with their size and the equipment that falls
+inside them. A circle is a true circle on the ground (at 60°N it is twice as wide in longitude as in
+latitude on the map); lengths and areas are geodesic. *Circle round selected* puts, say, a 500 m safety
+zone round a template in one click. Clicking a sketch selects it; Del removes it.
+
+**Bookmark** saves the view you are looking at, with its base map; *Go* in the Bookmarks tab returns to
+it. The map's layer control now offers Esri Ocean, Satellite, Topographic, Light grey and Dark grey,
+OpenStreetMap, and Kartverket's **Sjøkart**, Topografisk and Gråtone, plus GEBCO bathymetry and
+OpenSeaMap sea marks as overlays. The base map you choose is remembered with the project.
+
+**Add a map by URL** takes an ArcGIS Online / ArcGIS Server address — a tiled service
+(`…/MapServer/tile`), a map or image service (`…/MapServer`, drawn tile by tile through `export`), or a
+feature layer (`…/FeatureServer/3`, fetched as vectors in view) — a WMS, or XYZ tiles. The address is
+recognised by its shape and an unrecognised one is refused with the accepted forms. `http://` services
+are refused because the browser blocks them on an https page. Services that need a login will not draw.
+
+## Sharing a design
+Streamlit keeps everything in the browser session of whoever is using it, so a colleague opening the
+app's address gets an empty app. *Share this design* in the sidebar makes a link that opens yours: the
+layout, reservoirs, sketches, bookmarks, base map, colour mode and settings — optionally the saved
+concepts too — at the view you were looking at. The design travels **inside the link** (`?design=`),
+compressed, with the equipment catalogue sent only as its differences from the default; the demo field
+comes to about 2 000 characters. Nothing is stored anywhere. Past 6 000 characters some mail and chat
+tools cut addresses, so the app warns you and offers **Short link** (`?share=`), which stores the design
+and links to it by id — on the server's disk, which Streamlit Community Cloud wipes on restart, or in a
+secret GitHub gist if a `github_gist_token` (gist scope) is set in the app's secrets.
+
+Whoever opens a link gets **their own copy**: their edits stay with them, yours are unchanged, and a
+later change of yours needs a new link. A damaged or truncated link is reported and the app starts
+normally.
+
+### Protecting a link with a code
+By default *Share this design* makes a **protected link** (`?design=2.…`). The design is encrypted with
+AES-256-GCM under a key derived from an access code by scrypt, so the link — and a short link's stored
+copy on the server or in a gist — holds only ciphertext; not even the project name is readable. The
+colleague who opens it is asked for the code; a wrong code is refused (and a link altered in any way,
+header included, fails the same check), a correct one opens the design as usual.
+
+* **Generate a code** (default): 80 random bits shown as `K7QM-9XRT-4HPW-2DNC`. Case, spaces and dashes
+  do not matter when it is typed, and O/0, I/L/1 are read the same. *New code* makes another.
+* **Choose my own password**: at least 10 characters, case-sensitive; a few unrelated words works well.
+
+Send the code **by a different channel** than the link (link by e-mail, code by Teams, SMS or phone).
+What the protection rests on:
+
+* The code's strength. Whoever holds the link can try codes offline, at their own speed; scrypt only
+  makes each guess slow. A generated code is beyond that; a short password is not — hence the minimum.
+* The two channels staying separate. Link and code in the same message is a plain link.
+* The server. The app decrypts on its server while the design is open, so whoever runs it (on Streamlit
+  Community Cloud, Streamlit) could in principle see it. For data that must stay inside the company,
+  host the app on the company network.
+
+Protected links need the `cryptography` package (in `requirements.txt`). **No code — anonymised data
+only** still makes a plain link: anyone who has it can open the design, and "secret" gists are
+unlisted, not private — keep real field data out of plain links.
+
+## Duplicating
+*Duplicate* on the map toolbar copies whatever is selected — one item, or a shift-click selection —
+and there is the same button in the selected-item panel. With *with wells* ticked a structure brings
+the wells and modules jumpered to it or landed in its slots, so duplicating a template gives a
+template with its wells. Every line **between** copied items comes too; lines to anything outside the
+copy do not, so a duplicated cluster is not wired to the original host until you connect it. The copy
+lands just east of the original, clear of it, and arrives selected so you can drag it straight into
+place. It carries equipment, fluid, reservoir, flow-assurance inputs and tags, independently of the
+original; labels become *A-1 (2)*, *A-1 (3)*; slot assignments follow the copied structure; stored
+seabed profiles are dropped because they describe the old route. Duplicate is undoable.
+
+## Reservoirs and well fluids
+Every well has a main fluid — oil, gas, gas condensate, water injector or gas injector — decided in
+three layers, most specific first: **set on the well**, **inherited from its reservoir**, or
+**classified from its own GOR** using McCain's producing-GOR ranges. The app always shows which layer
+the answer came from, so an inference is never presented as a decision; a well with none of the three
+is marked *not assigned* and left uncoloured rather than being drawn as oil by default.
+
+Reservoirs live under *Reservoirs and well fluids* below the map. A new one starts from typical NCS
+values for its fluid type, to be replaced from the PVT report, and a reservoir whose stated fluid the
+GOR contradicts (a "black oil" at 5 000 Sm³/Sm³) is flagged — that is nearly always a typo, and it
+would drive every flow-assurance number the wrong way.
+
+On the map each well gets a ring in its fluid colour — oil green and gas red as on Sodir's maps,
+condensate amber, water injection blue, gas injection purple — and in *fluid* colour mode every
+production line takes the fluid of the wells upstream of it: all gas draws red, all oil green, oil and
+gas commingled draws as multiphase. Injectors are taken out of the production solve and are not
+flagged for having no production path, since they are fed from the host.
+
+*Copy reservoir PVT to well streams* sets each well's GOR, API, gas gravity, water cut and salinity
+from its reservoir and keeps the well's own rate — unless the well changes between oil and gas, in
+which case the rate is reset and the app says so, because a liquid rate carried across with a gas GOR
+would be out by an order of magnitude. Gas and condensate wells can be entered by **gas rate and
+CGR** in the Flow assurance tab. Reservoir CO₂, H₂S and salinity seed the production-chemistry screen.
 
 ## Production chemistry
 The Flow assurance tab ends with a production-chemistry screen. It sizes **MEG and methanol side by
@@ -216,13 +314,13 @@ When deploying to Streamlit Community Cloud, upload the whole folder — `test_f
 |---|---|
 | geo / catalog / network / schedule / cost | 29 / 19 / 55 / 35 / 22 |
 | well (IPR/VLP) / cost spreadsheet IO / cases / report | 22 / 12 / 19 / 7 |
-| production chemistry | 52 |
+| production chemistry / reservoirs and well fluids / map tools and sharing | 52 / 52 / 66 |
 | tie-in screening / design basis / viability | 21 / 21 / 14 |
-| map bridge | 40 |
+| map bridge (incl. duplicate) | 52 |
 | ncs / import / grid surfaces / flow assurance | 23 / 43 / 83 / 43 |
 | multiphase / thermal / bathymetry | 31 / 25 / 37 |
-| JS core logic / component protocol simulation | 49 / 44 |
-| Headless UI (stub Streamlit, scripted interactions) | 73 |
+| JS core logic / component protocol simulation | 61 / 66 |
+| Headless UI (stub Streamlit, scripted interactions) | 88 |
 
 The protocol test runs the real component script against a fake DOM and fake Leaflet; the UI test
 executes `tieback_app.py` with a stub Streamlit. Neither replaces a check in a real browser.
@@ -250,6 +348,9 @@ version behind fails the build with an error in the app's own code rather than i
 - Datum shift uses EPSG:1133 (~10 m). Sodir's WGS84 layers use ESRI ED_1950_To_WGS_1984_18, so ED50
   layouts can sit a few metres off the NCS overlays — fine for screening, not for survey work.
 - ED50 layouts are converted to WGS84 for the map and back on every map edit.
+- Map tools are checked headlessly against a fake Leaflet, not in a real browser: the new base maps and
+  URL layers depend on the services being reachable from your network, and a corporate proxy may block
+  some of them.
 - A tag filter belongs to the layout it was built on and is cleared when another project, template or
   concept is loaded. A filter that matches nothing shows a *Clear tag filter* button rather than
   silently leaving the map blank.

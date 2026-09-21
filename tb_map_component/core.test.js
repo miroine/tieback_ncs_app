@@ -141,6 +141,56 @@ check("a host with no specific symbol still draws as a platform", () => {
   return C.nodeSvg("host", "", false, 1).html === C.nodeSvg("jacket", "", false, 1).html;
 });
 
+check("a well with a known fluid gets a ring in that colour", () => {
+  const plain = C.nodeSvg("xt", "", false, 1).html;
+  const gas = C.nodeSvg("xt", "", false, 1, "#EB0037").html;
+  return plain.indexOf("#EB0037") < 0 && gas.indexOf('stroke="#EB0037"') >= 0;
+});
+check("the ring grows the canvas instead of shrinking the tree", () => {
+  const plain = C.nodeSvg("xt", "", false, 1);
+  const ringed = C.nodeSvg("xt", "", false, 1, "#1E7A3C");
+  // the tree's bore circle is the same radius either way
+  const bore = (h) => Number((h.match(/<circle cx="[^"]+" cy="[^"]+" r="([^"]+)"\/>/) || [])[1]);
+  return ringed.size > plain.size && Math.abs(bore(ringed.html) - bore(plain.html)) < 1e-6;
+});
+check("no ring for a well nobody has characterised", () => {
+  // the halo is the only element drawn with a 3 px stroke
+  return C.nodeSvg("xt", "", false, 1, "").html.indexOf('stroke-width="3"') < 0
+    && C.nodeSvg("xt", "", false, 1, "#1E7A3C").html.indexOf('stroke-width="3"') >= 0;
+});
+
+check("destination is exact along a bearing", () => {
+  const d = C.destination(60, 2, 90, 1000);
+  return Math.abs(C.haversine([60, 2], d) - 1000) < 1e-6;
+});
+check("a circle ring encloses pi r² on the ground", () => {
+  const a = C.geodesicArea(C.circleRing([60, 2], 1000, 360));
+  return Math.abs(a - Math.PI * 1e6) / (Math.PI * 1e6) < 1e-3;
+});
+check("a circle at 60°N is not a screen circle — it is wider in longitude", () => {
+  const ring = C.circleRing([60, 2], 5000, 4);           // N, E, S, W
+  const dLat = ring[0][0] - 60, dLon = ring[1][1] - 2;
+  return dLon > dLat * 1.9;                                // 1/cos(60°) = 2
+});
+check("geodesic area is orientation-independent", () => {
+  const ring = [[60, 2], [60, 2.1], [60.1, 2.1], [60.1, 2]];
+  return Math.abs(C.geodesicArea(ring) - C.geodesicArea(ring.slice().reverse())) < 1e-6;
+});
+check("area of fewer than three points is zero", () => C.geodesicArea([[60, 2], [60, 3]]) === 0);
+check("formatArea picks m², ha or km²",
+  () => C.formatArea(500) === "500 m²" && C.formatArea(25000) === "2.5 ha" && C.formatArea(3141592) === "3.14 km²");
+check("tile bounds at zoom 0 cover the Mercator world", () => {
+  const b = C.tileBounds3857(0, 0, 0);
+  return Math.abs(b[0] + 20037508.342789244) < 1e-6 && Math.abs(b[3] - 20037508.342789244) < 1e-6;
+});
+check("ArcGIS export URL for a map service", () => {
+  const u = C.arcgisExportUrl("https://h/arcgis/rest/services/A/MapServer/", 3, 2, 2, "0,1");
+  return u.indexOf("/MapServer/export?bbox=") > 0 && u.indexOf("bboxSR=3857") > 0
+    && u.indexOf("f=image") > 0 && u.indexOf("layers=show:0%2C1") > 0;
+});
+check("ArcGIS export URL for an image service uses exportImage", () =>
+  C.arcgisExportUrl("https://h/arcgis/rest/services/D/ImageServer", 0, 0, 1).indexOf("/ImageServer/exportImage?") > 0);
+
 console.log("core.test.js: " + pass + " passed, " + fail.length + " failed");
 fail.forEach((f) => console.log("  FAIL " + f));
 process.exit(fail.length ? 1 : 0);

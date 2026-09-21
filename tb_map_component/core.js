@@ -147,8 +147,8 @@
 
   /** Plan-view symbol for one item. Shapes are schematic, not to scale — the
    *  true footprint is drawn separately when the map is zoomed in. */
-  function symbolShape(symbol, W) {
-    const c = W / 2, p = 4, z = W - 2 * p, r = z / 2;
+  function symbolShape(symbol, W, inset) {
+    const c = W / 2, p = inset || 4, z = W - 2 * p, r = z / 2;
     const S = {};
     // Christmas tree in plan: guide frame, wellhead bore, production and annulus wings
     // with their valve blocks, and the tree cap over the bore.
@@ -274,18 +274,31 @@
     return S[symbol] || S.plet;
   }
 
-  function nodeSvg(symbol, severity, selected, scale) {
+  // `accent` is the well's main-fluid colour (oil green, gas red, condensate amber,
+  // injectors blue/purple). It is drawn as a ring round the symbol so the fluid
+  // reads at a glance without recolouring the equipment itself.
+  function nodeSvg(symbol, severity, selected, scale, accent) {
     const s = NODE_STYLE[symbol] || NODE_STYLE.plet;
     const k = Math.max(0.2, Math.min(4, scale || 1));
-    const pad = 4, W = Math.round(s.size * k) + pad * 2;
+    // With a fluid ring the canvas grows rather than the symbol shrinking, so a
+    // ringed tree is the same size as a plain one. The ring clears the guide
+    // frame's corners when pad > 0.17·size + ~2 px, hence the scaling margin.
+    const base = Math.round(s.size * k);
+    const pad = accent ? Math.max(6, 0.19 * base + 2.5) : 4;
+    const W = Math.round(base + pad * 2);
+    const inset = (W - base) / 2;
     const stroke = severity ? (SEVERITY_COLOR[severity] || "#fff") : "#FFFFFF";
     const sw = severity ? 2.5 : 1.2;
     const ring = selected
       ? '<rect x="1" y="1" width="' + (W - 2) + '" height="' + (W - 2) + '" fill="none" stroke="#EB0037" stroke-width="1.5" stroke-dasharray="3 2"/>'
       : "";
+    const halo = accent
+      ? '<circle cx="' + (W / 2) + '" cy="' + (W / 2) + '" r="' + (W / 2 - 1.8) + '" fill="none" stroke="' + accent +
+        '" stroke-width="3"/>'
+      : "";
     return {
       html: '<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + W + '" viewBox="0 0 ' + W + " " + W +
-        '"><g fill="' + s.color + '" stroke="' + stroke + '" stroke-width="' + sw + '">' + symbolShape(symbol, W) + "</g>" + ring + "</svg>",
+        '">' + halo + '<g fill="' + s.color + '" stroke="' + stroke + '" stroke-width="' + sw + '">' + symbolShape(symbol, W, inset) + "</g>" + ring + "</svg>",
       size: W,
     };
   }
@@ -379,6 +392,60 @@
     return [[s, w], [N, e]];
   }
 
+  // ── sketch geometry: measure, circle, polygon ──
+  const R_EARTH = 6371008.8;
+
+  /** Point at `dist_m` along `bearing_deg` from (lat, lon), on the sphere. */
+  function destination(lat, lon, bearing_deg, dist_m) {
+    const r = Math.PI / 180, d = dist_m / R_EARTH, b = bearing_deg * r, p1 = lat * r, l1 = lon * r;
+    const p2 = Math.asin(Math.sin(p1) * Math.cos(d) + Math.cos(p1) * Math.sin(d) * Math.cos(b));
+    const l2 = l1 + Math.atan2(Math.sin(b) * Math.sin(d) * Math.cos(p1), Math.cos(d) - Math.sin(p1) * Math.sin(p2));
+    return [p2 / r, ((l2 / r + 540) % 360) - 180];
+  }
+
+  /** Ring approximating a circle of `radius_m` — a true circle on the ground,
+   *  which on a Mercator map is not a screen circle at 60°N. */
+  function circleRing(center, radius_m, n) {
+    const k = n || 72, out = [];
+    for (let i = 0; i < k; i++) out.push(destination(center[0], center[1], (360 * i) / k, radius_m));
+    return out;
+  }
+
+  /** Area of a lat/lon ring on the sphere, m² (Chamberlain & Duquette 2007). */
+  function geodesicArea(ring) {
+    if (!ring || ring.length < 3) return 0;
+    const r = Math.PI / 180;
+    let s = 0;
+    for (let i = 0; i < ring.length; i++) {
+      const a = ring[i], b = ring[(i + 1) % ring.length];
+      s += (b[1] - a[1]) * r * (2 + Math.sin(a[0] * r) + Math.sin(b[0] * r));
+    }
+    return Math.abs(s * R_EARTH * R_EARTH / 2);
+  }
+
+  function formatArea(m2) {
+    if (m2 >= 1e6) return (m2 / 1e6).toFixed(m2 >= 1e8 ? 0 : 2) + " km²";
+    if (m2 >= 1e4) return (m2 / 1e4).toFixed(1) + " ha";
+    return Math.round(m2) + " m²";
+  }
+
+  /** Web-Mercator bounds of an XYZ tile, metres — for ArcGIS dynamic `export`. */
+  function tileBounds3857(x, y, z) {
+    const half = 20037508.342789244, size = (2 * half) / Math.pow(2, z);
+    const xmin = -half + x * size, ymax = half - y * size;
+    return [xmin, ymax - size, xmin + size, ymax];
+  }
+
+  /** One 256 px tile from an ArcGIS MapServer/ImageServer that has no tile cache. */
+  function arcgisExportUrl(base, x, y, z, layers) {
+    const b = tileBounds3857(x, y, z);
+    const root = String(base).replace(/\/+$/, "").replace(/\/(export|exportImage)$/, "");
+    const isImage = /\/ImageServer$/i.test(root);
+    const q = "bbox=" + b.join(",") + "&bboxSR=3857&imageSR=3857&size=256,256&format=png32&transparent=true&f=image" +
+      (layers ? "&layers=show:" + encodeURIComponent(layers) : "");
+    return root + (isImage ? "/exportImage?" : "/export?") + q;
+  }
+
   // Union of imported-grid bounds — used to frame the map when no layout is drawn yet.
   function rasterBbox(rasters) {
     const list = (rasters || []).filter(function (r) { return r && r.bounds && r.bounds.length === 2; });
@@ -396,5 +463,6 @@
     makeNonce, eventFactory, edgeAllowed, nodesById, edgeLatLngs, insertVertex, removeVertex,
     moveVertex, haversine, polylineLength, edgeStyle, nodeSvg, symbolShape, parallelOffsets,
     offsetLatLngs, footprintPolygon, jumperGroup, formatLength, escapeHtml, bboxOf, rasterBbox,
+    destination, circleRing, geodesicArea, formatArea, tileBounds3857, arcgisExportUrl,
   };
 });
