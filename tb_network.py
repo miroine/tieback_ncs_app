@@ -69,6 +69,14 @@ class LayoutSettings:
     smooth_samples: int = 10             # points per span when a route is smoothed
 
 
+PSI_PER_BAR = 14.503774
+SAFETY_ZONE_M = 500.0      # petroleum-activity safety zone round a surface installation (NCS)
+
+
+def bar(psi: float) -> float:
+    return psi / PSI_PER_BAR
+
+
 # Mirrors tb_fluids.INJECTOR_FLUIDS; tb_network sits below tb_fluids and cannot import it.
 INJECTOR_WELL_FLUIDS = ("water injector", "gas injector")
 
@@ -665,7 +673,9 @@ class Layout:
                 if self.nodes[nxt].hipps:
                     protected = True
             if sitp > cat.get(self.nodes[w].item_id).rating_psi:
-                F.append(Finding("error", "RATING", f"SITP {sitp:.0f} psi exceeds XT rating.", w))
+                F.append(Finding("error", "RATING",
+                                 f"Shut-in pressure {bar(sitp):.0f} bar exceeds the tree rating "
+                                 f"{bar(cat.get(self.nodes[w].item_id).rating_psi):.0f} bar.", w))
         for eid_or_nid, demand in rating_demand.items():
             obj = self.edges.get(eid_or_nid) or self.nodes.get(eid_or_nid)
             it = cat.get(obj.item_id)
@@ -673,9 +683,23 @@ class Layout:
                 continue
             if demand > it.rating_psi:
                 F.append(Finding("error", "RATING",
-                                 f"Upstream SITP {demand:.0f} psi exceeds {it.name} rating "
-                                 f"{it.rating_psi:.0f} psi (full-rated design). Add HIPPS or upgrade.",
+                                 f"Upstream shut-in pressure {bar(demand):.0f} bar exceeds {it.name} rating "
+                                 f"{bar(it.rating_psi):.0f} bar. Make the system fully rated (upgrade this "
+                                 f"item) or protect it with HIPPS upstream — see Pressure protection.",
                                  eid_or_nid))
+
+        # subsea equipment inside a host's safety zone
+        for h in hosts:
+            hn = self.nodes[h]
+            for nid, nd in self.nodes.items():
+                if nid == h or self.kind(nid) == "host":
+                    continue
+                d = tb_geo.geodesic_distance(hn.lat, hn.lon, nd.lat, nd.lon)
+                if d <= SAFETY_ZONE_M:
+                    F.append(Finding("info", "SAFETY_ZONE",
+                                     f"Inside the 500 m safety zone of {hn.label or h} ({d:.0f} m) — "
+                                     f"installation and intervention need the host operator's consent "
+                                     f"and simultaneous-operations planning.", nid))
 
         # control and power
         if hosts:
@@ -695,6 +719,67 @@ class Layout:
                         or self.nodes[nid].item_id == "sub_power") and nid not in powered:
                     F.append(Finding("warning", "NO_POWER", "Active subsea unit has no power supply path.", nid))
         return F
+
+    # ── pressure protection: fully rated or HIPPS ──
+    def pressure_protection(self) -> List[dict]:
+        """Per producing well: is the system downstream rated for the shut-in pressure?
+
+        Returns one row per well with its SITP (bar), the lowest-rated item on its
+        path to the host (hosts excluded — their receiving facilities are rated by
+        the host), whether HIPPS already protects it, and a recommendation:
+
+        * ``fully rated`` — every item is rated at or above the shut-in pressure;
+        * ``HIPPS in place`` — a HIPPS upstream of every under-rated item;
+        * ``HIPPS or fully rated`` — something is under-rated and unprotected.
+          `hipps_node` names where HIPPS would protect the most (the first
+          structure the well produces into), and `upgrade` lists what a fully
+          rated design would have to change instead.
+        """
+        cat = self.catalog
+        hosts = [n for n in self.nodes if self.kind(n) == "host"]
+        rows = []
+        for w, wn in self.nodes.items():
+            if self.kind(w) != "well":
+                continue
+            if str(wn.attrs.get("well_fluid", "")).lower() in INJECTOR_WELL_FLUIDS:
+                continue
+            path = self.path_to_host(w) if hosts else None
+            if path is None:
+                continue
+            node_path, edge_path = path
+            sitp = wn.sitp_psi
+            items, protected, under, hipps_at = [], bool(wn.hipps), [], None
+            if wn.hipps:
+                hipps_at = w
+            for i, eid in enumerate(edge_path):
+                for oid in (eid, node_path[i + 1]):
+                    obj = self.edges.get(oid) or self.nodes.get(oid)
+                    it = cat.get(obj.item_id)
+                    if it.category == "host":
+                        continue
+                    items.append((oid, it.rating_psi))
+                    if it.rating_psi < sitp and not protected:
+                        under.append(oid)
+                nxt = node_path[i + 1]
+                if self.nodes[nxt].hipps and not protected:
+                    protected, hipps_at = True, nxt
+            weakest = min(items, key=lambda x: x[1]) if items else (None, 0.0)
+            first_struct = next((n for n in node_path[1:] if self.kind(n) in
+                                 ("template", "manifold", "plem", "plet", "ssiv", "boosting")), None)
+            if sitp <= 0:
+                verdict = "shut-in pressure not set"
+            elif not under and not any(r < sitp for _, r in items):
+                verdict = "fully rated"
+            elif not under:
+                verdict = "HIPPS in place"
+            else:
+                verdict = "HIPPS or fully rated"
+            rows.append(dict(well=w, sitp_bar=bar(sitp), weakest=weakest[0],
+                             weakest_rating_bar=bar(weakest[1]) if weakest[0] else float("nan"),
+                             hipps_at=hipps_at, verdict=verdict, unprotected=under,
+                             hipps_node=first_struct if verdict == "HIPPS or fully rated" else None,
+                             upgrade=sorted(set(under))))
+        return rows
 
     # ── quantity take-off ──
     def quantities(self) -> List[dict]:

@@ -36,8 +36,33 @@ decision from you before they can start.
 |---|---|---|---|
 | 12 | FieldVista economics link | Small once unblocked | Needs `fp_economics.py` and one case YAML from you. Turns the CAPEX hand-off into a real NPV/break-even run instead of a draft format. |
 
+## Done in v0.20.0
+
+| # | Item | What it gives you |
+|---|---|---|
+| 13 | Concept optimiser | Builds the variants around the concept on screen — wells, line size, loop, boosting — costs, schedules, solves and values each, and keeps the ones nothing beats on both CAPEX and NPV. Infeasible variants stay in the table with the reason. |
+| 14 | Production profile and recovery | Volumetrics and a recovery-factor range per drainage strategy, EUR, plateau-then-decline per reservoir capped by host capacity, and the well count the plateau and the drainage area need. |
+| 15 | OPEX, tariff and abandonment | Life-cycle cash flow: prices, fixed and variable OPEX, host tariff, chemicals from the inhibitor sizing, abandonment, optional NCS tax → NPV, IRR, payback, break-even, unit technical cost. |
+| 16 | Sensitivity and tornado | Each input moved to its low and high value, ranked by how far NPV travels. |
+| — | Boosting in the hydraulics | A boosting or compression station now lifts the pressure in the solve (80 bar default, per-node override), so the optimiser can see what it buys — it used to cost money and change nothing. |
+
+## What I would build next (ranked)
+
+Ranked by what they change about a decision, not by how hard they are.
+
+| # | Item | Effort | Why it matters |
+|---|---|---|---|
+| 13b | **Host choice in the search** — the optimiser varies the layout but keeps the host. Fold the tie-in screening into it so a different host is one more variant. | Medium | The host is usually the biggest single decision, and it is the one the tie-in screening already ranks. |
+| 14b | **Phased development in the profile** — wells coming on stream by phase and campaign, instead of all at first production. | Small | Phase 2 is normally where the value argument lives. |
+| 17 | **OLGA / PIPESIM hand-off** — export the network, geometry, seabed profile and fluid definition in a form those tools can read, and a checklist of what the screening could not answer. | Medium | Makes the hand-off to the real flow-assurance study a button rather than retyping. |
+| 18 | **Installation weather modelling** — replace the single weather factor with a monthly workability curve per spread, so the schedule shows the cost of missing a season. | Medium | Season risk is usually the largest schedule uncertainty on the NCS, and it is currently one number. |
+| 19 | **Design review pack** — a one-page A3 summary (layout picture, key numbers, checks, decisions still open) as PDF/PowerPoint, beside the Word report. | Small | The format a concept is actually reviewed in. |
+| 20 | **Change log per concept** — what changed between two saved concepts, in words ("line 10″→12″, host moved 4 km, boosting added"), with the cost and schedule delta beside it. | Small | Makes the Cases tab tell a story instead of showing two columns of numbers. |
+
 ## Standing constraints
 
 - Default cost rates are indicative placeholders until item 2 is filled in with your own data.
 - Flow assurance is steady-state screening. OLGA/LedaFlow/PIPESIM stays the design tool.
 - Nothing here has been run in a real browser by me; UI checks are headless.
+- The app is a prototype by Merouane Hamdani for early-phase screening only — not for commercial
+  projects. Source-available under the attribution / non-commercial terms in LICENSE.

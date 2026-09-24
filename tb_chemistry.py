@@ -297,6 +297,86 @@ class ChemistryInputs:
     mercury_expected: bool = False
     naphthenate_risk: bool = False                 # high TAN crude
     tan_mg_koh_g: Optional[float] = None
+    mercury_ug_nm3: Optional[float] = None         # mercury in the gas, µg/Nm³
+
+
+# The limit each threat is judged against — shown beside the result so a reader can
+# see why it scored as it did. They are screening thresholds used by this app, not
+# design criteria; the operator's own criteria replace them.
+LIMITS = {
+    "Hydrates": "low ≥ 3 °C margin to the hydrate curve · medium 0–3 °C · high < 0 °C",
+    "Wax deposition": "low: coldest point stays above WAT · medium: up to 10 °C below WAT · high: > 10 °C below",
+    "Gelling on shutdown": "high when the pour point is above seabed temperature",
+    "Asphaltenes": "at risk: > 30° API, GOR > 800 scf/stb and > 0.5 wt % asphaltenes · "
+                   "high if the pressure also falls below the onset pressure",
+    "Scale": "high: seawater injection without sulphate removal · medium: Ba > 50 mg/l or "
+             "salinity > 15 wt %",
+    "Emulsions": "low < 5 % water cut · medium ≥ 30 % · high at 30–70 % water cut with < 30° API",
+    "Internal corrosion": "carbon steel: low < 0.5 mol % CO₂ · medium 0.5–2 mol % · high ≥ 2 mol % CO₂ "
+                          "or ≥ 100 ppm H₂S · CRA/clad: low",
+    "Sour service": "medium: any H₂S · high ≥ 100 ppm · ISO 15156 sour when H₂S partial pressure ≥ 0.3 kPa",
+    "Reservoir souring": "medium when seawater is injected into a field that is sweet today",
+    "Sand production and erosion": "high whenever sand is expected",
+    "Under-deposit and dead-leg corrosion": "low ≤ 30 km tie-back · medium > 30 km",
+    "Naphthenate and soap formation": "medium when TAN > 0.5 mg KOH/g",
+    "Mercury": "low < 1 µg/Nm³ · medium 1–100 µg/Nm³ · high > 100 µg/Nm³ (LNG/cryogenic plants "
+               "need < 0.01 µg/Nm³)",
+}
+
+MERCURY_MEDIUM_UG_NM3 = 1.0
+MERCURY_HIGH_UG_NM3 = 100.0
+H2S_SOUR_KPA = 0.3                    # ISO 15156 / NACE MR0175 threshold partial pressure
+CO2_PP_MEDIUM_BAR = 0.5 / 14.503774   # classic 0.5 psia / 30 psia rules of thumb
+CO2_PP_HIGH_BAR = 30.0 / 14.503774
+
+
+def contaminants(co2_mol_pct: Optional[float], h2s_ppm: Optional[float], mercury_ug_nm3: Optional[float],
+                 pressure_bara: float) -> List[dict]:
+    """CO₂, H₂S and mercury against their limits at a design pressure (normally the shut-in pressure).
+
+    Returns rows {item, value, status (ok|action|missing), limit, note}. Partial
+    pressures are mole fraction × pressure — the quantity corrosion and sour-service
+    limits are written in.
+    """
+    rows = []
+    p = max(float(pressure_bara or 0.0), 1.0)
+    if co2_mol_pct is None:
+        rows.append(dict(item="CO₂ content", value="not entered", status="missing",
+                         limit="pCO₂ < 0.03 bar low · 0.03–2 bar corrosive · > 2 bar severe",
+                         note="Decides carbon steel versus CRA — get the gas analysis"))
+    else:
+        pp = co2_mol_pct / 100.0 * p
+        sev = ("severe — CRA or clad pipe likely" if pp > CO2_PP_HIGH_BAR else
+               "corrosive — inhibited carbon steel with corrosion allowance" if pp > CO2_PP_MEDIUM_BAR else
+               "low")
+        rows.append(dict(item="CO₂ content", value=f"{co2_mol_pct:.2f} mol % → pCO₂ {pp:.2f} bar at {p:.0f} bara",
+                         status="action" if pp > CO2_PP_MEDIUM_BAR else "ok",
+                         limit="pCO₂ < 0.03 bar low · 0.03–2 bar corrosive · > 2 bar severe", note=sev))
+    if h2s_ppm is None:
+        rows.append(dict(item="H₂S content", value="not entered", status="missing",
+                         limit=f"sour service (ISO 15156) when pH₂S ≥ {H2S_SOUR_KPA} kPa",
+                         note="Governs every wetted material, not just the pipe"))
+    else:
+        pp_kpa = h2s_ppm * 1e-6 * p * 100.0
+        sour = pp_kpa >= H2S_SOUR_KPA
+        rows.append(dict(item="H₂S content",
+                         value=f"{h2s_ppm:.0f} ppm → pH₂S {pp_kpa:.2f} kPa at {p:.0f} bara",
+                         status="action" if sour else "ok",
+                         limit=f"sour service (ISO 15156) when pH₂S ≥ {H2S_SOUR_KPA} kPa",
+                         note=("sour service — qualify all wetted materials to ISO 15156 and confirm the host "
+                               "accepts a sour stream") if sour else "sweet service"))
+    if mercury_ug_nm3 is None:
+        rows.append(dict(item="Mercury", value="not entered", status="missing", limit=LIMITS["Mercury"],
+                         note="Sample at the wellhead; matters most for export to LNG or cryogenic plants"))
+    else:
+        hi = mercury_ug_nm3 > MERCURY_HIGH_UG_NM3
+        med = mercury_ug_nm3 >= MERCURY_MEDIUM_UG_NM3
+        rows.append(dict(item="Mercury", value=f"{mercury_ug_nm3:g} µg/Nm³",
+                         status="action" if med else "ok", limit=LIMITS["Mercury"],
+                         note=("mercury removal unit likely; HSE controls for opening equipment" if hi else
+                               "confirm the host and export spec accept it; aluminium heat exchangers at risk"
+                               if med else "below the screening threshold")))
+    return rows
 
 
 def _row(issue, risk, basis, why, mitigation, data_needed=""):
@@ -524,7 +604,16 @@ def screen(fluid, inputs: ChemistryInputs, min_temp_c: float, arrival_temp_c: fl
             "and the water-treatment train — a topsides problem created by a subsea decision.",
             "Acid or naphthenate inhibitor injection upstream of the first separation stage.",
             "TAN, ARN acid content, calcium in the formation water"))
-    if inputs.mercury_expected:
+    hg = inputs.mercury_ug_nm3
+    if hg is not None and hg >= MERCURY_MEDIUM_UG_NM3:
+        rows.append(_row(
+            "Mercury", HIGH if hg > MERCURY_HIGH_UG_NM3 else MEDIUM, f"{hg:g} µg/Nm³ in the gas",
+            "Attacks aluminium heat exchangers downstream, adsorbs on steel and is an HSE issue "
+            "for anyone opening equipment.",
+            "Confirm the host and the export specification accept it; plan a mercury removal "
+            "unit if the gas goes to an LNG or cryogenic plant.",
+            "Mercury speciation in gas and condensate"))
+    elif inputs.mercury_expected:
         rows.append(_row(
             "Mercury", MEDIUM, "mercury expected in the reservoir fluid",
             "Attacks aluminium heat exchangers downstream and is an HSE issue for anyone "
@@ -533,6 +622,8 @@ def screen(fluid, inputs: ChemistryInputs, min_temp_c: float, arrival_temp_c: fl
             "an LNG or cryogenic plant.",
             "Mercury content by sampling at the wellhead"))
 
+    for r in rows:
+        r["limit"] = LIMITS.get(r["issue"], "")
     rows.sort(key=lambda r: RISK_ORDER.get(r["risk"], 5))
     return rows
 

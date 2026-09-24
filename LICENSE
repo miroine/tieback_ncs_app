@@ -1,21 +1,78 @@
-MIT License
+TieBack Studio — Source-Available Licence (attribution required, non-commercial)
 
-Copyright (c) 2026 Merouane Hamdani
+Copyright © 2026 Merouane Hamdani. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+TieBack Studio was designed and written by Merouane Hamdani. This licence lets
+other people read, run and learn from the code while keeping that authorship
+attached to it.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. DEFINITIONS
+   "Software" means this source code, its documentation and the files shipped
+   with it. "You" means anyone exercising the permissions below.
+   "Non-commercial use" means use for study, evaluation, teaching, research or
+   internal assessment that is not part of, and does not support, a commercial
+   project, product or service, and for which no fee is charged.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+2. PERMISSION
+   You may use, copy, modify and share the Software, and share your
+   modifications, for non-commercial use, provided that every condition in
+   section 3 is met.
+
+3. CONDITIONS
+   a. Attribution. Any copy, fork, excerpt or derivative — including code taken
+      into another program, and including screenshots, figures or numbers used
+      in a document or presentation — must clearly credit:
+          "TieBack Studio — created by Merouane Hamdani"
+      in a place a reader will see it (an About screen, a README, a report
+      footer, a slide credit).
+   b. This licence. This file, unchanged, must travel with every copy or
+      substantial portion of the Software.
+   c. Changes marked. Modified files must carry a prominent notice saying that
+      they were changed, by whom and when, so the author is not credited with
+      someone else's changes.
+   d. No misrepresentation. You may not present the Software, or anything
+      derived from it, as your own work, nor as a product of any company or
+      organisation.
+
+4. COMMERCIAL USE
+   Commercial use of the Software — including use on, or in support of, a
+   commercial project; use inside a product or service that is sold or
+   licensed; and consultancy delivered with it — requires the author's prior
+   written permission. Ask.
+
+5. PURPOSE AND FITNESS
+   The Software is a PROTOTYPE for early-phase concept planning and screening.
+   It is not engineering software, and it is not verified, validated or
+   qualified for any engineering purpose. It must not be used on commercial
+   projects, nor as a basis for investment, procurement, design, operational or
+   safety decisions. Its results come from simplified correlations and
+   indicative placeholder rates and must be confirmed with appropriate
+   engineering tools and the operator's own data before they are relied on.
+
+6. NO WARRANTY, NO LIABILITY
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGE, LOSS OR OTHER LIABILITY, WHETHER IN
+   CONTRACT, TORT OR OTHERWISE, ARISING FROM OR IN CONNECTION WITH THE SOFTWARE
+   OR ITS USE, INCLUDING ANY DECISION TAKEN ON THE BASIS OF ITS OUTPUT.
+
+7. THIRD-PARTY MATERIAL
+   The Software reads public data and map services published by others — among
+   them Sodir (FactMaps), EMODnet Bathymetry, GEBCO, Kartverket, OpenStreetMap,
+   OpenSeaMap and Esri. That material is theirs, is not covered by this
+   licence, and remains subject to the terms of whoever publishes it. TieBack
+   Studio is an independent personal project and is not affiliated with,
+   endorsed by, or representing any of these organisations, or Equinor.
+
+8. TERMINATION
+   Permission ends automatically if you breach any condition, and is restored
+   once the breach is corrected.
+
+Questions, or a request for commercial permission: contact Merouane Hamdani.
+
+Note from the author's tooling: this text was drafted to state the intent
+above in plain words. It has not been reviewed by a lawyer. If the Software is
+ever published more widely, take legal advice, or adopt a drafted licence with
+the same effect — PolyForm Noncommercial 1.0.0 (non-commercial use) alongside
+an attribution notice is the usual choice.

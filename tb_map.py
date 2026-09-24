@@ -66,6 +66,7 @@ class DisplaySettings:
     basemap: str = "Ocean (Esri)"                                   # the base map last chosen
     bookmarks: List[dict] = field(default_factory=list)            # named views (tb_mapextras)
     custom_layers: List[dict] = field(default_factory=list)        # maps added by URL
+    show_safety_zones: bool = True                                  # 500 m zone round each host
 
     def __post_init__(self):
         if self.color_mode not in COLOR_MODES:
@@ -183,10 +184,27 @@ def build_payload(layout: "net.Layout", findings=None, display: Optional["Displa
                   severity=sev.get(e.edge_id, "")) for e in layout.edges.values()]
     import tb_mapextras as mx
     annotations = [dict(s, measure=mx.describe(s)) for s in mx.sketches(layout)]
-    return {"nodes": nodes, "edges": edges, "annotations": annotations,
+    zones = safety_zones(layout) if display.show_safety_zones else []
+    return {"nodes": nodes, "edges": edges, "annotations": annotations, "safety_zones": zones,
             "display": {"symbol_scale": float(display.symbol_scale), "line_scale": float(display.line_scale),
                         "thickness_by_diameter": bool(display.thickness_by_diameter),
                         "color_mode": display.color_mode, "basemap": display.basemap}}
+
+
+def safety_zones(layout) -> List[dict]:
+    """The 500 m safety zone round every host, WGS84, with the subsea items inside it."""
+    import tb_geo
+    out = []
+    for h, hn in layout.nodes.items():
+        if layout.kind(h) != "host":
+            continue
+        inside = [nid for nid, nd in layout.nodes.items()
+                  if nid != h and layout.kind(nid) != "host"
+                  and tb_geo.geodesic_distance(hn.lat, hn.lon, nd.lat, nd.lon) <= net.SAFETY_ZONE_M]
+        la, lo = to_display(layout, hn.lat, hn.lon)
+        out.append(dict(host=h, label=hn.label or h, center=[la, lo], radius_m=net.SAFETY_ZONE_M,
+                        inside=inside))
+    return out
 
 
 def build_palette(catalog) -> dict:

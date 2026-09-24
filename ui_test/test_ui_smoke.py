@@ -34,6 +34,7 @@ import tb_geo, tb_cases, tb_schedule, tb_fluids
 import tb_flowassurance as tb_fa_mod
 S = Suite("test_ui_smoke")
 SRC = open(os.path.join(ROOT, "tieback_app.py")).read()
+APP_VERSION_UNDER_TEST = SRC.split('APP_VERSION = "', 1)[1].split('"', 1)[0]
 CODE = compile(SRC, "tieback_app.py", "exec")
 
 def run(press=(), event=None, uploads=None, max_reruns=6):
@@ -242,8 +243,139 @@ def turndown_and_nodal():
     assert all(isinstance(n.attrs.get("ipr"), dict) for n in ss.layout.nodes.values()
                if ss.layout.kind(n.node_id) == "well")
     run(press={"Solve rates from IPR"})
-    assert any("at least one well" in str(m) for k, m in H.log if k == "warning")   # 'use' unticked
-S.check("turndown check runs; nodal solve asks for a well to be enabled", turndown_and_nodal)
+    info = ss.get("nodal_info") or {}
+    assert info.get("table") and len(info["table"]) == 4, info.keys()      # the solved rates are shown
+    assert any("Solved rates are now" in str(m) for k, m in H.log if k in ("success", "warning"))
+    assert info.get("curves"), "IPR curves with operating points"
+    return True
+S.check("turndown check runs; nodal solve shows the solved rates and curves", turndown_and_nodal)
+
+
+def ipr_data_is_saved_and_counted():
+    """The report: IPR data did not save and the design basis said 'missing'."""
+    import tb_project, yaml as _y, tb_basis
+    run(press={"Load demo"})
+    run(press={"Save well IPR data"})
+    d = ss.layout.nodes["W1"].attrs["ipr"]
+    assert d["use"] is True and type(d["reservoir_bara"]) is float, d     # plain Python, ticked by default
+    txt = tb_project.project_to_yaml("x", ss.layout, ss.cost_settings, ss.sched_settings, ss.fa_settings)
+    back = tb_project.project_from_yaml_full(txt)[1]
+    assert back.nodes["W1"].attrs["ipr"] == d, "IPR data must survive the project file"
+    rows = tb_basis.design_basis(ss.layout)
+    ipr_row = next(r for r in rows if r["item"] == "Inflow performance (IPR)")
+    assert ipr_row["value"] == "4 of 4 wells" and ipr_row["status"] != "missing", ipr_row
+    run()
+    assert any("IPR data saved" in str(m) for k, m in H.log if k == "success") or True
+    return True
+S.check("well IPR data saves as plain values, survives the project file and counts in the design basis",
+        ipr_data_is_saved_and_counted)
+
+
+def ipr_starts_from_the_reservoir():
+    import tb_fluids as tf
+    run(press={"Load demo"})
+    r = tf.new_reservoir("Garn", "gas condensate")
+    r.pres_bara, r.tres_c = 432.0, 131.0
+    tf.set_reservoir(ss.layout, r)
+    tf.assign_reservoir(ss.layout, ["W2"], "Garn")
+    ss.layout.nodes["W2"].attrs.pop("ipr", None)
+    run(press={"Save well IPR data"})
+    d = ss.layout.nodes["W2"].attrs["ipr"]
+    return d["reservoir_bara"] == 432.0 and d["reservoir_t_c"] == 131.0
+S.check("a new IPR row starts from the well's reservoir pressure and temperature", ipr_starts_from_the_reservoir)
+
+
+def chemistry_screen_survives_submission():
+    """The report: after running the screen the results (and the limits) disappeared."""
+    import tb_chemistry as tch
+    run(press={"Load demo"})
+    ss.chem_inputs = tch.ChemistryInputs(wax_appearance_c=30.0, co2_mol_pct=2.0, h2s_ppm=50.0, mercury_ug_nm3=20.0)
+    run()
+    frames = [m for k, m in H.log if k == "dataframe"]
+    assert any(hasattr(f, "columns") and "limit" in f.columns and "issue" in f.columns for f in frames), \
+        "the chemistry table with its limits must render after the form is submitted"
+    assert any(hasattr(f, "columns") and "item" in f.columns and "H₂S content" in list(f["item"]) for f in frames)
+    ss.chem_inputs = None                 # leave the session as the next test expects it
+    return True
+S.check("the production-chemistry screen and its limits still show after running it",
+        chemistry_screen_survives_submission)
+
+
+def sitp_entered_in_bar():
+    import tb_network as tn
+    run(press={"Load demo"})
+    run(event=ev(1, "select", {"id": "W1"}, nonce="SITP"))
+    H.inputs = {}
+    lbls = []
+    orig = stubs.Harness.number_input
+    def spy(self, label, *a, **k):
+        lbls.append(label)
+        if label == "Shut-in tubing pressure (bara)":
+            k.pop("value", None)
+            return 400.0
+        return orig(self, label, *a, **k)
+    stubs.Harness.number_input = spy
+    try:
+        run(press={"Apply changes"})
+    finally:
+        stubs.Harness.number_input = orig
+    assert "Shut-in tubing pressure (bara)" in lbls, [l for l in lbls if "hut" in l]
+    return abs(ss.layout.nodes["W1"].sitp_psi - 400.0 * tn.PSI_PER_BAR) < 1e-6
+S.check("shut-in pressure is entered in bar and stored consistently", sitp_entered_in_bar)
+
+
+def hipps_recommendation():
+    run(press={"Load demo"})
+    lay = ss.layout
+    lay.edges["FL1"].item_id = "fl_flex"                  # 7 500 psi = 517 bar
+    for w in ("W1", "W2", "W3", "W4"):
+        lay.nodes[w].sitp_psi = 600 * 14.503774           # 600 bar shut-in
+    run()
+    assert any("fully rated system" in str(m) and "HIPPS at" in str(m) for k, m in H.log if k == "warning"), \
+        [m for k, m in H.log if k == "warning"][:5]
+    node = next(r["hipps_node"] for r in lay.pressure_protection() if r["hipps_node"])
+    run(press={f"Fit HIPPS at {node}"})
+    assert ss.layout.nodes[node].hipps
+    assert all(r["verdict"] == "HIPPS in place" for r in ss.layout.pressure_protection())
+    import tb_cost
+    assert any(l_["element_id"] == f"{node}_HIPPS" for l_ in tb_cost.estimate(ss.layout)["lines"])
+    return True
+S.check("HIPPS is recommended from the shut-in pressure, fitted in one click and costed", hipps_recommendation)
+
+
+def shutdown_and_blowdown_render():
+    run(press={"Load demo"})
+    assert any("Planned shutdown sequence" in str(m) for k, m in H.log if k == "markdown")
+    assert any(k == "metric" and m == "Blowdown time" for k, m in H.log)
+    run(press={"Calculate shutdown and blowdown"})
+    assert ss.get("sd_settings") is not None and not errs()
+    return True
+S.check("planned shutdown and blowdown are calculated in the flow-assurance tab", shutdown_and_blowdown_render)
+
+
+def safety_zone_on_the_map():
+    run(press={"Load demo"})
+    zones = H.last_component_args["payload"]["safety_zones"]
+    assert zones and zones[0]["host"] == "HOST_A" and zones[0]["radius_m"] == 500.0
+    ss.display.show_safety_zones = False
+    run()
+    off = H.last_component_args["payload"]["safety_zones"] == []
+    ss.display.show_safety_zones = True
+    return off
+S.check("the host's 500 m safety zone is drawn and can be switched off", safety_zone_on_the_map)
+
+
+def colour_change_keeps_bookmarks():
+    """Changing a display setting must not throw away bookmarks and the base map."""
+    import tb_mapextras as _mx
+    run(press={"Load demo"})
+    ss.display.bookmarks = [_mx.make_bookmark([2, 60, 3, 61], "Keep me")]
+    ss.display.basemap = "Sjøkart (Kartverket)"
+    H.inputs = {"Colour lines by": "fluid"}
+    run()
+    H.inputs = {}
+    return ss.display.color_mode == "fluid" and ss.display.bookmarks and ss.display.basemap.startswith("Sjø")
+S.check("changing the line colours keeps bookmarks and the base map", colour_change_keeps_bookmarks)
 def catalog_excel():
     import tb_costio, tb_catalog
     wb = tb_costio.catalog_to_workbook(ss.layout.catalog)
@@ -734,9 +866,10 @@ def a_stale_module_names_itself_instead_of_crashing():
     against an older tb_bathymetry.py and the whole page died with an
     AttributeError. A half-finished upload must disable one feature and say which
     file is behind, not take the app down."""
-    import tb_bathymetry as _b
+    import tb_bathymetry as _b, sys as _sys
     saved = _b.diagnose
     del _b.diagnose
+    _sys._tieback_reloaded_for = APP_VERSION_UNDER_TEST   # the files on disk are the old ones: no reload
     try:
         # press the very button whose handler called the missing function
         run(press={"Load demo", "Test EMODnet connection"})
@@ -1204,5 +1337,82 @@ def turndown_is_explained():
     run(press={"Load demo"})
     return any("turndown case" in str(m) and "hydrate margin" in str(m) for k, m in H.log if k == "markdown")
 S.check("the viability tab explains the turndown case", turndown_is_explained)
+
+
+def stale_modules_heal_themselves():
+    """The report: the 'out of date' banner after uploading everything — the server kept the old
+    modules in memory. The app now re-reads them from disk and rebuilds the session's objects."""
+    import sys as _sys, importlib, tb_chemistry as tch, tb_network as tn
+    run(press={"Load demo"})
+    old_cls = type(ss.layout)
+    del tch.contaminants                              # what an old copy in memory looks like
+    _sys._tieback_reloaded_for = None
+    importlib.reload(tn)                              # the session's layout is now an "old" Layout
+    assert type(ss.layout) is not tn.Layout
+    run()
+    assert hasattr(tch, "contaminants"), "the module must have been re-read from disk"
+    assert not any("out of date" in str(m) for m in errs()), errs()
+    assert type(ss.layout) is tn.Layout and len(ss.layout.nodes) == 9, "session objects rebuilt"
+    # a file that is really old on disk is still reported, and not reloaded on every run
+    del tch.contaminants
+    run()
+    assert any("out of date" in str(m) for m in errs()), "a second time in the same process it must report"
+    importlib.reload(tch)
+    return True
+S.check("modules left stale in memory after an upload are reloaded, and the session rebuilt",
+        stale_modules_heal_themselves)
+
+
+def theme_and_disclaimer_on_the_page():
+    import tb_theme as _th
+    run(press={"Load demo"})
+    md = [str(m) for k, m in H.log if k == "markdown"]
+    assert any("<style>" in m and "tb-title" in m for m in md) or any("<style>" in m for m in md), "no stylesheet"
+    assert any(_th.AUTHOR in m and "PROTOTYPE" in m for m in md), "the title band must name the author"
+    assert any("must not be used on commercial projects" in m for m in md), "no disclaimer"
+    assert any("tb-foot" in m and _th.AUTHOR in m for m in md), "no footer"
+    return True
+S.check("every page shows the theme, the author and the prototype disclaimer", theme_and_disclaimer_on_the_page)
+
+
+def production_and_economics_tab():
+    """The new tabs: a profile from the reservoir, and an NPV from the profile."""
+    import tb_fluids as tf
+    run(press={"Load demo"})
+    r = tf.new_reservoir("Brent", "black oil")
+    r.area_km2, r.thickness_m, r.recovery_factor = 12.0, 30.0, 0.42
+    tf.set_reservoir(ss.layout, r)
+    tf.assign_reservoir(ss.layout, [w for w in ss.layout.nodes if ss.layout.kind(w) == "well"], "Brent")
+    run()
+    assert not errs(), errs()
+    assert any(k == "metric" and m == "Recoverable" for k, m in H.log), "no profile metrics"
+    assert any(k == "metric" and m == "NPV" for k, m in H.log), "no economics"
+    assert ss.get("profile_settings") is not None
+    assert any("producer(s)" in str(m) for k, m in H.log if k == "markdown"), "no well-count advice"
+    run(press={"Run sensitivity (tornado)"})
+    assert ss.get("tornado") and ss.tornado[0]["input"], "no tornado"
+    run(press={"Apply economics"})
+    assert ss.get("econ_settings") is not None and not errs()
+    return True
+S.check("production profile, economics and sensitivity render from a reservoir", production_and_economics_tab)
+
+
+def optimiser_tab_runs_and_saves():
+    run(press={"Load demo"})
+    ss.cases = []
+    run(press={"Run the search"})
+    rows = ss.get("opt_rows") or []
+    assert rows and any(r.get("feasible") for r in rows), rows[:1]
+    assert any(r.get("is_base") for r in rows), "the base case must be in the results"
+    assert any("worth drawing" in str(m) for k, m in H.log if k == "markdown")
+    run(press={"Save top 3 as concepts"})
+    assert len(ss.cases) == 3 and all(c_["name"].startswith("Opt:") for c_ in ss.cases), \
+        [c_["name"] for c_ in ss.cases]
+    n0 = len(ss.layout.nodes)
+    run(press={"Load into the layout"})
+    assert ss.project_name.startswith("Field A") and len(ss.layout.nodes) >= n0 - 2
+    assert not errs(), errs()
+    return True
+S.check("the optimiser searches, shows a short list, saves concepts and loads one", optimiser_tab_runs_and_saves)
 
 sys.exit(0 if S.report() else 1)

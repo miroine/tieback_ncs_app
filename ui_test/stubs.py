@@ -42,13 +42,17 @@ class Harness:
     def expander(self, *a, **k): return Ctx(self)
     def form(self, *a, **k): return Ctx(self)
     def spinner(self, *a, **k): return Ctx(self)
+    def progress(self, *a, **k):
+        # real Streamlit returns an object with .progress() and .empty()
+        return types.SimpleNamespace(progress=lambda *x, **y: None, empty=lambda: None)
+    def status(self, *a, **k): return Ctx(self)
     # output
     def _out(self, kind):
         def f(*a, **k): self.log.append((kind, a[0] if a else "")); return None
         return f
     def __getattr__(self, name):
         if name in ("markdown", "caption", "subheader", "write", "metric", "dataframe", "plotly_chart", "code",
-                    "download_button", "success", "info", "warning", "error", "toast"):
+                    "download_button", "success", "info", "warning", "error", "toast", "json"):
             return self._out(name)
         raise AttributeError(name)
     # widgets

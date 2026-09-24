@@ -45,18 +45,27 @@ def sutton_pseudocritical(gas_sg: float):
     return tpc, ppc
 
 
+# Brill & Beggs was fitted over roughly 1.2 < Tpr < 2.4 and Ppr < 15. Outside that the
+# terms grow without bound, so the reduced properties are clamped to the edge of the
+# fit: the answer there is the boundary value, not a silent extrapolation to nonsense.
+Z_PPR_MAX = 15.0
+Z_TPR_RANGE = (1.05, 3.0)
+
+
 def z_factor(p_psia: float, t_f: float, gas_sg: float) -> float:
     """Brill & Beggs (1974) explicit Z-factor (screening accuracy)."""
     tpc, ppc = sutton_pseudocritical(gas_sg)
-    tpr = (t_f + 459.67) / tpc
-    ppr = max(p_psia, 0.0) / ppc
+    tpr = min(max((t_f + 459.67) / tpc, Z_TPR_RANGE[0]), Z_TPR_RANGE[1])
+    ppr = min(max(p_psia, 0.0) / ppc, Z_PPR_MAX)
     a = 1.39 * math.sqrt(max(tpr - 0.92, 0.0)) - 0.36 * tpr - 0.101
     b = ((0.62 - 0.23 * tpr) * ppr
          + (0.066 / max(tpr - 0.86, 0.05) - 0.037) * ppr ** 2
          + 0.32 * ppr ** 6 / 10 ** (9.0 * (tpr - 1.0)))
     c = 0.132 - 0.32 * math.log10(tpr)
     d = 10 ** (0.3106 - 0.49 * tpr + 0.1824 * tpr ** 2)
-    z = a + (1.0 - a) / math.exp(min(b, 50.0)) + c * ppr ** d
+    # exp(-b), not 1/exp(b): a large negative b used to underflow exp() to zero and
+    # divide by it, which crashed the whole page from deep inside a pressure march
+    z = a + (1.0 - a) * math.exp(-max(min(b, 50.0), -50.0)) + c * min(ppr ** d, 1e6)
     return max(0.3, min(z, 1.4))
 
 

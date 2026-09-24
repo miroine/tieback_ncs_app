@@ -31,6 +31,8 @@ import tb_chemistry
 import tb_fluids
 import tb_mapextras
 import tb_share
+import tb_theme
+import tb_shutdown
 import tb_multiphase
 import tb_cost
 import tb_costio
@@ -41,24 +43,33 @@ import tb_import
 import tb_map
 import tb_ncs
 import tb_network
+import tb_optimise
+import tb_production
 import tb_project
+import tb_economics
 import tb_report
 import tb_schedule
 import tb_tiein
 import tb_viability
 import tb_well
 
-APP_VERSION = "0.17.0"
+APP_VERSION = "0.20.0"
+PSI_PER_BAR = 14.503774          # shut-in pressure is entered in bar, stored in psi like the ratings
 HERE = Path(__file__).parent
 DEMO_FILE = HERE / "test_fixtures" / "demo_field_a_tieback.yaml"
 
-EQ = dict(torch="#EB0037", navy="#00243D", karry="#FFE7D6", pistachio="#9DBA00",
-          slate="#243746", mist="#EAF0F4", line="#C3CDD5", amber="#E9A23B", teal="#007079")
+# One palette, from tb_theme (Equinor-derived). The short names are what the rest
+# of the app and the map component have always used.
+_C = tb_theme.COLORS
+EQ = dict(torch=_C["energy_red"], navy=_C["navy"], karry=_C["karry"], pistachio="#9DBA00",
+          slate=_C["slate_blue"], mist=_C["mist"], line=_C["line"], amber="#E9A23B",
+          teal=_C["moss_green"])
 GROUP_COLORS = {"Milestones": EQ["torch"], "Engineering": "#4A6B82", "Procurement": EQ["teal"],
                 "Installation": EQ["navy"], "Drilling": EQ["amber"], "Host": "#7D4EBF",
                 "Commissioning": EQ["pistachio"]}
 
-st.set_page_config(page_title="TieBack Studio", page_icon="🌊", layout="wide")
+st.set_page_config(page_title="TieBack Studio", page_icon="🌊", layout="wide",
+                   menu_items={"About": f"TieBack Studio v{APP_VERSION} — {tb_theme.DISCLAIMER_SHORT}"})
 
 
 # ───────────────────────────── helpers ─────────────────────────────
@@ -74,12 +85,12 @@ STRETCH = {"width": "stretch"} if _st_version() >= (1, 49) else {"use_container_
 
 
 def eq_layout(fig, height=380, **kw):
-    fig.update_layout(
-        height=height, margin=dict(l=10, r=10, t=40, b=10), paper_bgcolor="white", plot_bgcolor="white",
-        font=dict(family="Equinor, Segoe UI, Arial, sans-serif", color=EQ["navy"], size=12),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0), **kw)
-    fig.update_xaxes(gridcolor=EQ["mist"], linecolor=EQ["line"])
-    fig.update_yaxes(gridcolor=EQ["mist"], linecolor=EQ["line"])
+    """Every figure gets the same frame, from the theme's tokens."""
+    fig.update_layout(**{**tb_theme.plotly_layout(height), **kw})
+    fig.update_xaxes(gridcolor=EQ["mist"], linecolor=EQ["line"], zeroline=False,
+                     title_font=dict(size=12), ticks="outside", ticklen=4, tickcolor=EQ["line"])
+    fig.update_yaxes(gridcolor=EQ["mist"], linecolor=EQ["line"], zeroline=False,
+                     title_font=dict(size=12), ticks="outside", ticklen=4, tickcolor=EQ["line"])
     return fig
 
 
@@ -227,7 +238,7 @@ def set_project(name, layout, cost, sched, fa_settings=None, display=None):
 REQUIRED_API = {
     "tb_bathymetry": ["diagnose", "diagnosis_message", "depth_profile", "fetch_route_profiles"],
     "tb_cases": ["concept_overlay", "color_for", "snapshot", "restore"],
-    "tb_chemistry": ["screen", "recommend_inhibitor", "ChemistryInputs", "InhibitorCase"],
+    "tb_chemistry": ["screen", "recommend_inhibitor", "ChemistryInputs", "InhibitorCase", "contaminants"],
     "tb_mapextras": ["make_sketch", "classify_url", "make_bookmark", "sketches", "describe",
                      "region_view", "layer_centre", "bbox_around_point"],
     "tb_share": ["encode", "decode", "build_payload", "restore_payload", "LocalStore",
@@ -237,14 +248,19 @@ REQUIRED_API = {
     "tb_grid": ["read_grid", "image_overlay", "contour_features", "sniff"],
     "tb_import": ["as_upload_list", "read_uploads", "read_shapefile_parts"],
     "tb_schedule": ["apply_overrides", "build_from_layout"],
-    "tb_map": ["render_map", "DisplaySettings"],
-    "tb_network": ["place_at", "by_tags", "set_tags", "place_split"],
+    "tb_map": ["render_map", "DisplaySettings", "safety_zones"],
+    "tb_network": ["place_at", "by_tags", "set_tags", "place_split", "pressure_protection"],
     "tb_project": ["project_from_yaml_full"],
     "tb_flowassurance": ["solve", "well_inputs"],
     "tb_tiein": ["screen", "candidates_from_cases", "near", "shared_ids"],
     "tb_basis": ["design_basis"],
     "tb_report": ["build_report"],
     "tb_viability": ["viability"],
+    "tb_shutdown": ["inventory", "blowdown", "planned_shutdown", "ShutdownSettings"],
+    "tb_production": ["field_profile", "suggest_recovery_factor", "wells_needed", "ProfileSettings"],
+    "tb_economics": ["cashflow", "tornado", "EconomicSettings", "summary_line"],
+    "tb_optimise": ["search", "pareto", "SearchSpec", "build_variant", "explain"],
+    "tb_theme": ["css", "footer_html", "DISCLAIMER", "AUTHOR", "plotly_layout"],
 }
 _MODULES = {"tb_flowassurance": "tb_fa"}
 
@@ -275,7 +291,74 @@ def has_api(module_name: str, *attrs) -> bool:
     return mod is not None and all(hasattr(mod, a) for a in attrs)
 
 
+# ── self-heal after an upload ──
+# Streamlit Community Cloud pulls new files into the running server, but a module
+# it has already imported stays in memory as the old version until the app is
+# rebooted — only brand-new files are read fresh. That is what the "out of date"
+# banner used to catch after a complete upload. So: when a module looks stale,
+# reload our own modules from disk once per server process (dependencies first),
+# then check again. A file that really is old on disk still shows in the banner.
+RELOAD_ORDER = ["tb_geo", "tb_catalog", "tb_multiphase", "tb_thermal", "tb_network", "tb_fluids",
+                "tb_chemistry", "tb_well", "tb_bathymetry", "tb_flowassurance", "tb_cost", "tb_schedule",
+                "tb_mapextras", "tb_map", "tb_project", "tb_cases", "tb_costio", "tb_import", "tb_grid",
+                "tb_ncs", "tb_tiein", "tb_basis", "tb_viability", "tb_report", "tb_share", "tb_shutdown"]
+
+
+def reload_own_modules() -> list:
+    """Re-read every tb_*.py from disk, dependencies first. Returns what was reloaded."""
+    import importlib
+    import sys as _sys
+    done = []
+    names = RELOAD_ORDER + sorted(n for n in _sys.modules if n.startswith("tb_") and n not in RELOAD_ORDER)
+    for name in names:
+        mod = _sys.modules.get(name)
+        if mod is None:
+            continue
+        try:
+            importlib.reload(mod)
+            done.append(name)
+        except Exception:  # noqa: BLE001 — a broken file is reported by the banner, not here
+            pass
+    return done
+
+
 STALE = stale_modules()
+if STALE:
+    import sys as _sys
+    if getattr(_sys, "_tieback_reloaded_for", None) != APP_VERSION:
+        _sys._tieback_reloaded_for = APP_VERSION
+        HEALED = reload_own_modules()
+        STALE = stale_modules()
+
+
+def refresh_session_objects():
+    """Objects made by an old module version (before a reload) lack the new methods.
+
+    Rebuild them from their saved form with the current classes: the project
+    round-trips through its YAML, the other settings through their fields.
+    """
+    ss = st.session_state
+    lay = ss.get("layout")
+    if lay is None or type(lay) is tb_network.Layout:
+        return False
+    try:
+        txt = tb_project.project_to_yaml(ss.get("project_name", "Project"), lay, ss.cost_settings,
+                                         ss.sched_settings, ss.get("fa_settings"), ss.get("display"))
+        name, new_lay, cost, sched, fas, disp = tb_project.project_from_yaml_full(txt)
+    except Exception:  # noqa: BLE001 — leave the session as it is rather than lose it
+        return False
+    undo_, redo_ = ss.get("undo", []), ss.get("redo", [])
+    ss.layout, ss.cost_settings, ss.sched_settings, ss.fa_settings, ss.display = new_lay, cost, sched, fas, disp
+    ss.undo, ss.redo = undo_, redo_
+    for key, cls in (("chem_inputs", tb_chemistry.ChemistryInputs), ("sd_settings", tb_shutdown.ShutdownSettings)):
+        old = ss.get(key)
+        if old is not None and type(old) is not cls:
+            try:
+                keep = {f.name for f in dataclasses.fields(cls)}
+                ss[key] = cls(**{k: v for k, v in dataclasses.asdict(old).items() if k in keep})
+            except Exception:  # noqa: BLE001
+                ss[key] = None
+    return True
 
 WORKING_LAYOUT = "(working layout)"
 
@@ -345,6 +428,7 @@ def init_state():
 
 
 init_state()
+refresh_session_objects()
 
 
 def _app_url() -> str:
@@ -432,24 +516,26 @@ REV = S.rev
 
 # ───────────────────────────── style ─────────────────────────────
 
-st.markdown(f"""
-<style>
-  [data-testid="stAppViewContainer"] {{ background: #FFFFFF; }}
-  [data-testid="stSidebar"] {{ background: {EQ['mist']}; }}
-  [data-testid="stMetric"] {{ border-left: 3px solid {EQ['navy']}; padding: 4px 10px; background: #FAFCFD; }}
-  [data-testid="stMetricValue"] {{ color: {EQ['navy']}; font-size: 1.45rem; }}
-  [data-testid="stMetricLabel"] p {{ color: {EQ['slate']}; }}
-  .tb-title {{ display:flex; align-items:baseline; gap:14px; border-bottom: 2px solid {EQ['navy']}; padding-bottom: 6px; margin-bottom: 8px; }}
-  .tb-title h1 {{ font-size: 1.9rem; margin: 0; color: {EQ['navy']}; letter-spacing: -0.01em; }}
-  .tb-title span {{ color: {EQ['slate']}; font-size: 0.95rem; }}
-  .tb-flag {{ border-left: 4px solid {EQ['torch']}; background: {EQ['karry']}; padding: 8px 12px; color: {EQ['navy']}; font-size: 0.9rem; }}
-  .tb-foot {{ color: #6F6F6F; font-size: 0.78rem; border-top: 1px solid {EQ['line']}; margin-top: 24px; padding-top: 8px; }}
-</style>
-""", unsafe_allow_html=True)
+st.markdown(tb_theme.css(), unsafe_allow_html=True)
 
-st.markdown(f"""<div class="tb-title"><h1>TieBack Studio</h1>
-<span>{S.project_name} · subsea tie-back concept design for the Norwegian Continental Shelf</span></div>""",
-            unsafe_allow_html=True)
+st.markdown(f"""<div class="tb-title">
+  <h1>TieBack Studio</h1>
+  <span class="tb-chip">v{APP_VERSION} · PROTOTYPE</span>
+  <span class="tb-proj">{S.project_name}</span>
+  <span class="tb-sub">subsea tie-back concept design for the Norwegian Continental Shelf</span>
+  <span class="tb-by">Built by <b>{tb_theme.AUTHOR}</b><br>Early-phase screening only — not for commercial projects</span>
+</div>""", unsafe_allow_html=True)
+
+with st.expander("About this app — author, purpose, licence and limitations"):
+    st.markdown(tb_theme.DISCLAIMER)
+    ac_ = st.columns(3)
+    ac_[0].markdown("**What it is for**\n\nComparing subsea tie-back concepts in early phase: layout, "
+                    "cost order of magnitude, schedule, flow assurance and viability, side by side.")
+    ac_[1].markdown("**What it is not**\n\nNot a design tool. No transient simulation, no PVT package, "
+                    "no benchmarked rates, no structural, riser or material design.")
+    ac_[2].markdown("**Before any decision**\n\nRe-run in the operator's own tools with the operator's "
+                    "data (OLGA/LedaFlow, PVTsim/Multiflash, a real cost library).")
+    st.caption(tb_theme.LICENCE_SHORT)
 
 if S.get("pending_link"):
     pl = S.pending_link
@@ -492,8 +578,9 @@ if STALE:
         "**Part of this deployment is out of date.** These files are older than "
         f"`tieback_app.py` (v{APP_VERSION}) and the features that need them are turned off:\n\n"
         + "\n".join(f"- `{m}.py` — missing `{'`, `'.join(a)}`" for m, a in STALE.items())
-        + "\n\nRe-upload the whole folder rather than individual files. "
-          "Everything else on this page still works.")
+        + "\n\nThe app has already re-read these files from disk, so they really are old versions in the "
+          "repository: upload the **whole folder** again (not individual files), then, in *Manage app* "
+          "(bottom right) → ⋮ → **Reboot app**. Everything else on this page still works.")
 
 # ─────────────────────── cached computations ───────────────────────
 
@@ -865,6 +952,11 @@ with st.sidebar:
         lsc = cc[1].slider("Line thickness", 0.4, 3.0, float(disp.line_scale), 0.1, key=f"linesc_{REV}")
         bydia = st.checkbox("Thicker lines for larger bore", bool(disp.thickness_by_diameter),
                             key=f"bydia_{REV}")
+        zones_on = st.checkbox("Show the 500 m safety zone round hosts", bool(getattr(disp, "show_safety_zones", True)),
+                               key=f"zones_{REV}",
+                               help="The petroleum safety zone round each surface installation; subsea work "
+                                    "inside it needs the host operator's consent. Also switchable in the map's "
+                                    "layer control.")
         colors = dict(disp.fluid_colors)
         if cmode == "fluid":
             st.caption("Colour per fluid or service")
@@ -874,12 +966,17 @@ with st.sidebar:
                                                       key=f"fc_{f_}_{REV}")
             if st.button("Reset fluid colours"):
                 colors = dict(tb_map.FLUID_COLORS)
-                S.display = tb_map.DisplaySettings(sym, lsc, bydia, cmode, colors)
+                S.display = dataclasses.replace(disp, fluid_colors=colors)
                 bump()
                 st.rerun()
-        if (cmode, sym, lsc, bydia, colors) != (disp.color_mode, disp.symbol_scale, disp.line_scale,
-                                                disp.thickness_by_diameter, disp.fluid_colors):
-            S.display = tb_map.DisplaySettings(sym, lsc, bydia, cmode, colors)
+        # replace() keeps the base map, bookmarks and added maps — building a new
+        # DisplaySettings here used to drop them whenever a colour setting changed
+        extra = {"show_safety_zones": zones_on} if hasattr(disp, "show_safety_zones") else {}
+        if (cmode, sym, lsc, bydia, colors, zones_on) != (disp.color_mode, disp.symbol_scale, disp.line_scale,
+                                                          disp.thickness_by_diameter, disp.fluid_colors,
+                                                          getattr(disp, "show_safety_zones", zones_on)):
+            S.display = dataclasses.replace(disp, color_mode=cmode, symbol_scale=sym, line_scale=lsc,
+                                            thickness_by_diameter=bydia, fluid_colors=colors, **extra)
         all_tags = LAY.all_tags()
         if all_tags:
             st.caption("Tag filter")
@@ -1143,9 +1240,7 @@ with st.sidebar:
                      else "; ".join(f"{m}.py is missing {', '.join(a)}" for m, a in STALE.items())))
         st.dataframe(pd.DataFrame(rows, columns=["Item", "Value"]), hide_index=True, **STRETCH)
 
-    st.markdown('<div class="tb-foot">Screening tool for engineering concept work. Default cost rates are '
-                'indicative placeholders. Not affiliated with or endorsed by Equinor or Sodir. '
-                f'v{APP_VERSION} · MIT</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="tb-foot">{tb_theme.DISCLAIMER_SHORT}</div>', unsafe_allow_html=True)
 
 
 # ─────────────────────────────── tabs ───────────────────────────────
@@ -1154,9 +1249,10 @@ findings = LAY.validate()
 n_err = sum(f.severity == "error" for f in findings)
 n_warn = sum(f.severity == "warning" for f in findings)
 
-tab_layout, tab_cat, tab_cost, tab_sched, tab_fa, tab_basis, tab_viab, tab_cases, tab_exp = st.tabs(
-    ["Layout", "Equipment catalog", "Cost", "Schedule", "Flow assurance", "Design basis", "Viability",
-     "Cases", "Export"])
+(tab_layout, tab_cat, tab_cost, tab_sched, tab_fa, tab_prod, tab_basis, tab_viab, tab_opt,
+ tab_cases, tab_exp) = st.tabs(
+    ["Layout", "Equipment catalog", "Cost", "Schedule", "Flow assurance", "Production & economics",
+     "Design basis", "Viability", "Optimise", "Cases", "Export"])
 
 # ═══════════════════════════════ LAYOUT ═══════════════════════════════
 with tab_layout:
@@ -1446,8 +1542,14 @@ with tab_layout:
                                                   f"({it.footprint_l_m:.0f} × {it.footprint_w_m:.0f} m), "
                                                   f"visible when zoomed in")
                 hipps = cc[3].checkbox("HIPPS", node.hipps, help="Protects everything downstream of this item")
-                sitp = st.number_input("Shut-in tubing pressure (psi)", 0.0, 25000.0, float(node.sitp_psi),
-                                       step=100.0) if it.category == "well" else node.sitp_psi
+                if it.category == "well":
+                    sitp_bar = st.number_input("Shut-in tubing pressure (bara)", 0.0, 1725.0,
+                                               round(float(node.sitp_psi) / PSI_PER_BAR, 1), step=5.0,
+                                               help=f"Tree rating {CAT.get(node.item_id).rating_psi / PSI_PER_BAR:,.0f} "
+                                                    f"bar ({CAT.get(node.item_id).rating_psi:,.0f} psi)")
+                    sitp = sitp_bar * PSI_PER_BAR
+                else:
+                    sitp = node.sitp_psi
                 fluid_pick, res_pick = None, None
                 if it.category == "well" and has_api("tb_fluids", "well_fluid"):
                     now_fl, now_src = tb_fluids.well_fluid(LAY, sel)
@@ -1643,6 +1745,48 @@ with tab_layout:
                        "the integral slot tie-in, not a fabricated spool, and travels with the structure "
                        "when you drag it.")
 
+    if hasattr(LAY, "pressure_protection"):
+        prot = LAY.pressure_protection()
+        need = [r for r in prot if r["verdict"] == "HIPPS or fully rated"]
+        with st.expander("Pressure protection — HIPPS or fully rated" + (f" ({len(need)} to resolve)" if need else ""),
+                         expanded=bool(need)):
+            if not prot:
+                st.caption("Add producing wells with a path to a host, and set their shut-in pressure (bara).")
+            else:
+                st.caption("A system is **fully rated** when every item from the tree to the host is rated for the "
+                           "wells' shut-in pressure. Where it is not, either fit **HIPPS** (high-integrity pressure "
+                           "protection: fast-closing valves that protect everything downstream) at the first "
+                           "structure, or upgrade the under-rated items. Hosts are excluded — their receiving "
+                           "facilities are rated by the host.")
+                st.dataframe(pd.DataFrame([dict(
+                    Well=r["well"], **{"SITP (bara)": round(r["sitp_bar"])},
+                    **{"Lowest rating downstream": (f"{r['weakest']} — {r['weakest_rating_bar']:.0f} bar"
+                                                    if r["weakest"] else "—")},
+                    Verdict=r["verdict"], **{"HIPPS at": r["hipps_at"] or ""},
+                    **{"Under-rated and unprotected": ", ".join(r["upgrade"])}) for r in prot]),
+                    hide_index=True, **STRETCH)
+                for node_ in sorted({r["hipps_node"] for r in need if r["hipps_node"]}):
+                    wells_ = [r["well"] for r in need if r["hipps_node"] == node_]
+                    worst_ = max(r["sitp_bar"] for r in need if r["hipps_node"] == node_)
+                    st.warning(f"**{node_}**: {', '.join(wells_)} shut in at up to {worst_:.0f} bar, above the rating "
+                               f"of {', '.join(sorted({x for r in need if r['hipps_node'] == node_ for x in r['upgrade']}))}. "
+                               f"Either a **fully rated system** (upgrade those items to ≥ {worst_:.0f} bar) or "
+                               f"**HIPPS at {node_}**.")
+                    if st.button(f"Fit HIPPS at {node_}", key=f"hipps_{node_}_{REV}"):
+                        record(f"HIPPS at {node_}")
+                        LAY.nodes[node_].hipps = True
+                        bump()
+                        st.rerun()
+                if not need:
+                    st.success("No under-rated item: " + ("the system is fully rated for the shut-in pressure."
+                                                          if not any(r["verdict"] == "HIPPS in place" for r in prot)
+                                                          else "HIPPS protects every under-rated item."))
+                unset = [r["well"] for r in prot if r["verdict"] == "shut-in pressure not set"]
+                if unset:
+                    st.caption("Shut-in pressure not set on " + ", ".join(unset) + " — select the well and enter it "
+                               "in bara.")
+                st.caption("A HIPPS ticked on a structure is costed as the catalogue's HIPPS module.")
+
     with st.expander("Tie-in screening — where should this structure connect?"):
         order_kind = {"template": 0, "manifold": 1, "boosting": 2, "plem": 3, "plet": 4}
         structures = sorted([nid for nid in LAY.nodes if LAY.kind(nid) in order_kind],
@@ -1758,15 +1902,17 @@ with tab_layout:
 
     with st.expander("All equipment (bulk edit)"):
         node_rows = [dict(id=n.node_id, label=n.label, item_id=n.item_id, lat=n.lat, lon=n.lon,
-                          water_depth_m=n.water_depth_m, sitp_psi=n.sitp_psi, hipps=n.hipps, phase=n.phase)
+                          water_depth_m=n.water_depth_m, sitp_bar=round(n.sitp_psi / PSI_PER_BAR, 1),
+                          hipps=n.hipps, phase=n.phase)
                      for n in LAY.nodes.values()]
         ndf = pd.DataFrame(node_rows, columns=["id", "label", "item_id", "lat", "lon", "water_depth_m",
-                                               "sitp_psi", "hipps", "phase"])
+                                               "sitp_bar", "hipps", "phase"])
         node_ids = [i.item_id for i in CAT.items.values() if i.category in tb_catalog.NODE_KINDS]
         ned = st.data_editor(ndf, hide_index=True, key=f"nodes_ed_{REV}", **STRETCH, column_config={
             "id": st.column_config.TextColumn(disabled=True),
             "item_id": st.column_config.SelectboxColumn("item", options=node_ids, required=True),
             "lat": st.column_config.NumberColumn(format="%.6f"), "lon": st.column_config.NumberColumn(format="%.6f"),
+            "sitp_bar": st.column_config.NumberColumn("SITP (bara)", min_value=0.0, format="%.0f"),
             "phase": st.column_config.NumberColumn(min_value=1, max_value=9, step=1)})
         edge_rows = [dict(id=e.edge_id, label=e.label, item_id=e.item_id, source=e.from_node, target=e.to_node,
                           diameter_in=e.diameter_in, fixed_length_m=e.length_m, phase=e.phase,
@@ -1788,7 +1934,8 @@ with tab_layout:
                     if new_cat != CAT.get(nd.item_id).category:
                         raise ValueError(f"{r['id']}: cannot change equipment category ({new_cat})")
                     nd.label, nd.item_id = str(r["label"] or r["id"]), r["item_id"]
-                    nd.water_depth_m, nd.sitp_psi = float(r["water_depth_m"] or 0), float(r["sitp_psi"] or 0)
+                    nd.water_depth_m = float(r["water_depth_m"] or 0)
+                    nd.sitp_psi = float(r["sitp_bar"] or 0) * PSI_PER_BAR
                     nd.hipps, nd.phase = bool(r["hipps"]), int(r["phase"] or 1)
                     LAY.move_node(r["id"], float(r["lat"]), float(r["lon"]))
                 for r in eed.to_dict("records"):
@@ -1822,9 +1969,16 @@ with tab_layout:
                 "name": r.name, "fluid": r.fluid, "gor_sm3_sm3": r.gor_sm3_sm3, "api": r.api,
                 "gas_sg": r.gas_sg, "water_cut": r.water_cut, "salinity_wt_pct": r.salinity_wt_pct,
                 "pres_bara": r.pres_bara, "tres_c": r.tres_c, "co2_mol_pct": r.co2_mol_pct,
-                "h2s_ppm": r.h2s_ppm, "notes": r.notes} for r in res.values()]
+                "h2s_ppm": r.h2s_ppm, "mercury_ug_nm3": getattr(r, "mercury_ug_nm3", 0.0),
+                "area_km2": getattr(r, "area_km2", 0.0), "thickness_m": getattr(r, "thickness_m", 0.0),
+                "ntg": getattr(r, "ntg", 0.70), "porosity": getattr(r, "porosity", 0.22),
+                "water_saturation": getattr(r, "water_saturation", 0.25), "fvf": getattr(r, "fvf", 0.0),
+                "drive": getattr(r, "drive", ""), "recovery_factor": getattr(r, "recovery_factor", 0.0),
+                "notes": r.notes} for r in res.values()]
                 or [], columns=["name", "fluid", "gor_sm3_sm3", "api", "gas_sg", "water_cut",
-                                "salinity_wt_pct", "pres_bara", "tres_c", "co2_mol_pct", "h2s_ppm", "notes"])
+                                "salinity_wt_pct", "pres_bara", "tres_c", "co2_mol_pct", "h2s_ppm",
+                                "mercury_ug_nm3", "area_km2", "thickness_m", "ntg", "porosity",
+                                "water_saturation", "fvf", "drive", "recovery_factor", "notes"])
             ac = st.columns([2, 2, 1])
             new_name = ac[0].text_input("New reservoir", "", key=f"newres_{REV}",
                                         placeholder="e.g. Brent, Garn, Tilje")
@@ -1854,6 +2008,21 @@ with tab_layout:
                         "tres_c": st.column_config.NumberColumn("T res (°C)", format="%.0f"),
                         "co2_mol_pct": st.column_config.NumberColumn("CO₂ mol %", min_value=0.0, format="%.2f"),
                         "h2s_ppm": st.column_config.NumberColumn("H₂S ppm", min_value=0.0, format="%.0f"),
+                        "mercury_ug_nm3": st.column_config.NumberColumn("Hg µg/Nm³", min_value=0.0, format="%.2f"),
+                        "area_km2": st.column_config.NumberColumn("Area (km²)", min_value=0.0, format="%.2f",
+                                                                  help="Volumetrics: 0 = not filled in"),
+                        "thickness_m": st.column_config.NumberColumn("Net h (m)", min_value=0.0, format="%.1f"),
+                        "ntg": st.column_config.NumberColumn("NTG", min_value=0.0, max_value=1.0, format="%.2f"),
+                        "porosity": st.column_config.NumberColumn("φ", min_value=0.0, max_value=1.0, format="%.3f"),
+                        "water_saturation": st.column_config.NumberColumn("Sw", min_value=0.0, max_value=1.0,
+                                                                          format="%.2f"),
+                        "fvf": st.column_config.NumberColumn("Bo / Bg", min_value=0.0, format="%.4f",
+                                                             help="0 = typical for the fluid (1.25 oil, 0.004 gas)"),
+                        "drive": st.column_config.SelectboxColumn("Drainage strategy",
+                                                                  options=[""] + list(tb_production.DRIVES)),
+                        "recovery_factor": st.column_config.NumberColumn("RF", min_value=0.0, max_value=0.95,
+                                                                         format="%.2f",
+                                                                         help="0 = use the suggested one"),
                         "notes": "Notes"})
                 # a stated fluid that the GOR contradicts is almost always a typo
                 clashes = []
@@ -1872,7 +2041,8 @@ with tab_layout:
                     try:
                         record("edit reservoirs")
                         for r in red.to_dict("records"):
-                            vals = {k: r[k] for k in r}
+                            # plain Python values: numpy scalars would not survive the project file
+                            vals = {k: (v.item() if hasattr(v, "item") else v) for k, v in r.items()}
                             vals["notes"] = str(vals.get("notes") or "")
                             tb_fluids.set_reservoir(LAY, tb_fluids.Reservoir(**vals))
                     except (TypeError, ValueError) as exc:
@@ -2618,35 +2788,59 @@ with tab_fa:
         st.markdown("#### Well deliverability (nodal)")
         st.caption("Give a well an IPR and tubing below, then solve the rates from the intersection of "
                    "inflow, tubing lift and the network back-pressure instead of typing them in.")
+        res_by_name = tb_fluids.reservoirs(LAY) if has_api("tb_fluids", "reservoirs") else {}
         ipr_rows = []
         for w_, v_ in wells_in.items():
             d_ = LAY.nodes[w_].attrs.get("ipr") or {}
-            ipr_rows.append(dict(id=w_, label=LAY.nodes[w_].label or w_, use=bool(d_.get("use", False)),
-                                 kind=d_.get("kind", "pi"), reservoir_bara=float(d_.get("reservoir_bara", 350.0)),
+            r_ = res_by_name.get(LAY.nodes[w_].attrs.get("reservoir") or "")
+            # a well with no saved IPR starts from its reservoir's pressure and temperature
+            p0_ = float(d_.get("reservoir_bara", r_.pres_bara if r_ else 350.0))
+            t0_ = float(d_.get("reservoir_t_c", r_.tres_c if r_ else 85.0))
+            ipr_rows.append(dict(id=w_, label=LAY.nodes[w_].label or w_, use=bool(d_.get("use", True)),
+                                 kind=d_.get("kind", "pi"), reservoir_bara=p0_,
                                  pi_sm3_d_bar=float(d_.get("pi_sm3_d_bar", 12.0)),
-                                 bubble_bara=float(d_.get("bubble_bara", 200.0)),
+                                 bubble_bara=float(d_.get("bubble_bara", min(200.0, p0_))),
                                  md_m=float(d_.get("md_m", 2600.0)), tvd_m=float(d_.get("tvd_m", 2500.0)),
                                  tubing_id_in=float(d_.get("tubing_id_in", 4.892)),
-                                 reservoir_t_c=float(d_.get("reservoir_t_c", 85.0))))
+                                 reservoir_t_c=t0_, saved=bool(d_)))
         idf = pd.DataFrame(ipr_rows)
+        if len(idf) and not idf["saved"].all():
+            st.caption("Rows marked *not saved* show starting values (from the well's reservoir where it has "
+                       "one). Edit them, then **Save well IPR data** — solving also saves.")
+        idf["saved"] = idf["saved"].map({True: "saved", False: "not saved"}) if len(idf) else idf.get("saved")
         ied = st.data_editor(idf, hide_index=True, key=f"fa_ipr_{REV}", **STRETCH,
-                             disabled=["id", "label"], column_config={
+                             disabled=["id", "label", "saved"], column_config={
+                                 "use": st.column_config.CheckboxColumn("Use IPR", help="Solve this well's rate "
+                                                                        "from its IPR; untick to keep the typed rate"),
                                  "kind": st.column_config.SelectboxColumn(options=list(tb_well.IPR_KINDS)),
                                  "reservoir_bara": st.column_config.NumberColumn("Res. P (bara)", format="%.0f"),
                                  "pi_sm3_d_bar": st.column_config.NumberColumn("PI (Sm³/d/bar)", format="%.2f"),
                                  "bubble_bara": st.column_config.NumberColumn("Pb (bara)", format="%.0f"),
                                  "md_m": st.column_config.NumberColumn("Tubing MD (m)", format="%.0f"),
                                  "tvd_m": st.column_config.NumberColumn("TVD (m)", format="%.0f"),
-                                 "reservoir_t_c": st.column_config.NumberColumn("Res. T (°C)", format="%.0f")})
+                                 "tubing_id_in": st.column_config.NumberColumn("Tubing ID (in)", format="%.3f"),
+                                 "reservoir_t_c": st.column_config.NumberColumn("Res. T (°C)", format="%.0f"),
+                                 "saved": st.column_config.TextColumn("Status")})
+
+        def _save_ipr(rows_):
+            """Store the table on the wells — plain Python values, so the project file and links can hold them."""
+            for r_ in rows_:
+                LAY.nodes[r_["id"]].attrs["ipr"] = {
+                    "use": bool(r_["use"]), "kind": str(r_["kind"]),
+                    **{k: float(r_[k]) for k in ("reservoir_bara", "pi_sm3_d_bar", "bubble_bara", "md_m",
+                                                 "tvd_m", "tubing_id_in", "reservoir_t_c")}}
+
         cc = st.columns([1, 1, 2])
         if cc[0].button("Save well IPR data"):
-            for r_ in ied.to_dict("records"):
-                LAY.nodes[r_["id"]].attrs["ipr"] = {k: r_[k] for k in r_ if k not in ("id", "label")}
+            _save_ipr(ied.to_dict("records"))
+            S.ipr_note = f"IPR data saved for {len(ied)} well(s)."
             bump()
             st.rerun()
         if cc[1].button("Solve rates from IPR", type="primary"):
+            recs = ied.to_dict("records")
+            _save_ipr(recs)
             iprs, tubs = {}, {}
-            for r_ in ied.to_dict("records"):
+            for r_ in recs:
                 if not r_["use"]:
                     continue
                 iprs[r_["id"]] = tb_well.IPR(kind=r_["kind"],
@@ -2657,22 +2851,67 @@ with tab_fa:
                                                 id_in=r_["tubing_id_in"],
                                                 geothermal_f=r_["reservoir_t_c"] * 1.8 + 32)
             if not iprs:
-                st.warning("Tick 'use' for at least one well first.")
+                st.warning("Tick 'Use IPR' for at least one well first.")
             else:
+                before = {w_: wells_in[w_].oil_sm3_d for w_ in iprs}
                 with st.spinner("Solving inflow, tubing lift and network back-pressure…"):
-                    _, rates, info = tb_fa.solve_coupled(LAY, S.fa_settings, wells_in, iprs, tubs)
+                    res_n, rates, info = tb_fa.solve_coupled(LAY, S.fa_settings, wells_in, iprs, tubs)
                 for w_, q_ in rates.items():
                     v_ = wells_in[w_]
-                    v_.oil_sm3_d = q_
+                    v_.oil_sm3_d = float(q_)
                     tb_fa.set_well_inputs(LAY, w_, v_)
+                wres = {w["well"]: w for w in res_n.wells}
+                liq = {w_: float(rates[w_]) / max(1.0 - wells_in[w_].water_cut, 0.05) for w_ in iprs}
+                info["table"] = [dict(
+                    well=w_, rate_before_sm3_d=before[w_], rate_solved_sm3_d=float(rates[w_]),
+                    liquid_sm3_d=liq[w_],
+                    bhp_bara=iprs[w_].bhp(liq[w_] * tb_fa.SM3_TO_STB) / tb_fa.BARA_TO_PSIA,
+                    required_whp_bara=wres.get(w_, {}).get("required_whp_bara", float("nan")),
+                    drawdown_bar=(iprs[w_].reservoir_pressure_psia - iprs[w_].bhp(liq[w_] * tb_fa.SM3_TO_STB))
+                    / tb_fa.BARA_TO_PSIA) for w_ in iprs]
+                info["curves"] = {}
+                for w_ in [x for x in iprs if iprs[x].kind != "gas_backpressure"]:
+                    qmax = iprs[w_].rate(0.0) / tb_fa.SM3_TO_STB
+                    qs = [qmax * f_ for f_ in (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.97)]
+                    info["curves"][w_] = [dict(q_sm3_d=q_, pwf_bara=iprs[w_].bhp(q_ * tb_fa.SM3_TO_STB)
+                                               / tb_fa.BARA_TO_PSIA) for q_ in qs]
                 S.nodal_info = info
                 bump()
                 st.rerun()
+        if S.get("ipr_note"):
+            st.success(S.ipr_note)
+            S.ipr_note = ""
         if S.get("nodal_info"):
             inf = S.nodal_info
             (st.success if inf["converged"] else st.warning)(
                 f"Nodal solve {'converged' if inf['converged'] else 'did not converge'} "
-                f"after {inf['iterations']} iteration(s). {inf['note']}")
+                f"after {inf['iterations']} iteration(s). {inf['note']} Solved rates are now the wells' "
+                f"design rates.")
+            if inf.get("table"):
+                st.dataframe(pd.DataFrame(inf["table"]), hide_index=True, **STRETCH, column_config={
+                    "well": "Well",
+                    "rate_before_sm3_d": st.column_config.NumberColumn("Oil rate before (Sm³/d)", format="%.0f"),
+                    "rate_solved_sm3_d": st.column_config.NumberColumn("Solved oil rate (Sm³/d)", format="%.0f"),
+                    "liquid_sm3_d": st.column_config.NumberColumn("Liquid rate (Sm³/d)", format="%.0f"),
+                    "bhp_bara": st.column_config.NumberColumn("Flowing BHP (bara)", format="%.0f"),
+                    "drawdown_bar": st.column_config.NumberColumn("Drawdown (bar)", format="%.0f"),
+                    "required_whp_bara": st.column_config.NumberColumn("WHP needed by network (bara)", format="%.0f")})
+            if inf.get("curves"):
+                fig = go.Figure()
+                pal = [EQ["navy"], EQ["torch"], EQ["slate"], "#007079", "#7D4EBF", "#B3801A"]
+                for i_, (w_, pts_) in enumerate(inf["curves"].items()):
+                    col_ = pal[i_ % len(pal)]
+                    fig.add_trace(go.Scatter(x=[p_["q_sm3_d"] for p_ in pts_], y=[p_["pwf_bara"] for p_ in pts_],
+                                             mode="lines", name=f"{w_} IPR", line=dict(color=col_, width=2)))
+                    row_ = next((r_ for r_ in inf.get("table", []) if r_["well"] == w_), None)
+                    if row_:
+                        fig.add_trace(go.Scatter(x=[row_["liquid_sm3_d"]], y=[row_["bhp_bara"]], mode="markers",
+                                                 name=f"{w_} operating point",
+                                                 marker=dict(color=col_, size=11, symbol="diamond")))
+                fig.update_xaxes(title="Liquid rate (Sm³/d)")
+                fig.update_yaxes(title="Flowing bottom-hole pressure (bara)")
+                st.plotly_chart(eq_layout(fig, 320, title="Inflow performance and the solved operating points"),
+                                **STRETCH)
 
         sized = [e for e in fa_edges if CAT.get(e.item_id).category in ("flowline", "riser")]
         if sized:
@@ -2707,7 +2946,14 @@ with tab_fa:
                 fig.update_xaxes(title="Line ID (in)")
                 fig.update_yaxes(title="°C")
                 cc[1].plotly_chart(eq_layout(fig, 300, title="Outlet temperature"), **STRETCH)
-                st.dataframe(sdf, hide_index=True, **STRETCH)
+                st.dataframe(sdf, hide_index=True, **STRETCH,
+                             column_config={"note": st.column_config.TextColumn("Note", width="large")})
+                capped_ = [r_ for r_ in sw["rows"] if r_.get("note")]
+                if capped_:
+                    st.warning("Sizes too small for this rate stop at "
+                               f"{tb_fa.MAX_MARCH_BARA:,.0f} bara: "
+                               + ", ".join(f"{r_['diameter_in']:.0f}\"" for r_ in capped_)
+                               + ". Their pressures are a floor, not a result.")
 
 
         # ── production chemistry ──
@@ -2719,13 +2965,16 @@ with tab_fa:
             st.caption("Screening on the data entered — correlations with a limited valid range and "
                        "rules of thumb. Replace with the operator's fluid analyses before FEED.")
             ci = S.get("chem_inputs")
-        if ci is None:
-            # start from what the reservoirs already say, worst case across them
-            rs_ = list(tb_fluids.reservoirs(LAY).values()) if has_api("tb_fluids", "reservoirs") else []
-            ci = tb_chemistry.ChemistryInputs(
-                co2_mol_pct=max((r.co2_mol_pct for r in rs_), default=None) if rs_ else None,
-                h2s_ppm=max((r.h2s_ppm for r in rs_), default=None) if rs_ else None,
-                formation_water_salinity_wt_pct=max((r.salinity_wt_pct for r in rs_), default=None) if rs_ else None)
+            if ci is None:
+                # start from what the reservoirs already say, worst case across them
+                rs_ = list(tb_fluids.reservoirs(LAY).values()) if has_api("tb_fluids", "reservoirs") else []
+                ci = tb_chemistry.ChemistryInputs(
+                    co2_mol_pct=max((r.co2_mol_pct for r in rs_), default=None) if rs_ else None,
+                    h2s_ppm=max((r.h2s_ppm for r in rs_), default=None) if rs_ else None,
+                    **({"mercury_ug_nm3": max((getattr(r, "mercury_ug_nm3", 0.0) for r in rs_), default=None)}
+                       if rs_ and "mercury_ug_nm3" in {f_.name for f_ in dataclasses.fields(tb_chemistry.ChemistryInputs)}
+                       else {}),
+                    formation_water_salinity_wt_pct=max((r.salinity_wt_pct for r in rs_), default=None) if rs_ else None)
             with st.form(f"chem_form_{REV}"):
                 q = st.columns(4)
                 wat = q[0].number_input("Wax appearance temp (°C)", -99.0, 90.0,
@@ -2758,6 +3007,10 @@ with tab_fa:
                 sand = q[2].checkbox("Sand expected", bool(ci.sand_expected))
                 tan = q[3].number_input("TAN (mg KOH/g)", -1.0, 10.0,
                                         float(ci.tan_mg_koh_g) if ci.tan_mg_koh_g is not None else -1.0, 0.1)
+                hg_v = getattr(ci, "mercury_ug_nm3", None)
+                hg_in = st.number_input("Mercury in gas (µg/Nm³)", -1.0, 100000.0,
+                                        float(hg_v) if hg_v is not None else -1.0, 1.0,
+                                        help="−1 = not measured")
                 if st.form_submit_button("Run production chemistry screen", type="primary"):
                     none_if = lambda v, sentinel=-1.0: None if v <= sentinel else float(v)  # noqa: E731
                     S.chem_inputs = tb_chemistry.ChemistryInputs(
@@ -2767,7 +3020,9 @@ with tab_fa:
                         asphaltene_wt_pct=none_if(asph), saturation_pressure_bara=none_if(psat),
                         formation_water_salinity_wt_pct=none_if(sal), barium_mg_l=none_if(ba),
                         material=mat, sulphate_injection=bool(sw), sand_expected=bool(sand),
-                        tan_mg_koh_g=none_if(tan), inhibitor=S.fa_settings.inhibitor)
+                        tan_mg_koh_g=none_if(tan), inhibitor=S.fa_settings.inhibitor,
+                        **({"mercury_ug_nm3": none_if(hg_in)} if "mercury_ug_nm3" in
+                           {f_.name for f_ in dataclasses.fields(tb_chemistry.ChemistryInputs)} else {}))
                     st.rerun()
 
             edges_res = list(FA_RES.edges.values())
@@ -2806,9 +3061,24 @@ with tab_fa:
             kc[2].metric("Unknown", counts[tb_chemistry.UNKNOWN])
             kc[3].metric("Low", counts[tb_chemistry.LOW])
             st.dataframe(pd.DataFrame(rows_ch), hide_index=True, **STRETCH,
+                         column_order=["issue", "risk", "basis", "limit", "why", "mitigation", "data_needed"],
                          column_config={"issue": "Threat", "risk": "Risk", "basis": "Judged on",
+                                        "limit": st.column_config.TextColumn("Limit used", width="large"),
                                         "why": "Why it matters", "mitigation": "What to do",
                                         "data_needed": "Data still needed"})
+            if has_api("tb_chemistry", "contaminants"):
+                st.markdown("**CO₂, H₂S and mercury against their limits**")
+                p_des = max((n_.sitp_psi for n_ in LAY.nodes.values()), default=0.0) / PSI_PER_BAR
+                if p_des <= 0:
+                    p_des = max((r.pres_bara for r in tb_fluids.reservoirs(LAY).values()), default=100.0)
+                cc_ = S.get("chem_inputs") or ci
+                st.dataframe(pd.DataFrame(tb_chemistry.contaminants(
+                    cc_.co2_mol_pct, cc_.h2s_ppm, getattr(cc_, "mercury_ug_nm3", None), p_des)),
+                    hide_index=True, **STRETCH, column_config={
+                        "item": "Contaminant", "value": "Value", "status": "Status",
+                        "limit": st.column_config.TextColumn("Limit", width="large"), "note": "Consequence"})
+                st.caption(f"Partial pressures at {p_des:.0f} bara — the highest shut-in pressure (or reservoir "
+                           f"pressure where no shut-in pressure is set).")
             gaps = tb_chemistry.data_gaps(rows_ch)
             if gaps:
                 with st.expander(f"Fluid work this screen is asking for ({len(gaps)} items)"):
@@ -2843,6 +3113,7 @@ with tab_fa:
                 formation_water_salinity_wt_pct=float(cfluid.formation_water_salinity_wt_pct or 3.5),
                 condensate_rate_sm3_d=float(h0.get("liquid_sm3_d", 0.0)) if FA_RES.host and fluid0.api > 45 else 0.0)
             rec = tb_chemistry.recommend_inhibitor(case)
+            S.inhibitor_rec = rec          # the economics tab prices the chemical bill from this
             st.info(f"**{rec['recommended']}** — {rec['because']}")
             duties = rec["duties"]
             st.dataframe(pd.DataFrame([{
@@ -2865,13 +3136,455 @@ with tab_fa:
             ac[1].markdown("**The case for methanol**\n\n" + "\n".join(f"- {s}" for s in rec["for_methanol"]))
             st.caption(rec["caveat"])
 
+        # ── planned shutdown and blowdown ──
+        st.markdown("#### Planned shutdown and blowdown")
+        if not has_api("tb_shutdown", "planned_shutdown", "blowdown", "inventory"):
+            st.info("Needs tb_shutdown.py — see the banner at the top.")
+        else:
+            st.caption("How to leave the line safe for a planned stop, and whether the host can depressurise "
+                       "it below the hydrate pressure. Screening: one lumped volume at seabed temperature, "
+                       "venting through the host's blowdown restriction — a lower bound on the real time.")
+            sds = S.get("sd_settings") or tb_shutdown.ShutdownSettings()
+            with st.form(f"sd_form_{REV}"):
+                q = st.columns(4)
+                sd_orif = q[0].number_input("Blowdown restriction (mm)", 5.0, 300.0, float(sds.blowdown_orifice_mm), 5.0,
+                                            help="Effective diameter of the host blowdown valve / orifice")
+                sd_back = q[1].number_input("Flare back-pressure (bara)", 1.0, 30.0,
+                                            float(sds.flare_back_pressure_bara), 0.5)
+                sd_flare = q[2].number_input("Flare capacity for this line (kg/s)", 0.5, 500.0,
+                                             float(sds.flare_max_kg_s), 1.0)
+                sd_marg = q[3].number_input("Hydrate margin (°C)", 0.0, 10.0, float(sds.hydrate_margin_c), 0.5)
+                q = st.columns(4)
+                sd_inj = q[0].number_input("Inhibitor injection (m³/h)", 0.1, 50.0,
+                                           float(sds.inhibitor_injection_m3_h), 0.5,
+                                           help="Chemical capacity through the umbilical")
+                sd_disp = q[1].number_input("Displacement pumping (m³/h)", 5.0, 2000.0,
+                                            float(sds.displacement_rate_m3_h), 10.0,
+                                            help="Dead oil or diesel pumped from the host")
+                sd_inh = q[2].selectbox("Shutdown inhibitor", ["MEG", "Methanol"],
+                                        index=0 if S.fa_settings.inhibitor != "Methanol" else 1)
+                sd_iso = q[3].number_input("Isolation time (h)", 0.0, 12.0, float(sds.isolation_hours), 0.25)
+                if st.form_submit_button("Calculate shutdown and blowdown", type="primary"):
+                    try:
+                        S.sd_settings = tb_shutdown.ShutdownSettings(
+                            hydrate_margin_c=float(sd_marg), blowdown_orifice_mm=float(sd_orif),
+                            flare_back_pressure_bara=float(sd_back), flare_max_kg_s=float(sd_flare),
+                            inhibitor_injection_m3_h=float(sd_inj), displacement_rate_m3_h=float(sd_disp),
+                            isolation_hours=float(sd_iso))
+                        S.sd_inhibitor = sd_inh
+                    except ValueError as exc:
+                        st.error(str(exc))
+            if FA_RES.edges:
+                inv_ = tb_shutdown.inventory(LAY, FA_RES, S.fa_settings)
+                sdr = tb_shutdown.planned_shutdown(
+                    inv_, S.get("sd_settings") or tb_shutdown.ShutdownSettings(), S.get("sd_inhibitor", "MEG"),
+                    continuous_wt_pct=(S.fa_settings.inhibitor_wt_pct if S.fa_settings.inhibitor != "None" else 0.0),
+                    no_touch_h=S.fa_settings.no_touch_hours)
+                bd_ = sdr["blowdown"]
+                k = st.columns(4)
+                k[0].metric("Line volume", f"{inv_['volume_m3']:,.0f} m³",
+                            help=f"{inv_['liquid_m3']:,.0f} m³ liquid, {inv_['water_m3']:,.0f} m³ of it water")
+                k[1].metric("Settle-out pressure", f"{bd_['settle_out_bara']:.0f} bara")
+                k[2].metric("Hydrate-free below", f"{bd_['hydrate_pressure_bara']:.0f} bara",
+                            help="At seabed temperature, with the hydrate margin")
+                k[3].metric("Blowdown time", (f"{bd_['hours']:.1f} h" if bd_["reaches_hydrate_free"]
+                                              and bd_["hours"] == bd_["hours"] else "not achievable"),
+                            help=f"Lowest pressure at the seabed: {bd_['floor_worst_bara']:.0f} bara "
+                                 f"(flare {S.get('sd_settings', tb_shutdown.ShutdownSettings()).flare_back_pressure_bara:.0f} "
+                                 f"bara + {bd_['liquid_head_full_bar']:.0f} bar liquid head in the riser)")
+                (st.success if bd_["reaches_hydrate_free"] else st.warning)(bd_["verdict"])
+                st.markdown("**Planned shutdown sequence**")
+                st.dataframe(pd.DataFrame([dict(Step=x["step"], Action=x["action"], Detail=x["detail"],
+                                                Hours=(round(x["hours"], 1) if x["hours"] == x["hours"] else None))
+                                           for x in sdr["steps"]]),
+                             hide_index=True, **STRETCH, column_config={
+                                 "Detail": st.column_config.TextColumn(width="large")})
+                (st.success if sdr["verdict"].startswith("Pre-shutdown steps fit") else st.warning)(sdr["verdict"])
+                if len(bd_["curve"]) > 2:
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=[c_[0] for c_ in bd_["curve"]], y=[c_[1] for c_ in bd_["curve"]],
+                                             mode="lines", name="Line pressure", line=dict(color=EQ["navy"], width=3)))
+                    fig.add_hline(y=bd_["hydrate_pressure_bara"], line_dash="dash", line_color=EQ["torch"],
+                                  annotation_text="hydrate-free")
+                    fig.add_hline(y=bd_["floor_worst_bara"], line_dash="dot", line_color=EQ["slate"],
+                                  annotation_text="floor: flare + liquid head")
+                    fig.update_xaxes(title="Hours from start of blowdown")
+                    fig.update_yaxes(title="bara")
+                    st.plotly_chart(eq_layout(fig, 300, title="Blowdown"), **STRETCH)
+            else:
+                st.caption("Solve the flow assurance first (wells, lines and a host).")
+
         st.download_button("Download line results (CSV)", ldf.to_csv(index=False), "tieback_flow_assurance_lines.csv")
+
+# ═══════════════════════ PRODUCTION AND ECONOMICS ═══════════════════════
+with tab_prod:
+    if not (has_api("tb_production", "field_profile") and has_api("tb_economics", "cashflow")):
+        st.info("Needs tb_production.py and tb_economics.py — see the banner at the top.")
+    else:
+        st.caption("How much comes out, over how many years, and what it is worth. Screening: a tank "
+                   "of oil per reservoir, a plateau, a decline curve, and real-terms cash flow. Not a "
+                   "reserves statement and not an investment case.")
+        res_all = tb_fluids.reservoirs(LAY) if has_api("tb_fluids", "reservoirs") else {}
+
+        # ── recovery factor and volumes ──
+        st.markdown("#### Drainage strategy and recovery")
+        if not res_all:
+            st.warning("No reservoirs yet. Add one under *Reservoirs and well fluids* below the map, give it "
+                       "an area, a thickness and a recovery factor, and assign the wells to it.")
+        else:
+            rf_rows = []
+            for nm_, r_ in res_all.items():
+                e_ = tb_production.eur_sm3(r_)
+                sug = e_["suggestion"]
+                rf_rows.append(dict(reservoir=nm_, fluid=r_.fluid,
+                                    drive=getattr(r_, "drive", "") or sug["drive"],
+                                    area_km2=getattr(r_, "area_km2", 0.0),
+                                    thickness_m=getattr(r_, "thickness_m", 0.0),
+                                    in_place_msm3=e_["in_place_sm3"] / 1e6,
+                                    rf=e_["recovery_factor"], rf_source=e_["rf_source"],
+                                    rf_suggested=f"{sug['low']:.0%}–{sug['high']:.0%} (mid {sug['mid']:.0%})",
+                                    eur_msm3=e_["eur_sm3"] / 1e6))
+            st.dataframe(pd.DataFrame(rf_rows), hide_index=True, **STRETCH, column_config={
+                "reservoir": "Reservoir", "fluid": "Fluid", "drive": "Drainage strategy",
+                "area_km2": st.column_config.NumberColumn("Area (km²)", format="%.1f"),
+                "thickness_m": st.column_config.NumberColumn("Net thickness (m)", format="%.0f"),
+                "in_place_msm3": st.column_config.NumberColumn("In place (MSm³)", format="%.1f"),
+                "rf": st.column_config.NumberColumn("Recovery factor", format="%.2f"),
+                "rf_source": "From", "rf_suggested": "Suggested range",
+                "eur_msm3": st.column_config.NumberColumn("EUR (MSm³)", format="%.1f")})
+            rc_ = st.columns([2, 2, 1])
+            pick_r = rc_[0].selectbox("Reservoir", list(res_all), key=f"rf_res_{REV}")
+            r_obj = res_all[pick_r]
+            drive_opts = list(tb_production.DRIVES)
+            cur_drive = getattr(r_obj, "drive", "") or tb_production.default_drive(r_obj.fluid)
+            pick_d = rc_[1].selectbox("Drainage strategy", drive_opts,
+                                      index=drive_opts.index(cur_drive) if cur_drive in drive_opts else 0,
+                                      key=f"rf_drive_{REV}")
+            sug = tb_production.suggest_recovery_factor(r_obj.fluid, pick_d)
+            st.markdown(f'<div class="tb-note"><b>{pick_r} — suggested recovery factor '
+                        f'{sug["mid"]:.0%}</b> (range {sug["low"]:.0%}–{sug["high"]:.0%}). {sug["because"]}.</div>',
+                        unsafe_allow_html=True)
+            if rc_[2].button("Use this", key=f"rf_use_{REV}"):
+                record("recovery factor")
+                r_obj.drive, r_obj.recovery_factor = pick_d, round(sug["mid"], 3)
+                tb_fluids.set_reservoir(LAY, r_obj)
+                bump()
+                st.rerun()
+
+        # ── profile settings ──
+        st.markdown("#### Production profile")
+        first_year = dt.date.today().year + 3
+        if SCH is not None:
+            fo_ = sorted([a for a in SCH.activities.values() if a.act_id.endswith("_FIRST_OIL")],
+                         key=lambda a: a.es)
+            if fo_:
+                first_year = fo_[0].es.year
+        pc_ = st.columns(5)
+        p_year = pc_[0].number_input("First production (year)", 2020, 2070, int(first_year), 1,
+                                     key=f"p_year_{REV}", help="From the schedule unless you change it")
+        p_plateau = pc_[1].number_input("Plateau (years)", 0.0, 20.0, 3.0, 0.5, key=f"p_plat_{REV}")
+        p_decl = pc_[2].number_input("Decline (fraction/yr)", 0.01, 0.6, 0.15, 0.01, key=f"p_decl_{REV}")
+        p_b = pc_[3].number_input("Hyperbolic b", 0.0, 1.2, 0.0, 0.1, key=f"p_b_{REV}",
+                                  help="0 = exponential decline; 0.3–0.7 is typical for oil")
+        p_up = pc_[4].number_input("Uptime", 0.5, 1.0, 0.92, 0.01, key=f"p_up_{REV}")
+        ps_ = tb_production.ProfileSettings(first_production_year=int(p_year), plateau_years=float(p_plateau),
+                                            decline_fraction_per_year=float(p_decl), hyperbolic_b=float(p_b),
+                                            uptime=float(p_up))
+        S.profile_settings = ps_
+        fp_ = tb_production.field_profile(LAY, ps_, S.fa_settings)
+        if not fp_["years"]:
+            st.warning(fp_["note"] or "No profile yet.")
+        else:
+            k_ = st.columns(5)
+            k_[0].metric("Recoverable", f"{fp_['total_boe_sm3'] / 1e6:,.1f} MSm³ o.e.",
+                         help=f"{fp_['total_boe_sm3'] * tb_economics.BBL_PER_SM3 / 1e6:,.1f} million boe")
+            k_[1].metric("Plateau", f"{sum(s_['plateau_sm3_d'] for s_ in fp_['streams']):,.0f} Sm³/d")
+            k_[2].metric("First production", str(fp_["first_year"]))
+            k_[3].metric("Field life", f"{fp_['last_year'] - fp_['first_year'] + 1} years")
+            k_[4].metric("Reservoirs", len(fp_["streams"]))
+            if fp_["unassigned_reservoirs"]:
+                st.caption("Wells with no reservoir are not in the profile: "
+                           + ", ".join(fp_["unassigned_reservoirs"]))
+            if fp_["capped_years"]:
+                st.warning(f"Host capacity caps the rate in {len(fp_['capped_years'])} year(s) "
+                           f"({fp_['capped_years'][0]}–{fp_['capped_years'][-1]}): the profile is flattened "
+                           f"to what the host can take.")
+            pdf_ = pd.DataFrame(fp_["years"])
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=pdf_["year"], y=pdf_["oil_sm3_d"], name="Oil / condensate (Sm³/d)",
+                                 marker_color=EQ["navy"]))
+            fig.add_trace(go.Scatter(x=pdf_["year"], y=pdf_["gas_msm3_d"], name="Gas (MSm³/d)", yaxis="y2",
+                                     mode="lines+markers", line=dict(color=EQ["torch"], width=3)))
+            fig.update_layout(yaxis=dict(title="Sm³/d"),
+                              yaxis2=dict(title="MSm³/d", overlaying="y", side="right", showgrid=False))
+            st.plotly_chart(eq_layout(fig, 340, title="Field production profile"), **STRETCH)
+            with st.expander("Profile year by year"):
+                st.dataframe(pdf_, hide_index=True, **STRETCH, column_config={
+                    "year": "Year",
+                    "oil_sm3_d": st.column_config.NumberColumn("Oil (Sm³/d)", format="%.0f"),
+                    "gas_msm3_d": st.column_config.NumberColumn("Gas (MSm³/d)", format="%.2f"),
+                    "oil_sm3": st.column_config.NumberColumn("Oil (Sm³/yr)", format="%.0f"),
+                    "gas_sm3": st.column_config.NumberColumn("Gas (Sm³/yr)", format="%.0f"),
+                    "boe_sm3": st.column_config.NumberColumn("Sm³ o.e./yr", format="%.0f")})
+                st.download_button("Production profile (CSV)", pdf_.to_csv(index=False),
+                                   "tieback_production_profile.csv")
+
+        # ── how many wells ──
+        st.markdown("#### How many wells?")
+        wn_ = st.columns(4)
+        prod_wells = [w_ for w_ in LAY.nodes if LAY.kind(w_) == "well"
+                      and not tb_fluids.is_injector(LAY, w_)]
+        w_in_ = tb_fa.well_inputs(LAY)
+        mean_rate = (sum(w_in_[w_].oil_sm3_d for w_ in prod_wells if w_ in w_in_) / len(prod_wells)
+                     if prod_wells else 1000.0)
+        tgt = wn_[0].number_input("Plateau wanted (Sm³/d)", 0.0, 200000.0,
+                                  float(sum(w_in_[w_].oil_sm3_d for w_ in prod_wells if w_ in w_in_) or 4000.0),
+                                  100.0, key=f"wn_t_{REV}")
+        per_w = wn_[1].number_input("Rate per well (Sm³/d)", 1.0, 20000.0, float(max(mean_rate, 1.0)), 50.0,
+                                    key=f"wn_r_{REV}")
+        area_t = sum(float(getattr(r_, "area_km2", 0.0) or 0.0) for r_ in res_all.values())
+        area_in = wn_[2].number_input("Area to drain (km²)", 0.0, 500.0, float(area_t), 0.5, key=f"wn_a_{REV}")
+        drain = wn_[3].number_input("One well drains (km²)", 0.1, 50.0, 3.0, 0.5, key=f"wn_d_{REV}",
+                                    help="2–4 km² is typical for good NCS sandstone; less in tight rock, "
+                                         "more for a long horizontal well")
+        need = tb_production.wells_needed(float(tgt), float(per_w), float(area_in), float(drain),
+                                          uptime=float(p_up))
+        st.markdown(f'<div class="tb-note"><b>{need["wells"]} producer(s)</b> — {need["binding"]} is binding. '
+                    f'{need["note"]}. The layout has {len(prod_wells)}.</div>', unsafe_allow_html=True)
+
+        # ── economics ──
+        st.markdown("#### Life-cycle economics")
+        chem_musd = 0.0
+        if S.get("inhibitor_rec") and has_api("tb_economics", "chemical_cost_musd_yr"):
+            chem_musd = tb_economics.chemical_cost_musd_yr(S.inhibitor_rec)
+        es0 = S.get("econ_settings") or tb_economics.EconomicSettings(chemical_musd_yr=chem_musd)
+        with st.form(f"econ_form_{REV}"):
+            e1 = st.columns(4)
+            oil_p = e1[0].number_input("Oil price (USD/bbl)", 5.0, 250.0, float(es0.oil_price_usd_bbl), 5.0)
+            gas_p = e1[1].number_input("Gas price (USD/Sm³)", 0.01, 3.0, float(es0.gas_price_usd_sm3), 0.01)
+            disc = e1[2].number_input("Discount rate", 0.0, 0.3, float(es0.discount_rate), 0.01)
+            tariff = e1[3].number_input("Host tariff (USD/boe)", 0.0, 60.0, float(es0.tariff_usd_boe), 0.5)
+            e2 = st.columns(4)
+            opex_f = e2[0].number_input("Fixed OPEX (MUSD/yr)", 0.0, 200.0, float(es0.opex_fixed_musd_yr), 0.5)
+            opex_v = e2[1].number_input("Variable OPEX (USD/boe)", 0.0, 60.0, float(es0.opex_var_usd_boe), 0.5)
+            chem_in = e2[2].number_input("Chemicals (MUSD/yr)", 0.0, 100.0,
+                                         float(es0.chemical_musd_yr or chem_musd), 0.1,
+                                         help="Pre-filled from the MEG/methanol sizing when you have run it")
+            aband = e2[3].number_input("Abandonment (fraction of CAPEX)", 0.0, 0.6,
+                                       float(es0.abandonment_frac_of_capex), 0.01)
+            e3 = st.columns(4)
+            iv_d = e3[0].number_input("Intervention (days/yr)", 0.0, 120.0, float(es0.intervention_days_yr), 1.0)
+            iv_r = e3[1].number_input("Intervention day rate (kUSD)", 0.0, 2000.0,
+                                      float(es0.intervention_day_rate_usd / 1000), 10.0)
+            tax_on = e3[2].checkbox("Apply NCS petroleum tax", bool(es0.apply_tax),
+                                    help="78 % headline rate on a simplified base, with an investment uplift")
+            tax_r = e3[3].number_input("Tax rate", 0.0, 0.95, float(es0.tax_rate), 0.01, disabled=not tax_on)
+            if st.form_submit_button("Apply economics", type="primary"):
+                try:
+                    S.econ_settings = tb_economics.EconomicSettings(
+                        oil_price_usd_bbl=float(oil_p), gas_price_usd_sm3=float(gas_p),
+                        discount_rate=float(disc), tariff_usd_boe=float(tariff),
+                        opex_fixed_musd_yr=float(opex_f), opex_var_usd_boe=float(opex_v),
+                        chemical_musd_yr=float(chem_in), abandonment_frac_of_capex=float(aband),
+                        intervention_days_yr=float(iv_d), intervention_day_rate_usd=float(iv_r) * 1000,
+                        apply_tax=bool(tax_on), tax_rate=float(tax_r))
+                except ValueError as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun()
+        es_ = S.get("econ_settings") or es0
+        annual_capex = {}
+        if SCH is not None:
+            annual_capex = tb_cost.phase_costs(EST, SCH, EMAP, S.cost_settings)["annual"]
+        cf_ = tb_economics.cashflow(fp_["years"], annual_capex, es_)
+        if not cf_["years"]:
+            st.info("Add a production profile and a schedule, and the economics follow.")
+        else:
+            m_ = st.columns(5)
+            m_[0].metric("NPV", money(cf_["npv_usd"]))
+            m_[1].metric("IRR", f"{cf_['irr']:.0%}" if cf_.get("irr") is not None else "—")
+            m_[2].metric("Break-even oil price",
+                         f"{cf_['breakeven_oil_usd_bbl']:,.0f} USD/bbl"
+                         if cf_.get("breakeven_oil_usd_bbl") else "not economic")
+            m_[3].metric("Unit technical cost",
+                         f"{cf_['unit_technical_cost_usd_boe']:,.1f} USD/boe"
+                         if cf_.get("unit_technical_cost_usd_boe") else "—")
+            m_[4].metric("CAPEX per boe",
+                         f"{cf_['capex_usd_boe']:,.1f} USD/boe" if cf_.get("capex_usd_boe") else "—")
+            st.markdown(f'<div class="tb-note">{tb_economics.summary_line(cf_, money_factor(), S.currency)}'
+                        f'</div>', unsafe_allow_html=True)
+            cdf_ = pd.DataFrame(cf_["years"])
+            cdf_["cumulative_discounted_usd"] = cdf_["discounted_usd"].cumsum()
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=cdf_["year"], y=cdf_["net_usd"] * money_factor(),
+                                 name=f"Net cash flow ({S.currency})", marker_color=EQ["teal"]))
+            fig.add_trace(go.Scatter(x=cdf_["year"], y=cdf_["cumulative_discounted_usd"] * money_factor(),
+                                     name=f"Cumulative discounted ({S.currency})", mode="lines+markers",
+                                     line=dict(color=EQ["navy"], width=3)))
+            fig.add_hline(y=0, line_dash="dash", line_color=EQ["slate"])
+            st.plotly_chart(eq_layout(fig, 320, title="Cash flow"), **STRETCH)
+            with st.expander("Cash flow year by year"):
+                show_ = cdf_.copy()
+                for c_ in ("revenue_usd", "opex_usd", "tariff_usd", "capex_usd", "abandonment_usd",
+                           "tax_usd", "net_usd", "discounted_usd", "cumulative_discounted_usd"):
+                    show_[c_] = show_[c_] * money_factor()
+                st.dataframe(show_.drop(columns=["discount_factor"]), hide_index=True, **STRETCH)
+                st.download_button("Cash flow (CSV)", cdf_.to_csv(index=False), "tieback_cashflow.csv")
+            st.markdown("#### What decides the answer")
+            if st.button("Run sensitivity (tornado)", key=f"torn_{REV}"):
+                with st.spinner("Moving each input to its low and high value…"):
+                    S.tornado = tb_economics.tornado(fp_["years"], annual_capex, es_)
+            if S.get("tornado"):
+                tdf_ = pd.DataFrame(S.tornado)
+                fig = go.Figure()
+                base_npv = tdf_["base_npv_usd"].iloc[0] * money_factor()
+                fig.add_trace(go.Bar(y=tdf_["input"], x=(tdf_["npv_low_usd"] * money_factor() - base_npv),
+                                     name="Low", orientation="h", marker_color=EQ["amber"], base=base_npv))
+                fig.add_trace(go.Bar(y=tdf_["input"], x=(tdf_["npv_high_usd"] * money_factor() - base_npv),
+                                     name="High", orientation="h", marker_color=EQ["teal"], base=base_npv))
+                fig.update_layout(barmode="overlay", yaxis=dict(autorange="reversed"))
+                fig.add_vline(x=base_npv, line_color=EQ["navy"])
+                st.plotly_chart(eq_layout(fig, 320, title=f"NPV sensitivity ({S.currency})"), **STRETCH)
+                st.caption("Ranked by how much each input moves NPV between its low and high value. "
+                           "The line is the base case.")
+
+# ═══════════════════════════════ OPTIMISE ═══════════════════════════════
+with tab_opt:
+    if not has_api("tb_optimise", "search"):
+        st.info("Needs tb_optimise.py — see the banner at the top.")
+    elif not [w_ for w_ in LAY.nodes if LAY.kind(w_) == "well"]:
+        st.info("Build or load a concept first — the search varies the concept on screen.")
+    else:
+        st.caption("Takes the concept on screen as the base case and builds the obvious variants around "
+                   "it: more or fewer wells, a different line size, a loop, boosting. Each one is costed, "
+                   "scheduled, solved and valued with the same models as the rest of the app. A screening "
+                   "search over one topology — it narrows the field, it does not design anything.")
+        base_wells = len([w_ for w_ in LAY.nodes if LAY.kind(w_) == "well"
+                          and not tb_fluids.is_injector(LAY, w_)])
+        base_dias = [e_.diameter_in for e_ in LAY.edges.values()
+                     if CAT.get(e_.item_id).category == "flowline" and e_.diameter_in]
+        base_dia = float(max(base_dias)) if base_dias else 10.0
+        o1 = st.columns(4)
+        w_lo = o1[0].number_input("Wells from", 1, 24, max(1, base_wells - 1), 1, key=f"o_wlo_{REV}")
+        w_hi = o1[1].number_input("Wells to", 1, 24, min(24, base_wells + 2), 1, key=f"o_whi_{REV}")
+        d_lo = o1[2].number_input("Line ID from (in)", 2.0, 36.0, float(max(4.0, float(base_dia) - 4.0)), 1.0,
+                                  key=f"o_dlo_{REV}")
+        d_hi = o1[3].number_input("Line ID to (in)", 2.0, 36.0, float(min(36.0, float(base_dia) + 4.0)), 1.0,
+                                  key=f"o_dhi_{REV}")
+        o2 = st.columns(4)
+        try_loop = o2[0].checkbox("Try a looped line", True, key=f"o_loop_{REV}")
+        try_boost = o2[1].checkbox("Try boosting", True, key=f"o_boost_{REV}",
+                                   help=f"A station adds {S.fa_settings.boost_dp_bar:,.0f} bar "
+                                        f"(Flow assurance settings) and its cost from the catalogue"
+                                   if hasattr(S.fa_settings, "boost_dp_bar") else None)
+        w_in_o = tb_fa.well_inputs(LAY)
+        prods_o = [w_ for w_ in LAY.nodes if LAY.kind(w_) == "well" and not tb_fluids.is_injector(LAY, w_)]
+        mean_o = (sum(w_in_o[w_].oil_sm3_d for w_ in prods_o if w_ in w_in_o) / len(prods_o)) if prods_o else 1000.0
+        rate_o = o2[2].number_input("Rate per well (Sm³/d)", 1.0, 20000.0, float(max(mean_o, 1.0)), 50.0,
+                                    key=f"o_rate_{REV}", help="Every variant gives each well this rate, so "
+                                                              "the comparison is about the layout")
+        d_step = o2[3].number_input("Line step (in)", 1.0, 8.0, 2.0, 1.0, key=f"o_dstep_{REV}")
+        spec_ = tb_optimise.SearchSpec(
+            well_counts=list(range(int(w_lo), int(w_hi) + 1)),
+            diameters_in=[float(x) for x in np.arange(d_lo, d_hi + 1e-9, d_step)],
+            loop=[False, True] if try_loop else [False],
+            boosting=[False, True] if try_boost else [False])
+        n_var = len(spec_.combinations(base_wells, base_dia))
+        st.caption(f"{n_var} variant(s) to evaluate.")
+        if st.button("Run the search", type="primary", key=f"o_run_{REV}"):
+            bar = st.progress(0.0, "Starting…")
+            with st.spinner("Costing, scheduling, solving and valuing each variant…"):
+                rows_o = tb_optimise.search(
+                    LAY, spec_, S.cost_settings, S.sched_settings, S.fa_settings,
+                    S.get("profile_settings"), S.get("econ_settings"), float(rate_o),
+                    progress=lambda f_, msg: bar.progress(min(f_, 1.0), msg))
+            bar.empty()
+            S.opt_rows = rows_o
+            S.opt_sig = md5(LAY.to_dict(), vars(S.cost_settings), float(rate_o), n_var)
+        rows_o = S.get("opt_rows")
+        if rows_o:
+            if S.get("opt_sig") != md5(LAY.to_dict(), vars(S.cost_settings), float(rate_o), n_var):
+                st.warning("The layout or the settings changed after this search — run it again.")
+            best = [r_ for r_ in rows_o if r_.get("feasible")]
+            base_row = next((r_ for r_ in rows_o if r_.get("is_base")), None)
+            if not best:
+                st.error("No variant works as drawn: every one has a design error, a line too small for "
+                         "the rate, or wells that cannot deliver. Widen the line range, add boosting, or "
+                         "lower the rate per well.")
+            else:
+                st.markdown("#### The three worth drawing")
+                for r_ in best[:3]:
+                    st.markdown(f'<div class="tb-note">{tb_optimise.explain(r_, base_row)}</div>',
+                                unsafe_allow_html=True)
+            odf_ = pd.DataFrame([{ "Wells": r_.get("wells"), "Line ID (in)": r_.get("diameter_in"),
+                                   "Loop": r_.get("loop"), "Boosting": r_.get("boosting"),
+                                   "Works": r_.get("feasible"),
+                                   "CAPEX (MUSD)": r_.get("capex_musd"), "NPV (MUSD)": r_.get("npv_musd"),
+                                   "Break-even (USD/bbl)": r_.get("breakeven_usd_bbl"),
+                                   "CAPEX (USD/boe)": r_.get("capex_usd_boe"),
+                                   "Recoverable (MSm³ o.e.)": r_.get("recoverable_msm3_oe"),
+                                   "Plateau (Sm³/d)": r_.get("plateau_sm3_d"),
+                                   "Hydrate margin (°C)": r_.get("hydrate_margin_c"),
+                                   "First production": r_.get("first_production"),
+                                   "Errors": r_.get("errors"), "Note": r_.get("note")} for r_ in rows_o])
+            st.dataframe(odf_, hide_index=True, **STRETCH, column_config={
+                c_: st.column_config.NumberColumn(format="%.1f") for c_ in
+                ("CAPEX (MUSD)", "NPV (MUSD)", "Break-even (USD/bbl)", "CAPEX (USD/boe)",
+                 "Recoverable (MSm³ o.e.)", "Plateau (Sm³/d)", "Hydrate margin (°C)")})
+            st.download_button("Search results (CSV)", odf_.to_csv(index=False), "tieback_optimiser.csv")
+            par = tb_optimise.pareto(rows_o)
+            if par:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=[r_["capex_musd"] for r_ in rows_o if r_.get("feasible")],
+                                         y=[r_["npv_musd"] for r_ in rows_o if r_.get("feasible")],
+                                         mode="markers", name="Variants",
+                                         marker=dict(color=EQ["line"], size=9),
+                                         text=[tb_optimise.explain(r_) for r_ in rows_o if r_.get("feasible")]))
+                fig.add_trace(go.Scatter(x=[r_["capex_musd"] for r_ in par], y=[r_["npv_musd"] for r_ in par],
+                                         mode="lines+markers", name="Nothing beats these",
+                                         line=dict(color=EQ["torch"], width=3), marker=dict(size=12)))
+                if base_row:
+                    fig.add_trace(go.Scatter(x=[base_row.get("capex_musd")], y=[base_row.get("npv_musd")],
+                                             mode="markers", name="Base case (on screen)",
+                                             marker=dict(color=EQ["navy"], size=14, symbol="diamond")))
+                fig.update_xaxes(title="CAPEX (MUSD)")
+                fig.update_yaxes(title="NPV (MUSD)")
+                st.plotly_chart(eq_layout(fig, 340, title="Cost against value"), **STRETCH)
+            sc_ = st.columns([2, 1, 1])
+            names_o = [f"{r_['wells']}w · {r_['diameter_in']:.0f}\"" + (" · loop" if r_["loop"] else "")
+                       + (" · boost" if r_["boosting"] else "") for r_ in best[:8]]
+            if names_o:
+                pick_o = sc_[0].selectbox("Variant", names_o, key=f"o_pick_{REV}")
+                chosen_o = best[names_o.index(pick_o)]
+                if sc_[1].button("Load into the layout", key=f"o_load_{REV}"):
+                    lay_v, label_v = tb_optimise.build_variant(LAY, chosen_o)
+                    set_project(f"{S.project_name} — {label_v}", lay_v, S.cost_settings, S.sched_settings,
+                                S.fa_settings, S.display)
+                    S.loaded_note = f"Loaded the variant: {label_v}."
+                    st.rerun()
+                if sc_[2].button("Save top 3 as concepts", key=f"o_save_{REV}"):
+                    saved_ = []
+                    for r_ in best[:3]:
+                        lay_v, label_v = tb_optimise.build_variant(LAY, r_)
+                        nm_ = _unique_case_name(f"Opt: {label_v}")
+                        S.cases = S.get("cases") or []
+                        S.cases.append(tb_cases.snapshot(nm_, lay_v, S.cost_settings, S.sched_settings,
+                                                         S.fa_settings, "from the optimiser", S.display))
+                        saved_.append(nm_)
+                    S.case_rows = None
+                    st.success("Saved as concepts: " + ", ".join(saved_)
+                               + ". Compare them in the Cases tab; the layout on screen is unchanged.")
 
 # ═══════════════════════════ DESIGN BASIS ═══════════════════════════
 with tab_basis:
     st.caption(tb_basis.UNITS_NOTE)
-    basis_rows = tb_basis.design_basis(LAY, S.cost_settings, S.sched_settings, S.fa_settings,
-                                       S.nok_per_usd, S.get("catalog_source", ""))
+    try:
+        basis_rows = tb_basis.design_basis(LAY, S.cost_settings, S.sched_settings, S.fa_settings,
+                                           S.nok_per_usd, S.get("catalog_source", ""),
+                                           chem_inputs=S.get("chem_inputs"))
+    except TypeError:          # an older tb_basis.py without contaminant checks
+        basis_rows = tb_basis.design_basis(LAY, S.cost_settings, S.sched_settings, S.fa_settings,
+                                           S.nok_per_usd, S.get("catalog_source", ""))
     counts = tb_basis.summary(basis_rows)
     k = st.columns(4)
     k[0].metric("Entered", counts["ok"])
@@ -3096,3 +3809,6 @@ with tab_exp:
         st.download_button("CAPEX hand-off (.yaml)", yaml.safe_dump(handoff, sort_keys=False),
                            "tieback_capex_handoff.yaml", "text/yaml")
         st.caption("Drilling and completion cost is not included; it stays in FieldVista's well cost inputs.")
+
+# ─────────────────────────── footer, on every page ───────────────────────────
+st.markdown(tb_theme.footer_html(APP_VERSION), unsafe_allow_html=True)

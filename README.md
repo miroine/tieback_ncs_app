@@ -4,8 +4,21 @@ Subsea tie-back concept design for the Norwegian Continental Shelf: drag-and-dro
 NCS map, equipment catalog with editable costs, design checks, CAPEX with P10/P50/P90, a CPM
 schedule with weather windows, and steady-state flow assurance screening on the layout network.
 
-> Engineering screening tool. Default catalog rates are **indicative placeholders**, not benchmarked
-> data — load a project cost library for real work. Not affiliated with or endorsed by Equinor or Sodir.
+**Created by Merouane Hamdani.** © 2026 Merouane Hamdani. All rights reserved.
+
+> **Prototype — early-phase concept planning and screening only.** It is not engineering software:
+> **do not use it on commercial projects**, or as a basis for investment, procurement, design,
+> operational or safety decisions. Default catalog rates are **indicative placeholders**, not
+> benchmarked data, and the physics is correlation-level screening. Confirm every number with proper
+> engineering tools and the operator's own data.
+>
+> **Licence:** source-available, **attribution required**, non-commercial — see [LICENSE](LICENSE) and
+> [NOTICE](NOTICE). Copying, forking or reusing the code, or using its figures and numbers in a
+> document, requires crediting *TieBack Studio — created by Merouane Hamdani*; commercial use needs
+> the author's written permission.
+>
+> Independent personal project. Not affiliated with, endorsed by, or representing Equinor, Sodir or
+> any other organisation whose public data it reads.
 
 ## Run
 ```bash
@@ -78,6 +91,11 @@ from the production-path checks and the flow-assurance network but are costed an
 | `tb_basis.py` | Design basis checklist in SI units (m, bar, °C, Sm³/d, tonn, MNOK) with entered / default / missing / to-resolve status |
 | `tb_mapextras.py` | Sketches on the map (true-ground circles, polygons, lines, geodesic lengths and areas, what equipment falls inside), bookmarks, and map layers by URL — ArcGIS tiled, map and image services, ArcGIS feature layers, WMS and XYZ, recognised by their shape |
 | `tb_share.py` | Share links: the whole design compressed into the address (`?design=`), or a short link to a stored copy (`?share=`, on the server's disk or in a secret GitHub gist); protected links (`2.`) encrypted with AES-256-GCM under an scrypt-derived access code or password; catalogue sent as a diff to the default; damaged and oversized links refused in words |
+| `tb_production.py` | Volumetrics, recovery-factor guidance by drainage strategy, wells needed for a plateau, and the plateau-then-decline profile per reservoir, capped by host capacity |
+| `tb_economics.py` | OPEX, host tariff, abandonment and tax on top of the CAPEX profile: NPV, IRR, payback, break-even oil price, unit technical cost, and a tornado sensitivity |
+| `tb_optimise.py` | Builds the variants around the concept on screen (wells, line size, loop, boosting), scores each one and keeps the ones nothing beats on both cost and value |
+| `tb_theme.py` | The whole look in one place: the Equinor-derived palette, the stylesheet, the chart frame, and the author, disclaimer and licence strings the app and the report show |
+| `tb_shutdown.py` | Planned-shutdown sequence (inhibit or displace, close in, depressurise) and blowdown: hydrate-free pressure, liquid-head floor in the riser, venting time through the host restriction |
 | `tb_fluids.py` | Reservoirs and each well's main fluid (oil, gas, gas condensate, water or gas injector): stated on the well, inherited from its reservoir, or classified from GOR by McCain's ranges — always reported with which of the three it came from; lines take the fluid of the wells upstream; reservoir PVT copied into the well streams; gas wells by gas rate and CGR |
 | `tb_chemistry.py` | Production chemistry: MEG vs methanol sizing and recommendation (Hammerschmidt inverted, Nielsen-Bucklin cross-check, regeneration credit, life cost), and a screen for wax, asphaltenes, scale, emulsions, corrosion, souring, sand and naphthenates that names the test when the data is missing |
 | `tb_viability.py` | Concept viability checklist: layout integrity, deliverability, hydrate margin at design rate and turndown, cool-down, erosion, slugging, spans, schedule float and cost spread, each with a target and what to do if it is not met |
@@ -338,12 +356,15 @@ When deploying to Streamlit Community Cloud, upload the whole folder — `test_f
 | well (IPR/VLP) / cost spreadsheet IO / cases / report | 22 / 12 / 19 / 7 |
 | production chemistry / reservoirs and well fluids / map tools and sharing | 52 / 52 / 66 |
 | tie-in screening / design basis / viability | 21 / 21 / 14 |
+| theme, author and licence notices | 14 |
+| production, economics and the optimiser | 27 |
 | share links (incl. code protection) / regions, templates-to-host, concept tie-ins, new equipment | 27 / 26 |
+| shutdown and blowdown, contaminants, pressure protection, safety zones, trees and risers | 22 |
 | map bridge (incl. duplicate) | 52 |
 | ncs / import / grid surfaces / flow assurance | 23 / 43 / 83 / 43 |
 | multiphase / thermal / bathymetry | 31 / 25 / 37 |
 | JS core logic / component protocol simulation | 61 / 66 |
-| Headless UI (stub Streamlit, scripted interactions) | 100 |
+| Headless UI (stub Streamlit, scripted interactions) | 112 |
 
 The protocol test runs the real component script against a fake DOM and fake Leaflet; the UI test
 executes `tieback_app.py` with a stub Streamlit. Neither replaces a check in a real browser.
@@ -351,6 +372,51 @@ executes `tieback_app.py` with a stub Streamlit. Neither replaces a check in a r
 `ui_test/stubs.py` is part of the app, not scaffolding around it: it has to mirror the Streamlit API the
 app actually calls. When you update the app, update `ui_test/` in the same commit — a stub that is a
 version behind fails the build with an error in the app's own code rather than in the harness.
+
+## Well deliverability (IPR)
+In *Flow assurance → Well deliverability*, every producing well has an IPR row, ticked **Use IPR** by
+default. A well with no saved IPR starts from its reservoir's pressure and temperature. *Save well IPR
+data* stores the table on the wells (it travels in the project file and in share links); *Solve rates
+from IPR* saves it too, then solves each well's rate from its inflow, tubing lift and the network
+back-pressure and shows the result: oil and liquid rate before and after, flowing bottom-hole pressure,
+drawdown and the wellhead pressure the network needs, with the IPR curves and operating points. The
+design basis counts a well as having an IPR once its data is saved, and flags rows still on the
+default 350 bara / 12 Sm³/d/bar.
+
+## Pressure protection: HIPPS or fully rated
+Shut-in pressure is entered in **bara** (stored internally in psi, as the catalogue ratings are). The
+*Pressure protection* panel on the Layout tab walks each producing well's path to the host and compares
+its shut-in pressure with the rating of every item on the way (hosts excluded — their receiving
+facilities are rated by the host). The verdict per well is **fully rated**, **HIPPS in place**, or
+**HIPPS or fully rated** — in which case it names what a fully rated design would have to upgrade and
+where HIPPS would protect the most (the first structure the well produces into), with a *Fit HIPPS at …*
+button. A HIPPS ticked on a structure is costed as the catalogue's HIPPS module. The same verdict is a
+line in the design basis.
+
+## Planned shutdown and blowdown
+In the Flow assurance tab. From the solved line — volume, liquid and water inventory, settle-out
+pressure — the app sizes a planned-shutdown sequence: inhibit the standing water (MEG or methanol, to
+the concentration the subcooling at seabed temperature needs, at the umbilical's injection rate), or
+displace an oil line with dead oil / diesel; close in; and depressurise if the stop outlasts the
+cool-down time. The **blowdown** check finds the hydrate-free pressure at seabed temperature (with a
+margin), the lowest pressure the host can actually reach at the seabed — flare back-pressure plus the
+liquid head standing in the riser, often the show stopper on a deep or liquid-rich tie-back — and the
+venting time through the host's blowdown restriction (choked, then subsonic, capped by the flare). The
+line is one lumped isothermal volume and gas coming out of solution is not counted, so the time is a
+lower bound: confirm it with a transient simulation.
+
+## Contaminants and production chemistry limits
+The production-chemistry table now shows the **limit** each threat was judged against. CO₂, H₂S and
+mercury are checked against their limits at the highest shut-in pressure — CO₂ and H₂S by partial
+pressure (pCO₂ below 0.03 bar low, 0.03–2 bar corrosive, above 2 bar severe; ISO 15156 sour service
+from 0.3 kPa H₂S), mercury by content — in the flow-assurance tab and as a *Contaminants* section of the
+design basis. Reservoirs carry pressure, temperature, CO₂, H₂S and mercury (*Reservoirs and well fluids*
+under the map); the design basis reports reservoir pressure and temperature.
+
+## Host safety zones
+Every host is drawn with its 500 m safety zone (dashed red), switchable in the sidebar display settings
+and in the map's layer control. Subsea items inside it get an information note: installation and
+intervention there need the host operator's consent and simultaneous-operations planning.
 
 ## Viability: the turndown case
 A tie-back is sized for its design (plateau) rate, but runs slower in late life, during well tests or
@@ -363,7 +429,10 @@ continuous inhibition. The *Flow assurance* tab runs the full sensitivity (1.0, 
 
 ## Equipment catalogue
 Besides trees, templates, manifolds, PLET/PLEM, in-line tees, SSIVs, riser bases, hosts and the linear
-items, the catalogue has: PLET with isolation valve, PLET with subsea pig launcher/receiver, piggable
+items, the catalogue has: trees rated 5k, 10k (vertical and horizontal), 15k (vertical and horizontal)
+and 20k psi; eight riser types — flexible, flexible lazy-wave, steel catenary (SCR), steel lazy-wave
+(SLWR), top-tensioned (TTR), hybrid riser tower / free-standing, rigid riser clamped to a fixed platform,
+and J-tube pull-in; PLET with isolation valve, PLET with subsea pig launcher/receiver, piggable
 wye, hot-tap tie-in to an operating pipeline, subsea HIPPS module (placing it sets the node's HIPPS
 flag); single-phase booster pump, single multiphase pump module, the 2-pump multiphase station, subsea
 raw-seawater injection pump; wet-gas compressor module and the full compression station; gas–liquid
@@ -374,6 +443,51 @@ which connect by umbilical, power cable or utility line, not by flowline. Also a
 (TCP) flowline and a flexible jumper. Rates are indicative placeholders like the rest. A project saved by
 an older version lacks the new items; the Equipment catalog tab offers to add them without touching the
 project's own rates.
+
+## When a line is too small
+The upstream pressure march stops at 1 500 bara. A line that would need more is simply too small for
+the rate: the flow-assurance findings say so, the size sweep marks that size *too small at this rate*
+and its pressures are reported as a floor rather than a result. Correlations (Beggs & Brill, Brill &
+Beggs Z) are clamped to the range they were fitted over, so an extreme case gives a boundary value
+instead of an arithmetic failure.
+
+## Production, economics and the optimiser
+**Production & economics** turns a layout into a profile and a value.
+
+* Give a reservoir its volumetrics (area, net thickness, NTG, porosity, Sw, Bo/Bg) and a drainage
+  strategy under *Reservoirs and well fluids*. The app suggests a recovery-factor range for that
+  strategy — solution-gas drive is not water injection — explains the number, and lets you take it or
+  enter your own. In-place volume and EUR follow.
+* The profile is plateau-then-decline per reservoir, from the wells assigned to it and their design
+  rates, capped by the host's liquid and gas capacity. It never produces more than the EUR, and it
+  says so when the cut-off rate or the horizon leaves some of it behind.
+* *How many wells?* takes the plateau you want, the rate a well delivers and the area to drain, and
+  reports which of the two is binding.
+* Economics: oil and gas prices, fixed and variable OPEX, the host tariff, intervention days, the
+  chemical bill (pre-filled from the MEG/methanol sizing), an abandonment provision and, optionally,
+  the NCS petroleum tax. Out come NPV, IRR, payback, break-even oil price, unit technical cost and
+  CAPEX per barrel, with the cash flow year by year.
+* *Run sensitivity* moves each input to its low and high value and ranks them by how far NPV travels —
+  the tornado that says which assumption is worth chasing.
+
+**Optimise** takes the concept on screen as the base case and builds the variants around it: more or
+fewer wells (cloned into the structure, with the template upgraded when it runs out of slots), a
+different line size, a looped line, and a boosting station spliced into the main line with power from
+the host. Every variant is costed, scheduled, flow-solved and valued with the same models, and the
+ones nothing beats on both CAPEX and NPV are drawn as a front. A variant whose wells cannot deliver, or
+whose line is too small for the rate, stays in the table with the reason and never reaches the front.
+You can load one into the layout, or save the best three as concepts and compare them in the Cases tab.
+
+Boosting is now in the hydraulics as well as in the cost: a boosting or compression station lifts the
+pressure by `boost_dp_bar` (80 bar by default, per-node override in `attrs`), so everything upstream of
+it only has to reach its suction pressure.
+
+## Look and feel
+`tb_theme.py` holds the whole visual language in one place: an Equinor-derived palette (energy red as
+the accent, moss green as the working colour, slate blue for headings), the `Equinor` typeface asked
+for first with a system fallback, one stylesheet built from those tokens, and one chart frame so every
+figure matches. `.streamlit/config.toml` gives Streamlit's own widgets the same colours. No Equinor
+logo or wordmark is used, and the app states on every page that it is an independent prototype.
 
 ## Known limits
 - Flow assurance draws a longitudinal section (seabed, line and riser with pressure/temperature) and a

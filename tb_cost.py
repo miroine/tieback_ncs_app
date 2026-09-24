@@ -63,12 +63,34 @@ def _offshore_days(item, row) -> float:
     return item.install_days
 
 
+HIPPS_ITEM = "hipps_mod"
+
+
+def hipps_rows(layout) -> List[dict]:
+    """HIPPS ticked on a structure costs a HIPPS valve skid, priced as the catalogue's HIPPS module.
+
+    A node that *is* a HIPPS module is already costed as itself. The row carries
+    `element_id` "<node>_HIPPS" and is installed with its structure.
+    """
+    cat = layout.catalog
+    if HIPPS_ITEM not in cat.items:
+        return []
+    rows = []
+    for n in layout.nodes.values():
+        if n.hipps and n.item_id != HIPPS_ITEM and cat.get(n.item_id).category != "host":
+            it = cat.get(HIPPS_ITEM)
+            rows.append(dict(element_id=f"{n.node_id}_HIPPS", label=f"HIPPS on {n.label or n.node_id}",
+                             item_id=HIPPS_ITEM, item=it.name, category=it.category, basis="unit",
+                             quantity=1.0, length_m=0.0, diameter_in=0.0, phase=n.phase, piggyback_on=None))
+    return rows
+
+
 def estimate(layout, settings: Optional[CostSettings] = None) -> dict:
     s = settings or CostSettings()
     cat = layout.catalog
     lines = []
     spreads_used = set()
-    for row in layout.quantities():
+    for row in layout.quantities() + hipps_rows(layout):
         it = cat.get(row["item_id"])
         q = _q(it, row)
         proc = it.procurement_usd * q
@@ -193,7 +215,7 @@ def phase_costs(estimate_result: dict, schedule, element_map: dict, settings: Op
     prof = np.zeros(horizon)
     unphased = 0.0
     for ln in estimate_result["lines"]:
-        m = element_map.get(ln["element_id"], {})
+        m = element_map.get(ln["element_id"]) or element_map.get(str(ln["element_id"]).rsplit("_HIPPS", 1)[0], {})
         pa, ia = acts.get(m.get("procure")), acts.get(m.get("install"))
         if pa is not None:
             a0, a1 = _month_index(pa.es, origin), _month_index(pa.ef, origin)

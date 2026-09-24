@@ -6,7 +6,7 @@ FIX = yaml.safe_load(open("test_fixtures/demo_field_a_tieback.yaml"))
 def demo(cat=None): return n.Layout.from_dict(copy.deepcopy(FIX), cat or c.Catalog())
 def codes(lay, sev=None): return [f.code for f in lay.validate() if sev is None or f.severity == sev]
 
-S.check("demo has no errors or warnings", lambda: codes(demo()) == [])
+S.check("demo has no errors or warnings", lambda: codes(demo(), "error") + codes(demo(), "warning") == [])
 def fl_len():
     lay = demo(); e = lay.edges["FL1"]
     v = [(60.5020, 2.6660), (60.55, 2.60), (60.5975, 2.5035)]

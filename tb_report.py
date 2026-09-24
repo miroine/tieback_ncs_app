@@ -33,6 +33,15 @@ NAVY = RGBColor(0x00, 0x24, 0x3D)
 TORCH = RGBColor(0xEB, 0x00, 0x37)
 SLATE = "#243746"
 
+try:
+    import tb_theme
+    AUTHOR = tb_theme.AUTHOR
+    AUTHOR_NOTE = tb_theme.DISCLAIMER_SHORT
+except Exception:  # noqa: BLE001 — the report still builds without the theme module
+    AUTHOR = "Merouane Hamdani"
+    AUTHOR_NOTE = ("Prototype by Merouane Hamdani for early-phase concept screening only — not for "
+                   "commercial projects, and not a substitute for engineering design.")
+
 DISCLAIMER = (
     "Screening-level concept study. Cost rates come from the project cost library and are indicative "
     "unless replaced with benchmarked data. Flow assurance is a steady-state Beggs & Brill screening "
@@ -153,6 +162,10 @@ def build_report(project_name: str, layout, cost_settings, sched_settings, fa_se
     r2.font.color.rgb = TORCH
     meta = doc.add_paragraph()
     meta.add_run(f"Prepared {dt.date.today():%d %B %Y}" + (f" · {author}" if author else "")).font.size = Pt(9)
+    tool = doc.add_paragraph()
+    t_run = tool.add_run(f"Produced with TieBack Studio, built by {AUTHOR}. {AUTHOR_NOTE}")
+    t_run.font.size = Pt(8.5)
+    t_run.font.italic = True
 
     findings = layout.validate()
     est = tb_cost.estimate(layout, cost_settings)
@@ -301,6 +314,10 @@ def build_report(project_name: str, layout, cost_settings, sched_settings, fa_se
     doc.add_page_break()
     _heading(doc, "Basis and limitations", 1)
     doc.add_paragraph(DISCLAIMER)
+    note = doc.add_paragraph()
+    n_run = note.add_run(AUTHOR_NOTE)
+    n_run.font.size = Pt(9)
+    n_run.font.italic = True
     basis = [
         ["Coordinate datum", layout.settings.datum],
         ["Route allowance", f"{layout.settings.route_allowance_frac:.0%} plus "

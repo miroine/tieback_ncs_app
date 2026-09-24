@@ -38,7 +38,7 @@ def design_basis(layout, cost_settings: Optional[tb_cost.CostSettings] = None,
                  sched_settings: Optional[tb_schedule.ScheduleSettings] = None,
                  fa_settings: Optional[tb_fa.FASettings] = None,
                  nok_per_usd: float = 10.5,
-                 catalog_source: str = "") -> List[dict]:
+                 catalog_source: str = "", chem_inputs=None) -> List[dict]:
     cost = cost_settings or tb_cost.CostSettings()
     sched = sched_settings or tb_schedule.ScheduleSettings()
     fas = fa_settings or tb_fa.FASettings()
@@ -114,11 +114,76 @@ def design_basis(layout, cost_settings: Optional[tb_cost.CostSettings] = None,
                          f"{min(sitp):.0f}–{max(sitp):.0f} bara" if any(sitp) else "not set",
                          "ok" if all(x > 0 for x in sitp) else "missing",
                          "Drives the pressure rating check on every component"))
-        with_ipr = [w for w in wells if (layout.nodes[w].attrs.get("ipr") or {}).get("use")]
+        iprs = {w: (layout.nodes[w].attrs.get("ipr") or {}) for w in wells}
+        with_ipr = [w for w, d in iprs.items() if d and d.get("use", True)]
+        on_default = [w for w in with_ipr
+                      if abs(float(iprs[w].get("reservoir_bara", 350)) - 350) < 1e-9
+                      and abs(float(iprs[w].get("pi_sm3_d_bar", 12)) - 12) < 1e-9]
         rows.append(_row("Reservoir and well stream", "Inflow performance (IPR)",
                          f"{len(with_ipr)} of {len(wells)} wells",
-                         "ok" if with_ipr else "missing",
-                         "Without an IPR the rates are typed in, not deliverability-based"))
+                         "missing" if not with_ipr else ("default" if on_default else "ok"),
+                         ("Without an IPR the rates are typed in, not deliverability-based" if not with_ipr else
+                          "Still on the default 350 bara / 12 Sm³/d/bar: " + ", ".join(on_default[:6])
+                          if on_default else "")))
+        # reservoir pressure and temperature: from the reservoirs, else from the wells' IPR data
+        try:
+            import tb_fluids
+            res = tb_fluids.reservoirs(layout)
+        except Exception:  # noqa: BLE001
+            res = {}
+        if res:
+            pr = [r.pres_bara for r in res.values()]
+            tr = [r.tres_c for r in res.values()]
+            src = "from " + ", ".join(res)
+        else:
+            pr = [float(d["reservoir_bara"]) for d in iprs.values() if d.get("reservoir_bara")]
+            tr = [float(d["reservoir_t_c"]) for d in iprs.values() if d.get("reservoir_t_c")]
+            src = "from the wells' IPR data" if pr else ""
+        rows.append(_row("Reservoir and well stream", "Reservoir pressure",
+                         f"{min(pr):.0f}–{max(pr):.0f} bara" if pr else "not set",
+                         "ok" if pr else "missing", src or "Enter it per reservoir, or in the well IPR table"))
+        rows.append(_row("Reservoir and well stream", "Reservoir temperature",
+                         f"{min(tr):.0f}–{max(tr):.0f} °C" if tr else "not set",
+                         "ok" if tr else "missing", src or "Sets the wellhead temperature and the tubing profile"))
+
+        # ── contaminants: CO₂, H₂S, mercury ──
+        import tb_chemistry
+        ci = chem_inputs
+
+        def pick(attr_ci, attr_res):
+            v = getattr(ci, attr_ci, None) if ci is not None else None
+            if v is not None:
+                return float(v), "entered"
+            vals = [getattr(r, attr_res, None) for r in res.values()]
+            vals = [float(x) for x in vals if x is not None]
+            if vals:
+                return max(vals), ("default" if max(vals) == 0 else "entered")
+            return None, "missing"
+        co2, co2_s = pick("co2_mol_pct", "co2_mol_pct")
+        h2s, h2s_s = pick("h2s_ppm", "h2s_ppm")
+        hg, hg_s = pick("mercury_ug_nm3", "mercury_ug_nm3")
+        p_design = max(sitp) if any(sitp) else (max(pr) if pr else 0.0)
+        crows = (tb_chemistry.contaminants(co2, h2s, hg, p_design)
+                 if hasattr(tb_chemistry, "contaminants") else [])      # an older tb_chemistry.py
+        for row_, st_ in zip(crows, (co2_s, h2s_s, hg_s)):
+            status = row_["status"] if st_ != "default" else "default"
+            note = row_["note"] + f" · limit: {row_['limit']}"
+            if st_ == "default":
+                note = "0 is the reservoir default — confirm from the gas analysis · " + note
+            rows.append(_row("Contaminants", row_["item"], row_["value"], status, note))
+
+        # ── pressure protection ──
+        prot = layout.pressure_protection() if hasattr(layout, "pressure_protection") else []
+        need = [r for r in prot if r["verdict"] == "HIPPS or fully rated"]
+        hipps_used = [r for r in prot if r["verdict"] == "HIPPS in place"]
+        rows.append(_row("Reservoir and well stream", "Pressure protection (HIPPS or fully rated)",
+                         ("fully rated" if prot and not need and not hipps_used else
+                          f"HIPPS on {len(hipps_used)} well path(s)" if not need else
+                          f"{len(need)} well path(s) under-rated") if prot else "—",
+                         "action" if need else ("ok" if prot else "missing"),
+                         ("Fit HIPPS at " + ", ".join(sorted({r['hipps_node'] or '?' for r in need}))
+                          + " or upgrade " + ", ".join(sorted({x for r in need for x in r['upgrade']})[:6])
+                          + " to the shut-in pressure") if need else ""))
 
     # ── 3. Rørledninger og stigerør ──
     no_dia = [e.edge_id for e in lines if cat.get(e.item_id).cost_basis == "per_inch_m" and not e.diameter_in]

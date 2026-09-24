@@ -212,6 +212,8 @@
   let customBase = {}, customOver = {}, lastViewToken = null;
   const sketchGroup = L.layerGroup().addTo(map);     // saved sketches
   const draftGroup = L.layerGroup().addTo(map);      // the one being drawn
+  const zoneGroup = L.layerGroup().addTo(map);       // 500 m safety zones round hosts
+  layerControl.addOverlay(zoneGroup, "Host safety zones (500 m)");
   let draft = { pts: [], center: null }, selectedSketch = null;
   L.control.scale({ metric: true, imperial: false, position: "bottomright" }).addTo(map);
   const edgeGroup = L.layerGroup().addTo(map);
@@ -348,6 +350,23 @@
     }
     clearDraft();
   }
+  function drawSafetyZones() {
+    zoneGroup.clearLayers();
+    (args.payload.safety_zones || []).forEach((z) => {
+      if (!z.center) return;
+      const lyr = L.polygon(C.circleRing(z.center, z.radius_m || 500),
+        { pane: "overlays", color: "#EB0037", weight: 2, dashArray: "10 6", fillColor: "#EB0037",
+          fillOpacity: 0.07, interactive: true });
+      const n = (z.inside || []).length;
+      lyr.bindTooltip("<b>Safety zone — " + C.escapeHtml(z.label || z.host) + "</b><br>" +
+        Math.round(z.radius_m || 500) + " m round the installation" +
+        (n ? "<br>" + n + " subsea item(s) inside: work there needs the host operator's consent" : ""),
+        { sticky: true });
+      lyr.on("click", (ev) => { handleMapClick(ev); });
+      lyr.addTo(zoneGroup);
+    });
+  }
+
   function drawSketches() {
     sketchGroup.clearLayers();
     (args.payload.annotations || []).forEach((s) => {
@@ -817,6 +836,7 @@
       drawOverlays();
       drawCustomLayers();
       drawSketches();
+      drawSafetyZones();
       if (fresh.length) {
         refreshSelectionStyles();
         $("hint").textContent = fresh.length + " new item(s) selected — drag any of them to place the copy";

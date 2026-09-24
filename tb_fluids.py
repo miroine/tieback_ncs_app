@@ -104,6 +104,16 @@ class Reservoir:
     tres_c: float = 100.0             # reservoir temperature
     co2_mol_pct: float = 0.0
     h2s_ppm: float = 0.0
+    mercury_ug_nm3: float = 0.0
+    # volumetrics and drainage strategy (tb_production); 0 = not filled in
+    area_km2: float = 0.0
+    thickness_m: float = 0.0
+    ntg: float = 0.70
+    porosity: float = 0.22
+    water_saturation: float = 0.25
+    fvf: float = 0.0                  # Bo (rm³/Sm³) for oil, Bg for gas; 0 = typical for the fluid
+    drive: str = ""                   # tb_production.DRIVES; "" = the usual one for this fluid
+    recovery_factor: float = 0.0      # 0 = use the suggested one
     notes: str = ""
 
     def __post_init__(self):

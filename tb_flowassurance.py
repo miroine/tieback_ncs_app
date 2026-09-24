@@ -47,6 +47,10 @@ DEFAULT_U_W_M2K = {          # overall heat-transfer coefficient, ID-referenced 
 }
 HEATED_ITEMS = {"fl_deh"}
 DEFAULT_U_BY_CATEGORY = {"flowline": 10.0, "riser": 5.0, "jumper": 20.0}
+# The upstream march is stopped here. Nothing subsea is rated anywhere near this, so a
+# line that needs more is simply too small at that rate: marching on produces pressures
+# and temperatures no correlation is valid at (and used to crash the page).
+MAX_MARCH_BARA = 1500.0
 WALL_FRACTION = 0.06         # steel wall thickness as fraction of ID (cool-down only)
 
 
@@ -100,6 +104,10 @@ class FASettings:
     include_jt: bool = True             # Joule-Thomson cooling in the thermal march
     pt_iterations: int = 3              # P/T coupling passes (JT needs > 1)
     severe_slug_vsg_m_s: float = 3.0    # riser gas velocity below which slugging is flagged
+    # subsea boosting: the differential pressure a station adds, and the lowest suction
+    # pressure it may be asked to work at. A node can override with attrs["boost_dp_bar"].
+    boost_dp_bar: float = 80.0
+    min_suction_bara: float = 10.0
 
     def __post_init__(self):
         if self.inhibitor not in th.INHIBITORS:
@@ -402,9 +410,14 @@ def solve(layout, settings: Optional[FASettings] = None, wells: Optional[Dict[st
             r.t_in_c, r.t_out_c = node_temp[n_], t
             arriving[v].append((m.capacity_w_k, t))
 
+    over_limit = set()
+    boosted: Dict[str, float] = {}
+
     def pressure_pass():
         """Upstream march from the host arrival pressure."""
         node_p.clear()
+        over_limit.clear()
+        boosted.clear()
         for h in hosts:
             node_p[h] = s.arrival_bara * BARA_TO_PSIA
         for n_ in reversed(order):
@@ -433,6 +446,9 @@ def solve(layout, settings: Optional[FASettings] = None, wells: Optional[Dict[st
                 t_c = temps[i]
                 g = mp.segment_gradient(flu, q_o_, q_w_, p, th.c_to_f(t_c), r.d_in, thetas[i], rel_rough)
                 p_new = max(p + g["dpdl"] * dl_m * M_TO_FT, 1.0)
+                if p_new > MAX_MARCH_BARA * BARA_TO_PSIA:
+                    p_new = MAX_MARCH_BARA * BARA_TO_PSIA
+                    over_limit.add(eid)
                 ps[i] = (p + p_new) / 2.0
                 patterns[g["pattern"]] += dl_m
                 ero = g["v_m"] / mp.erosional_velocity_ft_s(g["rho_ns"], s.erosional_c)
@@ -446,6 +462,16 @@ def solve(layout, settings: Optional[FASettings] = None, wells: Optional[Dict[st
                                  hydrate_margin_c=margin, elev_m=(elevs[i] + elevs[i + 1]) / 2,
                                  incl_deg=thetas[i]))
                 p = p_new
+            # a boosting or compression station lifts the pressure: everything upstream of it
+            # only has to reach its suction pressure
+            dp = 0.0
+            kind_n = layout.catalog.get(layout.nodes[n_].item_id).category if n_ in layout.nodes else ""
+            if kind_n in ("boosting", "compression"):
+                dp = float(layout.nodes[n_].attrs.get("boost_dp_bar", s.boost_dp_bar) or 0.0)
+                if dp > 0:
+                    suction = max(p - dp * BARA_TO_PSIA, s.min_suction_bara * BARA_TO_PSIA)
+                    boosted[n_] = (p - suction) / BARA_TO_PSIA
+                    p = suction
             node_p[n_] = p
             station_p[eid] = ps
             r.p_in_bara, r.p_out_bara = p / BARA_TO_PSIA, node_p[v] / BARA_TO_PSIA
@@ -464,6 +490,17 @@ def solve(layout, settings: Optional[FASettings] = None, wells: Optional[Dict[st
     for _ in range(max(1, int(s.pt_iterations) if s.include_jt else 1)):
         temperature_pass()
         pressure_pass()
+
+    for nid, dp in sorted(boosted.items()):
+        if dp > 0:
+            findings.append(("info", nid, f"Boosting station adds {dp:,.0f} bar; the wells upstream see "
+                                          f"{node_p.get(nid, 0.0) / BARA_TO_PSIA:,.0f} bara at its suction."))
+
+    for eid in sorted(over_limit):
+        findings.append(("error", eid,
+                         f"Pressure runs past {MAX_MARCH_BARA:,.0f} bara in this line — it is too small for "
+                         f"this rate (or the rate is too high). The march was stopped there, so the numbers "
+                         f"on this line are a floor, not a result. Increase the bore, add boosting, or lower the rate."))
 
     # free-span screening from the stored seabed profiles
     for eid, r in edge_res.items():
@@ -726,16 +763,29 @@ def solve_coupled(layout, settings: Optional[FASettings] = None, wells: Optional
 
 
 def diameter_sweep(layout, edge_id: str, diameters_in, settings: Optional[FASettings] = None) -> List[dict]:
-    """Required worst-case WHP and arrival temperature vs. one line's diameter."""
+    """Required worst-case WHP and arrival temperature vs. one line's diameter.
+
+    A size the field cannot flow through gives a row of NaN with a note, rather
+    than stopping the sweep: that is the answer for that size.
+    """
     rows = []
     wells = well_inputs(layout)
     for d in diameters_in:
-        res = solve(layout, settings, wells, {edge_id: float(d)})
+        try:
+            res = solve(layout, settings, wells, {edge_id: float(d)})
+        except Exception as exc:  # noqa: BLE001 — one impossible size must not lose the others
+            rows.append(dict(diameter_in=float(d), max_required_whp_bara=math.nan,
+                             worst_shortfall_bar=math.nan, edge_t_out_c=math.nan, edge_dp_bar=math.nan,
+                             erosional_ratio=math.nan, note=f"no solution at this size ({exc})"))
+            continue
         worst = max((w["required_whp_bara"] - w["available_whp_bara"] for w in res.wells), default=math.nan)
         req = max((w["required_whp_bara"] for w in res.wells), default=math.nan)
         er = res.edges.get(edge_id)
+        capped = any(f[1] == edge_id and "too small for" in f[2] for f in res.findings)
         rows.append(dict(diameter_in=float(d), max_required_whp_bara=req, worst_shortfall_bar=worst,
                          edge_t_out_c=er.t_out_c if er else math.nan,
                          edge_dp_bar=(er.p_in_bara - er.p_out_bara) if er else math.nan,
-                         erosional_ratio=er.erosional_ratio if er else math.nan))
+                         erosional_ratio=er.erosional_ratio if er else math.nan,
+                         note=(f"pressure capped at {MAX_MARCH_BARA:,.0f} bara — too small at this rate"
+                               if capped else "")))
     return rows
