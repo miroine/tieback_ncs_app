@@ -63,10 +63,13 @@ def shutdown_sequence():
     acts = [x["action"] for x in r["steps"]]
     assert acts[0].startswith("Inhibit the line with MEG") and any("Close in wells" in a for a in acts)
     inh = r["inhibitor"]
-    # mass balance: pure MEG / (water + MEG) = required wt %
-    pure = inh["volume_m3"] * 0.9 * ch.INHIBITOR_DENSITY["MEG"]
+    # mass balance on the whole liquid: the lean stream carries its own water in with it, so
+    # MEG / (lean stream + formation water) must equal the required wt %
+    lean_kg = inh["volume_m3"] * ch.INHIBITOR_DENSITY["MEG"]
+    meg_kg = lean_kg * inh["lean_wt_pct"] / 100.0
     water = INV["water_m3"] * sd.RHO_WATER
-    assert abs(pure / (pure + water) * 100 - inh["wt_pct"]) < 1e-6
+    assert abs(meg_kg / (lean_kg + water) * 100 - inh["wt_pct"]) < 1e-6, \
+        (meg_kg / (lean_kg + water) * 100, inh["wt_pct"])
     assert abs(inh["hours"] - inh["volume_m3"] / 2.0) < 1e-9
     return True
 S.check("the planned-shutdown inhibitor volume closes its mass balance", shutdown_sequence)

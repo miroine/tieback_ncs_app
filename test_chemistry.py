@@ -10,10 +10,24 @@ def inversion_round_trips():
     for inh in ("MEG", "Methanol"):
         for dt_c in (2.0, 5.0, 8.0, 12.0):
             w = ch.hammerschmidt_wt_pct(dt_c, inh)
-            back = th.hammerschmidt_depression_f(inh, w) / 1.8
+            # the sizing side is the raw correlation; the flow-assurance margin is the
+            # clamped one (see the wt-% limit test below)
+            back = th.hammerschmidt_depression_f(inh, w, clamp=False) / 1.8
             assert abs(back - dt_c) < 1e-6, f"{inh} {dt_c}: got {back}"
     return True
 S.check("required wt % inverts tb_thermal's depression exactly", inversion_round_trips)
+
+
+def depression_is_capped_at_the_validity_limit():
+    """Past its limit Hammerschmidt runs away, so the credited depression stops there."""
+    for inh, lim in th.HAMMERSCHMIDT_LIMIT_WT.items():
+        at_limit = th.hammerschmidt_depression_f(inh, lim)
+        assert th.hammerschmidt_depression_f(inh, lim + 20) == at_limit
+        assert th.hammerschmidt_depression_f(inh, lim + 20, clamp=False) > at_limit
+        assert th.hammerschmidt_depression_f(inh, lim / 2) < at_limit
+    return ch.HAMMERSCHMIDT_LIMIT_WT == th.HAMMERSCHMIDT_LIMIT_WT      # one table, not two
+S.check("the hydrate depression is capped at the correlation's validity limit",
+        depression_is_capped_at_the_validity_limit)
 
 S.check("no subcooling needs no inhibitor",
         lambda: ch.hammerschmidt_wt_pct(0, "MEG") == 0 and ch.hammerschmidt_wt_pct(-3, "Methanol") == 0)

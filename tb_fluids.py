@@ -114,6 +114,9 @@ class Reservoir:
     fvf: float = 0.0                  # Bo (rm³/Sm³) for oil, Bg for gas; 0 = typical for the fluid
     drive: str = ""                   # tb_production.DRIVES; "" = the usual one for this fluid
     recovery_factor: float = 0.0      # 0 = use the suggested one
+    in_place_sm3: float = 0.0         # STOIIP (oil) or GIIP (gas), Sm³, entered directly; 0 = from volumetrics
+    plateau_offtake: float = 0.0      # plateau rate as a fraction of the EUR per year; 0 = strategy default
+    plateau_end_frac: float = 0.0     # fraction of the EUR produced before decline; 0 = strategy default
     notes: str = ""
 
     def __post_init__(self):
@@ -337,11 +340,16 @@ def family(well_fluid: str) -> str:
     return "oil" if well_fluid == "oil" else ("gas" if well_fluid in ("gas", "gas condensate") else "injector")
 
 
+# Below this a "gas" reservoir's GOR is not a gas reservoir's GOR — dividing a gas rate by it
+# would hand the well a condensate rate larger than the whole host can take.
+MIN_GAS_GOR_SM3_SM3 = 500.0
+
+
 def default_liquid_rate(res: Reservoir) -> float:
     """The liquid rate WellFA is keyed on, from a typical rate in the fluid's own basis."""
     if res.well_fluid == "oil":
         return DEFAULT_OIL_RATE_SM3_D
-    return DEFAULT_GAS_RATE_MSM3_D * 1e6 / max(res.gor_sm3_sm3, 1.0)
+    return DEFAULT_GAS_RATE_MSM3_D * 1e6 / max(res.gor_sm3_sm3, MIN_GAS_GOR_SM3_SM3)
 
 
 def gas_well_rates(gas_msm3_d: float, cgr_sm3_per_msm3: float) -> Tuple[float, float]:

@@ -74,6 +74,50 @@ def boe(oil_sm3: float, gas_sm3: float) -> float:
     return oil_sm3 + gas_sm3 * BOE_PER_SM3_GAS
 
 
+def _rows(production_years: List[dict], capex_by_year: Dict[int, float], s: EconomicSettings) -> List[dict]:
+    """The cash flow, year by year. One implementation: NPV and break-even must not drift apart.
+
+    Discounting is mid-year — the production profile is built on mid-year rates and money arrives
+    through the year, not on 31 December — and tax carries its losses forward, which is what makes
+    a field's investment deductible against its own later income.
+    """
+    prod = {int(r["year"]): r for r in production_years}
+    capex = {int(y): float(v) for y, v in (capex_by_year or {}).items()}
+    if not prod and not capex:
+        return []
+    last_prod = max(prod) if prod else max(capex)
+    abandon_year = last_prod + 1
+    total_capex = sum(capex.values())
+    aband = (s.abandonment_musd * 1e6) if s.abandonment_musd > 0 else s.abandonment_frac_of_capex * total_capex
+    years = sorted(set(list(prod) + list(capex) + [abandon_year]))
+    ref = s.reference_year or years[0]
+    rows, carry = [], 0.0
+    for y in years:
+        p = prod.get(y)
+        oil = p["oil_sm3"] if p else 0.0
+        gas = p["gas_sm3"] if p else 0.0
+        b_ = boe(oil, gas)
+        rev = revenue_usd(oil, gas, s)
+        opex = ((s.opex_fixed_musd_yr * 1e6 + s.chemical_musd_yr * 1e6
+                 + s.intervention_days_yr * s.intervention_day_rate_usd
+                 + s.opex_var_usd_boe * b_ * BBL_PER_SM3) if p else 0.0)
+        tariff = s.tariff_usd_boe * b_ * BBL_PER_SM3 if p else 0.0
+        cap = capex.get(y, 0.0)
+        ab = aband if y == abandon_year else 0.0
+        pre_tax = rev - opex - tariff - cap - ab
+        tax = 0.0
+        if s.apply_tax:
+            base = rev - opex - tariff - cap * (1 + s.uplift_frac) - ab + carry
+            carry = min(base, 0.0)          # a loss shelters later income instead of vanishing
+            tax = max(base, 0.0) * s.tax_rate
+        net = pre_tax - tax
+        df = 1.0 / (1.0 + s.discount_rate) ** (y - ref + 0.5)
+        rows.append(dict(year=y, oil_sm3=oil, gas_sm3=gas, boe_sm3=b_, revenue_usd=rev, opex_usd=opex,
+                         tariff_usd=tariff, capex_usd=cap, abandonment_usd=ab, tax_usd=tax,
+                         net_usd=net, discount_factor=df, discounted_usd=net * df))
+    return rows
+
+
 def cashflow(production_years: List[dict], capex_by_year: Dict[int, float],
              s: Optional[EconomicSettings] = None) -> dict:
     """Year-by-year cash flow, and the measures taken from it.
@@ -82,43 +126,11 @@ def cashflow(production_years: List[dict], capex_by_year: Dict[int, float],
     `capex_by_year` is `tb_cost.phase_costs()["annual"]` (USD).
     """
     s = s or EconomicSettings()
-    prod = {int(r["year"]): r for r in production_years}
-    capex = {int(y): float(v) for y, v in (capex_by_year or {}).items()}
-    if not prod and not capex:
+    rows = _rows(production_years, capex_by_year, s)
+    if not rows:
         return dict(years=[], npv_usd=0.0, irr=None, payback_year=None, capex_usd=0.0,
                     breakeven_oil_usd_bbl=None, unit_technical_cost_usd_boe=None,
                     total_boe_sm3=0.0, note="nothing to evaluate")
-    last_prod = max(prod) if prod else max(capex)
-    abandon_year = last_prod + 1
-    total_capex = sum(capex.values())
-    aband = (s.abandonment_musd * 1e6) if s.abandonment_musd > 0 else s.abandonment_frac_of_capex * total_capex
-    years = sorted(set(list(prod) + list(capex) + [abandon_year]))
-    ref = s.reference_year or years[0]
-    rows = []
-    for y in years:
-        p = prod.get(y)
-        oil = p["oil_sm3"] if p else 0.0
-        gas = p["gas_sm3"] if p else 0.0
-        b = boe(oil, gas)
-        rev = revenue_usd(oil, gas, s)
-        opex = 0.0
-        if p:
-            opex = (s.opex_fixed_musd_yr * 1e6 + s.chemical_musd_yr * 1e6
-                    + s.intervention_days_yr * s.intervention_day_rate_usd
-                    + s.opex_var_usd_boe * b * BBL_PER_SM3)
-        tariff = s.tariff_usd_boe * b * BBL_PER_SM3 if p else 0.0
-        cap = capex.get(y, 0.0)
-        ab = aband if y == abandon_year else 0.0
-        pre_tax = rev - opex - tariff - cap - ab
-        tax = 0.0
-        if s.apply_tax:
-            base = rev - opex - tariff - cap * (1 + s.uplift_frac) - ab
-            tax = max(base, 0.0) * s.tax_rate
-        net = pre_tax - tax
-        df = 1.0 / (1.0 + s.discount_rate) ** (y - ref)
-        rows.append(dict(year=y, oil_sm3=oil, gas_sm3=gas, boe_sm3=b, revenue_usd=rev, opex_usd=opex,
-                         tariff_usd=tariff, capex_usd=cap, abandonment_usd=ab, tax_usd=tax,
-                         net_usd=net, discount_factor=df, discounted_usd=net * df))
     npv = sum(r["discounted_usd"] for r in rows)
     cum = 0.0
     payback = None
@@ -127,58 +139,77 @@ def cashflow(production_years: List[dict], capex_by_year: Dict[int, float],
         if payback is None and cum > 0:
             payback = r["year"]
     total_boe = sum(r["boe_sm3"] for r in rows)
+    total_capex = sum(r["capex_usd"] for r in rows)
     net_cost = sum(r["capex_usd"] + r["opex_usd"] + r["tariff_usd"] + r["abandonment_usd"] for r in rows)
-    return dict(years=rows, npv_usd=npv, irr=irr([r["net_usd"] for r in rows]),
-                payback_year=payback, capex_usd=total_capex, abandonment_usd=aband,
+    return dict(years=rows, npv_usd=npv,
+                irr=irr([r["net_usd"] for r in rows], years=[r["year"] for r in rows]),
+                payback_year=payback, capex_usd=total_capex,
+                abandonment_usd=sum(r["abandonment_usd"] for r in rows),
                 total_boe_sm3=total_boe,
                 unit_technical_cost_usd_boe=(net_cost / (total_boe * BBL_PER_SM3)) if total_boe > 0 else None,
                 capex_usd_boe=(total_capex / (total_boe * BBL_PER_SM3)) if total_boe > 0 else None,
                 breakeven_oil_usd_bbl=breakeven_oil_price(production_years, capex_by_year, s),
-                reference_year=ref, note="")
+                reference_year=rows[0]["year"], note="")
 
 
-def irr(net_by_year: List[float], lo: float = -0.9, hi: float = 5.0) -> Optional[float]:
-    """Internal rate of return, or None when the cash flow never changes sign."""
+def irr(net_by_year: List[float], years: Optional[List[int]] = None) -> Optional[float]:
+    """Internal rate of return, or None when the cash flow has no root.
+
+    Years are used as they are, not as list positions: a gap between the CAPEX and the first
+    production year changes the answer. The root is found by scanning for a sign change rather
+    than assuming one bracket, because a cash flow with an abandonment tail turns negative at
+    both ends of the search and a single bracket test then finds nothing.
+    """
     if not net_by_year or all(v >= 0 for v in net_by_year) or all(v <= 0 for v in net_by_year):
         return None
+    ys = years or list(range(len(net_by_year)))
+    t0 = ys[0]
 
     def npv_at(r):
-        return sum(v / (1 + r) ** i for i, v in enumerate(net_by_year))
+        try:
+            return sum(v / (1 + r) ** (y - t0) for v, y in zip(net_by_year, ys))
+        except (OverflowError, ZeroDivisionError):
+            return float("inf")
 
-    f_lo, f_hi = npv_at(lo), npv_at(hi)
-    if f_lo * f_hi > 0:
+    # only rates at or above zero: with an abandonment tail the NPV also crosses zero at a
+    # deeply negative discount rate, which is arithmetic, not a return
+    grid = [i / 100.0 for i in range(0, 501, 5)]
+    lo = hi = None
+    for a_, b_ in zip(grid[:-1], grid[1:]):
+        if npv_at(a_) * npv_at(b_) <= 0:
+            lo, hi = a_, b_
+            break
+    if lo is None:
         return None
     for _ in range(200):
         mid = (lo + hi) / 2
-        f_mid = npv_at(mid)
-        if abs(f_mid) < 1.0:
-            return mid
-        if f_lo * f_mid <= 0:
-            hi, f_hi = mid, f_mid
+        if npv_at(lo) * npv_at(mid) <= 0:
+            hi = mid
         else:
-            lo, f_lo = mid, f_mid
+            lo = mid
+        if hi - lo < 1e-6:
+            break
     return (lo + hi) / 2
 
 
 def breakeven_oil_price(production_years: List[dict], capex_by_year: Dict[int, float],
                         s: Optional[EconomicSettings] = None) -> Optional[float]:
     """The oil price at which NPV is zero, with the gas price moved in proportion."""
+    import dataclasses as _dc
     s = s or EconomicSettings()
     if not production_years:
         return None
     base_oil = max(s.oil_price_usd_bbl, 1e-6)
 
     def npv_at_price(price):
-        import dataclasses as _dc
         k = price / base_oil
         s2 = _dc.replace(s, oil_price_usd_bbl=price, gas_price_usd_sm3=s.gas_price_usd_sm3 * k)
-        return sum(r["discounted_usd"] for r in cashflow_rows_only(production_years, capex_by_year, s2))
+        return sum(r["discounted_usd"] for r in _rows(production_years, capex_by_year, s2))
 
     lo, hi = 1.0, 400.0
-    f_lo, f_hi = npv_at_price(lo), npv_at_price(hi)
-    if f_lo > 0:
+    if npv_at_price(lo) > 0:
         return lo
-    if f_hi < 0:
+    if npv_at_price(hi) < 0:
         return None                      # not economic at any sensible price
     for _ in range(80):
         mid = (lo + hi) / 2
@@ -187,43 +218,6 @@ def breakeven_oil_price(production_years: List[dict], capex_by_year: Dict[int, f
         else:
             lo = mid
     return (lo + hi) / 2
-
-
-def cashflow_rows_only(production_years, capex_by_year, s) -> List[dict]:
-    """The rows of `cashflow` without the measures — used by the break-even search."""
-    import dataclasses as _dc
-    s2 = _dc.replace(s)
-    prod = {int(r["year"]): r for r in production_years}
-    capex = {int(y): float(v) for y, v in (capex_by_year or {}).items()}
-    if not prod and not capex:
-        return []
-    last_prod = max(prod) if prod else max(capex)
-    abandon_year = last_prod + 1
-    total_capex = sum(capex.values())
-    aband = (s2.abandonment_musd * 1e6) if s2.abandonment_musd > 0 else s2.abandonment_frac_of_capex * total_capex
-    years = sorted(set(list(prod) + list(capex) + [abandon_year]))
-    ref = s2.reference_year or years[0]
-    rows = []
-    for y in years:
-        p = prod.get(y)
-        oil = p["oil_sm3"] if p else 0.0
-        gas = p["gas_sm3"] if p else 0.0
-        b = boe(oil, gas)
-        rev = revenue_usd(oil, gas, s2)
-        opex = ((s2.opex_fixed_musd_yr * 1e6 + s2.chemical_musd_yr * 1e6
-                 + s2.intervention_days_yr * s2.intervention_day_rate_usd
-                 + s2.opex_var_usd_boe * b * BBL_PER_SM3) if p else 0.0)
-        tariff = s2.tariff_usd_boe * b * BBL_PER_SM3 if p else 0.0
-        cap = capex.get(y, 0.0)
-        ab = aband if y == abandon_year else 0.0
-        pre_tax = rev - opex - tariff - cap - ab
-        tax = 0.0
-        if s2.apply_tax:
-            base = rev - opex - tariff - cap * (1 + s2.uplift_frac) - ab
-            tax = max(base, 0.0) * s2.tax_rate
-        net = pre_tax - tax
-        rows.append(dict(year=y, net_usd=net, discounted_usd=net / (1 + s2.discount_rate) ** (y - ref)))
-    return rows
 
 
 # ──────────────────────────────── sensitivity ──────────────────────────────

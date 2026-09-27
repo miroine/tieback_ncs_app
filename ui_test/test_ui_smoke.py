@@ -1385,7 +1385,7 @@ def production_and_economics_tab():
     tf.assign_reservoir(ss.layout, [w for w in ss.layout.nodes if ss.layout.kind(w) == "well"], "Brent")
     run()
     assert not errs(), errs()
-    assert any(k == "metric" and m == "Recoverable" for k, m in H.log), "no profile metrics"
+    assert any(k == "metric" and m == "Produced in the profile" for k, m in H.log), "no profile metrics"
     assert any(k == "metric" and m == "NPV" for k, m in H.log), "no economics"
     assert ss.get("profile_settings") is not None
     assert any("producer(s)" in str(m) for k, m in H.log if k == "markdown"), "no well-count advice"
@@ -1395,6 +1395,39 @@ def production_and_economics_tab():
     assert ss.get("econ_settings") is not None and not errs()
     return True
 S.check("production profile, economics and sensitivity render from a reservoir", production_and_economics_tab)
+
+
+def simple_profile_and_manual_wells_in_the_tab():
+    """In place × RF by strategy, edited in the Production tab; a well on a manual profile."""
+    import tb_fluids as tf, tb_production as tp
+    run(press={"Load demo"})
+    r = tf.new_reservoir("Brent", "black oil")
+    r.in_place_sm3, r.recovery_factor, r.plateau_offtake = 25e6, 0.40, 0.11
+    tf.set_reservoir(ss.layout, r)
+    ws = [w for w in ss.layout.nodes if ss.layout.kind(w) == "well"]
+    tf.assign_reservoir(ss.layout, ws, "Brent")
+    run(press={"Apply recovery and strategy"})
+    assert not errs(), errs()
+    r2 = tf.reservoirs(ss.layout)["Brent"]
+    assert r2.in_place_sm3 == 25e6 and r2.plateau_offtake == 0.11 and r2.recovery_factor == 0.40, r2
+    run(press={"Apply reservoirs"})
+    r3 = tf.reservoirs(ss.layout)["Brent"]
+    assert r3.plateau_offtake == 0.11 and r3.in_place_sm3 == 25e6, "the reservoir editor must keep them"
+    tp.set_manual_profile(ss.layout, ws[0], [dict(year=1, oil_sm3_d=900), dict(year=2, oil_sm3_d=700)])
+    run(press={"Save well profile"})
+    assert not errs(), errs()
+    assert tp.manual_profile(ss.layout, ws[0]), "saving with the box ticked keeps it manual"
+    assert any(k == "metric" and m == "Manual wells" for k, m in H.log)
+    assert any(k == "metric" and m == "NPV" for k, m in H.log), "economics must still run"
+    run(press={"Clear well profile"})
+    assert not tp.manual_profile(ss.layout, ws[0]) and not errs()
+    ss.fa_settings.host_liquid_capacity_sm3_d = 1200.0
+    run()
+    assert not errs(), errs()
+    assert any("Host capacity binds" in str(m) for k, m in H.log), "the reshuffle must be explained"
+    return True
+S.check("the Production tab edits in place, RF and strategy, and runs a manual well profile",
+        simple_profile_and_manual_wells_in_the_tab)
 
 
 def optimiser_tab_runs_and_saves():

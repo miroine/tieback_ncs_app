@@ -27,6 +27,8 @@ UI are SI and converted here (bara, °C, m, Sm³/d, Sm³/Sm³).
 """
 from __future__ import annotations
 
+import copy
+import dataclasses as _dc
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
@@ -43,7 +45,14 @@ SM3SM3_TO_SCFSTB = 5.614583
 
 DEFAULT_U_W_M2K = {          # overall heat-transfer coefficient, ID-referenced (screening)
     "fl_rigid_cs": 15.0, "fl_rigid_cra": 15.0, "fl_pip": 1.0, "fl_deh": 3.0, "fl_flex": 5.0,
-    "riser_flex": 5.0, "jumper_rigid": 20.0,
+    "fl_tcp": 4.0,                                        # thermoplastic composite: the wall insulates
+    "riser_flex": 5.0, "riser_flex_lw": 5.0,              # flexible build-up, as the flowline
+    # bare steel risers lose heat like a bare steel line — they used to fall back to the
+    # flexible riser's 5 W/m²K and were modelled three times better insulated than they are
+    "riser_scr": 15.0, "riser_slwr": 15.0, "riser_ttr": 15.0, "riser_rigid_fixed": 15.0,
+    "riser_jtube": 12.0,                                  # partly shielded by the J-tube
+    "riser_hybrid": 3.0,                                  # insulated tower (40 mm in the catalogue)
+    "jumper_rigid": 20.0, "jumper_flex": 5.0,
 }
 HEATED_ITEMS = {"fl_deh"}
 DEFAULT_U_BY_CATEGORY = {"flowline": 10.0, "riser": 5.0, "jumper": 20.0}
@@ -114,6 +123,11 @@ class FASettings:
             raise ValueError(f"unknown inhibitor '{self.inhibitor}'")
         if self.segment_length_m <= 0 or self.arrival_bara <= 0:
             raise ValueError("segment length and arrival pressure must be > 0")
+        if not 0 <= self.inhibitor_wt_pct < 100:
+            raise ValueError("inhibitor concentration must be a wt % below 100")
+        if self.include_jt and self.pt_iterations < 2:
+            # the first temperature pass has no pressures to work from, so one pass = no JT at all
+            self.pt_iterations = 2
 
 
 def blend(streams: List[Tuple[mp.Fluid, float, float]]) -> Tuple[mp.Fluid, float, float]:
@@ -177,6 +191,19 @@ def _depth(layout, node_id, s: FASettings) -> float:
              for e in layout.edges.values() if node_id in (e.from_node, e.to_node)]
     depths = [m.water_depth_m for m in neigh if m.water_depth_m > 0 and layout.kind(m.node_id) != "host"]
     return max(depths) if depths else s.default_water_depth_m
+
+
+def parallel_lines(edge) -> int:
+    """How many identical lines this edge stands for (a looped flowline is two).
+
+    The solve marches one line carrying its share of the stream: the pressure drop of N identical
+    parallel lines is the drop of one of them at q/N, and the velocities are that line's too. The
+    extra lines are costed as their own elements; only the hydraulics are shared.
+    """
+    try:
+        return max(1, int(edge.attrs.get("parallel_lines", 1) or 1))
+    except (TypeError, ValueError):
+        return 1
 
 
 def edge_diameter_in(layout, edge, s: FASettings) -> float:
@@ -265,6 +292,7 @@ class EdgeResult:
     liquid_inventory_m3: float = 0.0
     free_spans: List[dict] = field(default_factory=list)
     uses_seabed_profile: bool = False
+    parallel_lines: int = 1              # 2 for a looped line: the hydraulics are one line at q/2
     elevations: List[float] = field(default_factory=list)
     min_gas_velocity_m_s: float = 0.0
     slug_risk: bool = False
@@ -279,6 +307,22 @@ class FAResult:
     wells: List[dict]
     host: dict
     findings: List[Tuple[str, str, str]]     # (severity, element, message)
+    settle_out_bara: float = 0.0             # what the shut-in line equalises to (see settle_out_bara)
+
+
+def settle_out_bara(edge_results) -> float:
+    """The pressure a shut-in production system equalises to: the volume-weighted mean of
+    the flowing pressures along it (parallel lines counted in full).
+
+    One definition for the whole app — the cool-down check, the planned shutdown and the
+    blowdown all start from it, so they judge the same shut-in line against the same curve.
+    """
+    vol = pv = 0.0
+    for r in edge_results:
+        v = math.pi / 4 * (r.d_in * 0.0254) ** 2 * r.length_m * max(int(getattr(r, "parallel_lines", 1) or 1), 1)
+        vol += v
+        pv += v * (r.p_in_bara + r.p_out_bara) / 2.0
+    return pv / vol if vol > 0 else 0.0
 
 
 def e_item(layout, edge_id: str) -> str:
@@ -387,19 +431,31 @@ def solve(layout, settings: Optional[FASettings] = None, wells: Optional[Dict[st
                 continue
             eid, v = down[n_]
             r = edge_res[eid]
+            n_par = parallel_lines(layout.edges[eid])
             n_seg = seg_counts[eid]
             dl_m = r.length_m / n_seg
-            lam = th.decay_length_m(m.total, m.cp, r.u_w_m2k, r.d_in * 0.0254)
+            lam = th.decay_length_m(m.total / n_par, m.cp, r.u_w_m2k, r.d_in * 0.0254)
             gas_frac = m.gas_kg_s / m.total if m.total > 0 else 0.0
             t = node_temp[n_]
             temps = []
             ps = station_p.get(eid)
+            # Station pressures are segment midpoints. Joule-Thomson works on the pressure
+            # drop across each whole segment, so the midpoints are turned into segment
+            # boundaries first: the edge inlet (the pump discharge where there is one — not
+            # the suction pressure the node carries), the midway points between stations, and
+            # the downstream node. Seeding from the node's own pressure used to credit a
+            # booster's whole lift as warming, and the last half-segment was never applied.
+            bounds = []
+            if ps:
+                p_inlet = (r.p_in_bara * BARA_TO_PSIA) if r.p_in_bara else ps[0]
+                p_outlet = node_p.get(v, ps[-1])
+                bounds = ([p_inlet] + [(ps[i - 1] + ps[i]) / 2.0 for i in range(1, n_seg)]
+                          + [p_outlet])
             for i in range(n_seg):
                 t_mid = th.temperature_at(dl_m / 2.0, t, s.seabed_temp_c, lam)   # exponential midpoint
                 t_next = th.temperature_at(dl_m, t, s.seabed_temp_c, lam)
-                if s.include_jt and ps:
-                    p_in = ps[i - 1] if i > 0 else ps[0]
-                    dp_bar = (ps[i] - p_in) / BARA_TO_PSIA if i > 0 else 0.0
+                if s.include_jt and bounds:
+                    dp_bar = (bounds[i + 1] - bounds[i]) / BARA_TO_PSIA
                     mu = th.jt_coefficient_mixture_k_per_bar(max(ps[i], 1.0), th.c_to_f(t), flu.gas_sg,
                                                              gas_frac, mp.z_factor)
                     t_mid += mu * dp_bar / 2.0
@@ -427,6 +483,8 @@ def solve(layout, settings: Optional[FASettings] = None, wells: Optional[Dict[st
             r = edge_res[eid]
             edge_obj = layout.edges[eid]
             flu, q_o_, q_w_ = node_stream[n_]
+            n_par = parallel_lines(edge_obj)
+            q_o_, q_w_ = q_o_ / n_par, q_w_ / n_par        # one line's share of a looped system
             rel_rough = rough_default / r.d_in
             n_seg = seg_counts[eid]
             dl_m = r.length_m / n_seg
@@ -455,7 +513,7 @@ def solve(layout, settings: Optional[FASettings] = None, wells: Optional[Dict[st
                 margin = th.hydrate_margin_c(t_c, ps[i], flu.gas_sg, s.inhibitor, s.inhibitor_wt_pct)
                 min_margin, max_v = min(min_margin, margin), max(max_v, g["v_m"] / M_TO_FT)
                 max_ero, max_h = max(max_ero, ero), max(max_h, g["holdup"])
-                liquid_m3 += g["holdup"] * area_m2 * dl_m
+                liquid_m3 += g["holdup"] * area_m2 * dl_m * n_par   # every parallel line holds it
                 min_vsg = min(min_vsg, g["v_sg"] / M_TO_FT)
                 prof.append(dict(x_m=(i + 0.5) * dl_m, p_bara=ps[i] / BARA_TO_PSIA, t_c=t_c,
                                  holdup=g["holdup"], pattern=g["pattern"], v_m_m_s=g["v_m"] / M_TO_FT,
@@ -463,7 +521,9 @@ def solve(layout, settings: Optional[FASettings] = None, wells: Optional[Dict[st
                                  incl_deg=thetas[i]))
                 p = p_new
             # a boosting or compression station lifts the pressure: everything upstream of it
-            # only has to reach its suction pressure
+            # only has to reach its suction pressure. The edge still enters at the discharge
+            # pressure, which is what its own Δp and shut-in pressure are about.
+            p_discharge = p
             dp = 0.0
             kind_n = layout.catalog.get(layout.nodes[n_].item_id).category if n_ in layout.nodes else ""
             if kind_n in ("boosting", "compression"):
@@ -474,11 +534,12 @@ def solve(layout, settings: Optional[FASettings] = None, wells: Optional[Dict[st
                     p = suction
             node_p[n_] = p
             station_p[eid] = ps
-            r.p_in_bara, r.p_out_bara = p / BARA_TO_PSIA, node_p[v] / BARA_TO_PSIA
+            r.p_in_bara, r.p_out_bara = p_discharge / BARA_TO_PSIA, node_p[v] / BARA_TO_PSIA
             r.dominant_pattern = max(patterns, key=patterns.get) if patterns else ""
             r.max_holdup, r.max_velocity_m_s, r.erosional_ratio = max_h, max_v, max_ero
             r.min_hydrate_margin_c = min_margin
             r.liquid_inventory_m3 = liquid_m3
+            r.parallel_lines = n_par
             r.min_gas_velocity_m_s = 0.0 if min_vsg is math.inf else min_vsg
             cat_ = layout.catalog.get(e_item(layout, eid)).category
             r.slug_risk = (cat_ == "riser" and r.dominant_pattern in ("intermittent", "segregated", "transition")
@@ -490,6 +551,13 @@ def solve(layout, settings: Optional[FASettings] = None, wells: Optional[Dict[st
     for _ in range(max(1, int(s.pt_iterations) if s.include_jt else 1)):
         temperature_pass()
         pressure_pass()
+
+    lim = th.HAMMERSCHMIDT_LIMIT_WT.get(s.inhibitor, 100.0)
+    if s.inhibitor != "None" and s.inhibitor_wt_pct > lim:
+        findings.append(("warning", "", f"{s.inhibitor} at {s.inhibitor_wt_pct:.0f} wt % is past the "
+                                        f"{lim:.0f} wt % limit of the Hammerschmidt correlation: the "
+                                        f"margin is credited only to {lim:.0f} wt %. Size the rest with a "
+                                        f"thermodynamic model."))
 
     for nid, dp in sorted(boosted.items()):
         if dp > 0:
@@ -511,16 +579,30 @@ def solve(layout, settings: Optional[FASettings] = None, wells: Optional[Dict[st
             r.free_spans = tb_bath.free_spans([float(d) for d in prof], dx, s.free_span_gap_m,
                                               s.max_free_span_m)
 
-    # cool-down, once the converged profiles are known
+    # cool-down, once the converged profiles are known. After shut-in the line equalises to the
+    # settle-out pressure, so that is the pressure the hydrate curve is read at — the same one the
+    # planned-shutdown and blowdown checks use. (Each line's own upstream flowing pressure used
+    # to be taken instead, so the two tabs judged the same shut-in line at different pressures.)
+    p_settle = settle_out_bara(edge_res.values())
     for eid, r in edge_res.items():
         flu, q_o_, q_w_ = node_stream[r.upstream]
-        p_shut = max(r.p_in_bara, r.p_out_bara) * BARA_TO_PSIA
+        p_shut = (p_settle or max(r.p_in_bara, r.p_out_bara)) * BARA_TO_PSIA
         t_h_c = th.f_to_c(th.hydrate_temperature_f(p_shut, flu.gas_sg)
                           - th.hammerschmidt_depression_f(s.inhibitor, s.inhibitor_wt_pct))
-        rho_l = mp.local_properties(flu, q_o_, q_w_, p_shut, th.c_to_f(r.t_out_c))["rho_l"] * 16.018
+        props = mp.local_properties(flu, q_o_, q_w_, p_shut, th.c_to_f(r.t_out_c))
+        rho_l = props["rho_l"] * 16.018
+        rho_g = props["rho_g"] * 16.018
+        # The settled line is not liquid-full: weight the thermal mass by the holdup the solve
+        # computed, with gas filling the rest. Assuming a full bore used to overstate the
+        # cool-down time by a factor of ~1.7 on a gassy line — in the unsafe direction.
+        area = math.pi * (r.d_in * 0.0254) ** 2 / 4.0
+        hl = (min(max(r.liquid_inventory_m3 / max(area * r.length_m * max(r.parallel_lines, 1), 1e-9), 0.0), 1.0)
+              if r.length_m else 1.0)
+        cp_l = th.CP_WATER * flu.water_cut + th.CP_OIL * (1 - flu.water_cut)
+        rho_cp = hl * rho_l * cp_l + (1 - hl) * rho_g * th.CP_GAS
         r.cooldown_h = th.cooldown_hours(min(r.t_in_c, r.t_out_c), t_h_c, s.seabed_temp_c, r.u_w_m2k,
-                                         r.d_in * 0.0254, WALL_FRACTION * r.d_in * 0.0254, rho_l,
-                                         th.CP_WATER * flu.water_cut + th.CP_OIL * (1 - flu.water_cut))
+                                         r.d_in * 0.0254, WALL_FRACTION * r.d_in * 0.0254,
+                                         rho_cp / max(cp_l, 1.0), cp_l)
 
     # ── checks ──
     well_rows = []
@@ -573,7 +655,7 @@ def solve(layout, settings: Optional[FASettings] = None, wells: Optional[Dict[st
             findings.append(("error", h, f"Gas {gas:.2f} MSm³/d exceeds host capacity "
                                          f"{s.host_gas_capacity_msm3_d:.2f} MSm³/d."))
     return FAResult(edge_res, {k: v / BARA_TO_PSIA for k, v in node_p.items()}, node_temp, well_rows,
-                    host, findings)
+                    host, findings, settle_out_bara=p_settle)
 
 
 def path_section(layout, result: FAResult, well: str, settings: Optional[FASettings] = None) -> List[dict]:
@@ -688,6 +770,9 @@ def rate_sensitivity(layout, settings: Optional[FASettings] = None, wells: Optio
     wells = wells if wells is not None else well_inputs(layout)
     base_inventory = None
     rows = []
+    fractions = list(fractions)
+    if 1.0 in fractions and fractions[0] != 1.0:      # the reference is the design case, wherever it sits
+        fractions = [1.0] + [f for f in fractions if f != 1.0]
     for f in fractions:
         res = solve(layout, s, scale_rates(wells, f))
         inv = sum(r.liquid_inventory_m3 for r in res.edges.values())
@@ -721,7 +806,8 @@ def solve_coupled(layout, settings: Optional[FASettings] = None, wells: Optional
     """
     import tb_well
     s = settings or FASettings()
-    wells = dict(wells if wells is not None else well_inputs(layout))
+    # deep copy: the solve rewrites rates, and they are not ours to change
+    wells = {k: copy.deepcopy(v) for k, v in (wells if wells is not None else well_inputs(layout)).items()}
     iprs = iprs or {}
     tubings = tubings or {}
     active = [w for w in wells if w in iprs]
@@ -745,7 +831,12 @@ def solve_coupled(layout, settings: Optional[FASettings] = None, wells: Optional
             def required(q_stb, _s=slope, _w=whp0, _q0=q0_stb):
                 return (_w + _s * (q_stb - _q0) / SM3_TO_STB) * BARA_TO_PSIA
 
-            op = tb_well.operating_point(wells[w].fluid(), iprs[w], tubings.get(w, tb_well.Tubing()),
+            # the tubing model and the network must agree on the wellhead temperature:
+            # the network starts its march at the well's flowing WHT, so the VLP ends there
+            tub = tubings.get(w, tb_well.Tubing())
+            if not tub.wellhead_temp_f:
+                tub = _dc.replace(tub, wellhead_temp_f=th.c_to_f(wells[w].wht_c))
+            op = tb_well.operating_point(wells[w].fluid(), iprs[w], tub,
                                          required, water_cut=wells[w].water_cut)
             q_new_sm3 = op["rate_stb_d"] / SM3_TO_STB
             q_damped = q0 + damping * (q_new_sm3 - q0)
@@ -760,6 +851,51 @@ def solve_coupled(layout, settings: Optional[FASettings] = None, wells: Optional
         converged=False, iterations=iterations,
         note=f"Rates still moving by more than {tol_frac:.0%} — check the IPR and tubing inputs.",
         history=history)
+
+
+def deliverable_rates(layout, settings: Optional[FASettings] = None,
+                     wells: Optional[Dict[str, WellFA]] = None, steps: int = 12) -> dict:
+    """The largest share of the design rates this layout can actually flow to the host.
+
+    Every well is scaled by the same factor, which is bisected until no well needs more wellhead
+    pressure than it has and no line runs past the march limit. It answers "what would this
+    concept really produce", which is what a comparison between line sizes or with a booster
+    turns on — a design rate the wells cannot push through is not production.
+
+    Returns {scale, rates, result, deliverable, note}. `scale` is 1.0 when the design rate flows.
+    """
+    s = settings or FASettings()
+    base = {k: copy.deepcopy(v) for k, v in (wells if wells is not None
+                                             else well_inputs(layout)).items()}
+
+    def ok(res) -> bool:
+        if not res.wells:
+            return True
+        if not all(w["deliverable"] for w in res.wells):
+            return False
+        return not any("too small for" in f[2] for f in res.findings)
+
+    full = solve(layout, s, base)
+    if ok(full):
+        return dict(scale=1.0, rates={k: v.oil_sm3_d for k, v in base.items()}, result=full,
+                    deliverable=True, note="")
+    lo, hi = 0.0, 1.0                      # lo never works, hi always does at the end
+    best = None
+    for _ in range(steps):
+        mid = (lo + hi) / 2
+        res = solve(layout, s, scale_rates(base, mid))
+        if ok(res):
+            lo, best = mid, (mid, res)
+        else:
+            hi = mid
+    if best is None:
+        return dict(scale=0.0, rates={k: 0.0 for k in base}, result=full, deliverable=False,
+                    note="the wells cannot deliver to the host at any rate through this layout")
+    scale, res = best
+    return dict(scale=scale, rates={k: v.oil_sm3_d * scale for k, v in base.items()}, result=res,
+                deliverable=False,
+                note=(f"the design rate does not flow: this layout carries about {scale:.0%} of it "
+                      f"({sum(v.oil_sm3_d for v in base.values()) * scale:,.0f} Sm³/d)"))
 
 
 def diameter_sweep(layout, edge_id: str, diameters_in, settings: Optional[FASettings] = None) -> List[dict]:

@@ -176,11 +176,13 @@ def design_basis(layout, cost_settings: Optional[tb_cost.CostSettings] = None,
         prot = layout.pressure_protection() if hasattr(layout, "pressure_protection") else []
         need = [r for r in prot if r["verdict"] == "HIPPS or fully rated"]
         hipps_used = [r for r in prot if r["verdict"] == "HIPPS in place"]
+        unset = [r for r in prot if r["verdict"] == "shut-in pressure not set"]
         rows.append(_row("Reservoir and well stream", "Pressure protection (HIPPS or fully rated)",
-                         ("fully rated" if prot and not need and not hipps_used else
+                         (f"{len(unset)} well path(s) without a shut-in pressure" if unset else
+                          "fully rated" if prot and not need and not hipps_used else
                           f"HIPPS on {len(hipps_used)} well path(s)" if not need else
                           f"{len(need)} well path(s) under-rated") if prot else "—",
-                         "action" if need else ("ok" if prot else "missing"),
+                         "action" if need else ("missing" if unset or not prot else "ok"),
                          ("Fit HIPPS at " + ", ".join(sorted({r['hipps_node'] or '?' for r in need}))
                           + " or upgrade " + ", ".join(sorted({x for r in need for x in r['upgrade']})[:6])
                           + " to the shut-in pressure") if need else ""))

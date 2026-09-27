@@ -26,12 +26,24 @@ class Window:
     start_mmdd: Tuple[int, int] = (4, 1)
     end_mmdd: Tuple[int, int] = (10, 15)
 
+    def season(self, year: int) -> Tuple[dt.date, dt.date]:
+        """The window that opens in `year`. A season that ends before it starts runs into the next
+        year (1 Nov – 15 Mar is one window, not a negative one)."""
+        ws = dt.date(year, *self.start_mmdd)
+        we = dt.date(year, *self.end_mmdd)
+        if we < ws:
+            we = dt.date(year + 1, *self.end_mmdd)
+        return ws, we
+
+    def length_days(self) -> float:
+        ws, we = self.season(2000)
+        return (we - ws).days
+
     def fit(self, earliest: dt.date, duration_days: float) -> dt.date:
         """Earliest start >= `earliest` such that [start, start+dur] lies in one window."""
         dur = dt.timedelta(days=duration_days)
         for year in range(earliest.year - 1, earliest.year + 30):
-            ws = dt.date(year, *self.start_mmdd)
-            we = dt.date(year, *self.end_mmdd)
+            ws, we = self.season(year)
             if (we - ws) < dur:
                 raise ValueError(f"activity of {duration_days:.0f} d cannot fit in weather window "
                                  f"({(we - ws).days} d) — split the campaign")
@@ -39,6 +51,22 @@ class Window:
             if start + dur <= we:
                 return start
         raise ValueError("no weather window found within 30 years")
+
+    def fit_backward(self, latest_finish: dt.date, duration_days: float) -> dt.date:
+        """Latest start such that [start, start+dur] lies in one window and ends by `latest_finish`.
+
+        The mirror of `fit`. Without it the backward pass hands out late starts before the window
+        even opens, and the float it derives from them is fiction.
+        """
+        dur = dt.timedelta(days=duration_days)
+        for year in range(latest_finish.year + 1, latest_finish.year - 30, -1):
+            ws, we = self.season(year)
+            if (we - ws) < dur:
+                continue
+            finish = min(latest_finish, we)
+            if finish - dur >= ws:
+                return finish - dur
+        return latest_finish - dur
 
 
 @dataclass
@@ -59,10 +87,12 @@ class Activity:
     lf: Optional[dt.date] = None
     total_float_days: float = 0.0
     critical: bool = False
+    window_shift_days: float = 0.0     # how long this activity waited for its weather window
 
     @property
     def window_constrained(self) -> bool:
-        return self.window is not None
+        """True only when the window actually delayed this activity, not merely because it has one."""
+        return self.window_shift_days > 0.0
 
 
 class Schedule:
@@ -110,7 +140,9 @@ class Schedule:
             if a.fixed_start and a.fixed_start > es:
                 es = a.fixed_start
             if a.window is not None and a.duration_days > 0:
-                es = a.window.fit(es, a.duration_days)
+                windowed = a.window.fit(es, a.duration_days)
+                a.window_shift_days = (windowed - es).total_seconds() / 86400.0
+                es = windowed
             a.es = es
             a.ef = es + td(days=a.duration_days)
         project_end = max(a.ef for a in self.activities.values())
@@ -124,7 +156,13 @@ class Schedule:
             for s, lag in succ[aid]:
                 lf = min(lf, self.activities[s].ls - td(days=lag))
             a.lf = lf
-            a.ls = lf - td(days=a.duration_days)
+            if a.window is not None and a.duration_days > 0:
+                a.ls = a.window.fit_backward(lf, a.duration_days)
+                a.lf = a.ls + td(days=a.duration_days)
+            else:
+                a.ls = lf - td(days=a.duration_days)
+            if a.ls < a.es:                      # a window can push the late start before the early one
+                a.ls, a.lf = a.es, a.ef
             a.total_float_days = (a.ls - a.es).total_seconds() / 86400.0
             a.critical = a.total_float_days <= 0.5
         return self
@@ -146,6 +184,8 @@ class Schedule:
 
 # ─────────────────────────── layout-driven network ─────────────────────────
 
+HIPPS_ITEM = "hipps_mod"        # same id tb_cost.hipps_rows prices
+
 STRUCTURE_KINDS = ("template", "manifold", "plet", "plem", "ilt", "ssiv", "riser_base",
                    "boosting", "compression", "separation", "control")
 PIPELAY_KINDS = ("flowline", "riser")
@@ -164,6 +204,8 @@ class ScheduleSettings:
     precommissioning_days: float = 30.0
     commissioning_days: float = 45.0
     weather_factor: float = 1.25         # offshore duration multiplier (NCS)
+    piggyback_install_frac: float = 0.3  # a strapped line adds this share of its own lay time
+                                         # (kept equal to tb_cost.CostSettings.piggyback_install_frac)
     marine_window: Window = field(default_factory=Window)
     phase_offset_days: Dict[int, float] = field(default_factory=dict)  # phase -> delay of award
     # ── user edits to the generated plan ──
@@ -210,13 +252,22 @@ def build_from_layout(layout, settings: Optional[ScheduleSettings] = None):
         for el in edges:
             if cat.get(el.item_id).category != "jumper":
                 by_item[el.item_id].append(el.edge_id)
+        # HIPPS ticked on a structure is a valve skid: tb_cost prices it as the catalogue's
+        # HIPPS module, so the schedule has to carry its lead time and its offshore day too —
+        # it is normally the longest lead on the subsea scope
+        hipps_item = cat.items.get(HIPPS_ITEM)
+        hipps_nodes = [n for n in nodes if n.hipps and n.item_id != HIPPS_ITEM
+                       and cat.get(n.item_id).category != "host"] if hipps_item else []
         for item_id, els in by_item.items():
             it = cat.get(item_id)
             if it.category == "host":
                 continue
             aid = f"{tag}_PROC_{item_id}"
+            lead = it.lead_time_months
+            if hipps_item and any(n.item_id == item_id and n.hipps for n in hipps_nodes):
+                lead = max(lead, hipps_item.lead_time_months)     # the skid gates its structure
             sch.add(Activity(aid, f"Procure & fabricate: {it.name} (×{len(els)})",
-                             it.lead_time_months * M, [(award, 0)], group="Procurement", phase=ph))
+                             lead * M, [(award, 0)], group="Procurement", phase=ph))
             proc_ids[item_id] = aid
             for e_id in els:
                 element_map[e_id] = {"procure": aid}
@@ -225,8 +276,13 @@ def build_from_layout(layout, settings: Optional[ScheduleSettings] = None):
             tot = 0.0
             for el in elements:
                 it = cat.get(el.item_id)
+                if not linear and hipps_item and getattr(el, "hipps", False) and el.item_id != HIPPS_ITEM:
+                    tot += hipps_item.install_days          # the HIPPS skid, costed in tb_cost
                 if linear:
-                    tot += it.install_days * layout.edge_length(el) / 1000.0
+                    days = it.install_days * layout.edge_length(el) / 1000.0
+                    if el.attrs.get("piggyback_on"):
+                        days *= s.piggyback_install_frac    # laid with the carrier, as the cost assumes
+                    tot += days
                 else:
                     tot += it.install_days
             return max(tot * s.weather_factor, 1.0) if elements else 0.0

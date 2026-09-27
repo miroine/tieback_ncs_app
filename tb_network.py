@@ -564,7 +564,9 @@ class Layout:
             if it.cost_basis == "per_inch_m" or it.max_diameter_in > 0:
                 if e.diameter_in <= 0:
                     F.append(Finding("error", "DIAMETER_MISSING", f"{it.name} needs a diameter.", e.edge_id))
-                elif not (it.min_diameter_in <= e.diameter_in <= it.max_diameter_in):
+                # a catalogue row with no range stated (an imported library often has none) must not
+                # reject every diameter: check the range only when there is one
+                elif it.max_diameter_in > 0 and not (it.min_diameter_in <= e.diameter_in <= it.max_diameter_in):
                     F.append(Finding("error", "DIAMETER_RANGE",
                                      f'{e.diameter_in}" outside {it.min_diameter_in}–{it.max_diameter_in}" '
                                      f"for {it.name}.", e.edge_id))
@@ -572,8 +574,12 @@ class Layout:
                 F.append(Finding("info", "DIRECT_WELL_FLOWLINE",
                                  "Flowline lands directly on an XT — confirm a PLET/spool is not required.",
                                  e.edge_id))
-            if it.is_linear and self.edge_length(e) < 1.0:
-                F.append(Finding("warning", "ZERO_LENGTH", "Linear element has ~zero length.", e.edge_id))
+            # measured on the surveyed geometry: edge_length() adds the end allowance (50 m by
+            # default), which would hide a zero-length line behind the allowance
+            if it.is_linear and tb_geo.polyline_length(self.edge_shape(e)) < 1.0:
+                F.append(Finding("warning", "ZERO_LENGTH",
+                                 "Linear element has ~zero length — its ends are on top of each other.",
+                                 e.edge_id))
             if it.category in ("flowline", "utility_line") and len(self.edge_vertices(e)) >= 3:
                 # measured on the curve the line would follow if laid through these points —
                 # the circumradius of raw vertices exaggerates a sharp corner between long legs

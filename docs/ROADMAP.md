@@ -46,6 +46,45 @@ decision from you before they can start.
 | 16 | Sensitivity and tornado | Each input moved to its low and high value, ranked by how far NPV travels. |
 | — | Boosting in the hydraulics | A boosting or compression station now lifts the pressure in the solve (80 bar default, per-node override), so the optimiser can see what it buys — it used to cost money and change nothing. |
 
+## Done in v0.21.0 — simplified production profile
+
+| Item | What it gives you |
+|---|---|
+| In place entered directly | STOIIP/GIIP per reservoir in the Production tab; volumetrics become the fallback. |
+| Strategy-driven profile | Plateau offtake and plateau share of the EUR from the drainage strategy (editable), exponential decline closing on the EUR. No decline rate or hyperbolic b to guess. |
+| Capacity reshuffle (v0.21.1) | Field total held under host liquid and gas capacity by deferring volume to later years, not cutting it; shared across reservoirs and manual wells. |
+| Manual well profiles | Per-well yearly oil/gas/water, typed, pasted or from CSV, replacing that well's share of the calculated profile. |
+
+## Done in v0.20.1 — formula audit
+
+Every correlation checked against its reference, and every quantity that appears in more than one
+module checked for the same definition. Bugs found and fixed:
+
+| Area | Was | Now |
+|---|---|---|
+| Dead-oil viscosity | Beggs & Robinson extrapolated below 70 °F gave ~900 cP for a 35 °API oil at 4 °C | Arrhenius extension below 70 °F from the 70/100 °F points; untouched inside the range |
+| Beggs & Brill transition | Inclination correction applied to the blended holdup, so uphill holdup jumped at the boundary | Each pattern's own C applied before blending; continuous across the boundary |
+| Joule-Thomson | 1/Z in the denominator over-predicted cooling ~20 % at 80 bara | μ = RT²/(p·cp)·∂Z/∂T |
+| Shut-in pressure | Cool-down, planned shutdown and blowdown each used a different shut-in pressure | One settle-out pressure (volume-weighted) shared by all three |
+| Heat-transfer U | Every riser type used the flexible riser's U | Per-type defaults (steel risers, J-tube, hybrid, TCP, jumpers) |
+| Inhibitor dose | Hammerschmidt silently capped above its validity range | Capped and flagged: required wt %, "not enough", range note |
+| Host liquid capacity | Production compared oil alone to the liquid limit | Oil + water against liquid capacity; water reported per year |
+| Reservoir vs well fluid | Profile used well GOR/water cut without checking the reservoir's | Reservoir values used; >20 % mismatch warned in the Production tab |
+| Parallel loops | Loop costed as two lines, solved as one carrying the full rate | Hydraulics at q/n per line; inventory counts both |
+| Capacity cap | Volume above the host limit was lost | Field produces at the limit for longer (plateau stretches); EUR conserved |
+| Gas EUR | Gas volume not tied to oil through GOR | Gas from the rate-weighted GOR |
+| Economics | End-of-year discounting, IRR could lock on a negative root, tax losses lost | Mid-year discounting, IRR scan over rates ≥ 0, loss carry-forward |
+| Optimiser | Every variant valued from the base-case first-production date | Each variant dated from its own schedule (boosting starts later) |
+| Monte Carlo | Piggybacked lines sampled with their own spread | Carrier's spread, as installed |
+| Piggyback install share | Schedule and cost used different fractions | Schedule synced from the cost settings |
+
+Checked and consistent: Beggs & Brill constants and boundaries, Payne correction, Standing Rs/Bo,
+Lee gas viscosity, Brill & Beggs Z (clamped), Towler & Mokhatab, Hammerschmidt / Nielsen-Bucklin,
+unit constants, UTM/ED50 transforms, cost Monte Carlo structure. `test_audit.py` locks all of it in (19 checks).
+
+Accepted limits: Towler & Mokhatab reads about 2 °C conservative; tax model simplified; riser length
+does not change with riser type.
+
 ## What I would build next (ranked)
 
 Ranked by what they change about a decision, not by how hard they are.

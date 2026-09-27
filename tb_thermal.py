@@ -117,16 +117,19 @@ JT_LIQUID_K_PER_BAR = -0.02      # liquids warm slightly on expansion (friction-
 def jt_coefficient_gas_k_per_bar(p_psia: float, t_f: float, gas_sg: float, z_fn, cp_j_kgk: float = CP_GAS) -> float:
     """Real-gas Joule-Thomson coefficient, K/bar (positive = cools on expansion).
 
-        μ_JT = (R_specific · T²) / (p · c_p · Z) · (∂Z/∂T)_p
+        μ_JT = (R_specific · T²) / (p · c_p) · (∂Z/∂T)_p
+
+    From dh = c_p dT + [v − T(∂v/∂T)_p] dp with v = ZRT/p: the bracket is
+    −(RT²/p)(∂Z/∂T)_p, so no Z appears in the denominator. (It used to, which
+    over-predicted the cooling by 1/Z — about 20 % at 80 bara.)
 
     `z_fn(p_psia, t_f, gas_sg)` supplies the compressibility factor (tb_multiphase.z_factor),
     differentiated numerically at constant pressure.
     """
-    z = z_fn(p_psia, t_f, gas_sg)
     dz_dt_k = (z_fn(p_psia, t_f + 1.0, gas_sg) - z_fn(p_psia, t_f - 1.0, gas_sg)) / 2.0 * 1.8
     r_specific = R_UNIVERSAL / (MW_AIR_G * gas_sg / 1000.0)
     t_k = (t_f + 459.67) / 1.8
-    mu_k_per_pa = r_specific * t_k ** 2 / (max(p_psia, 1.0) * 6894.757 * cp_j_kgk * max(z, 0.1)) * dz_dt_k
+    mu_k_per_pa = r_specific * t_k ** 2 / (max(p_psia, 1.0) * 6894.757 * cp_j_kgk) * dz_dt_k
     return mu_k_per_pa * 1e5
 
 
@@ -144,12 +147,22 @@ def hydrate_temperature_f(p_psia: float, gas_sg: float) -> float:
     return 13.47 * lp + 34.27 * lg - 1.675 * lp * lg - 20.35
 
 
-def hammerschmidt_depression_f(inhibitor: str, wt_pct: float) -> float:
+# Hammerschmidt is fitted to dilute solutions. Past these concentrations it overstates the
+# depression badly (MEG at 60 wt % gives 36 °C against a real 28–30 °C), so the app stops
+# crediting more than the value at the limit and says so. tb_chemistry uses the same numbers.
+HAMMERSCHMIDT_LIMIT_WT = {"Methanol": 25.0, "MEG": 30.0}
+
+
+def hammerschmidt_depression_f(inhibitor: str, wt_pct: float, clamp: bool = True) -> float:
+    """Depression of the hydrate temperature, °F. Concentration is capped at the
+    correlation's validity limit unless `clamp` is off — beyond it the number is not data."""
     k, m = INHIBITORS[inhibitor]
     if k == 0 or wt_pct <= 0:
         return 0.0
     if not 0 < wt_pct < 100:
         raise ValueError("inhibitor wt % must be in (0, 100)")
+    if clamp:
+        wt_pct = min(wt_pct, HAMMERSCHMIDT_LIMIT_WT.get(inhibitor, 100.0))
     return k * wt_pct / (m * (100.0 - wt_pct))
 
 

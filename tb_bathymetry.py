@@ -171,7 +171,8 @@ def free_spans(depths: List[float], dx_m: float, gap_m: float = 0.5,
             continue
         max_gap = max(z0 + (z1 - z0) * (k - i0) / (i1 - i0) - pts[k][1] for k in range(i0 + 1, i1))
         if max_gap >= gap_m:
-            spans.append(dict(start_m=x0, end_m=x1, length_m=min(x1 - x0, max_span_m),
+            # end_m is clipped with length_m, so start/end and length always describe the same stretch
+            spans.append(dict(start_m=x0, end_m=min(x1, x0 + max_span_m), length_m=min(x1 - x0, max_span_m),
                               max_gap_m=round(max_gap, 2), truncated=(x1 - x0) > max_span_m))
     return spans
 

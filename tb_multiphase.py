@@ -34,6 +34,7 @@ from typing import Dict
 G_C = 32.174
 PSI_TO_PSF = 144.0
 P_SC, T_SC_R = 14.696, 519.67
+MAX_OIL_VISCOSITY_CP = 5000.0     # beyond this the dead-oil correlation is extrapolation, not data
 
 
 # ─────────────────────────────── fluid properties ───────────────────────────
@@ -99,11 +100,46 @@ def standing_bo(rs, t_f, api, gas_sg) -> float:
     return 0.9759 + 0.00012 * f ** 1.2
 
 
-def dead_oil_viscosity(api, t_f) -> float:
-    """Beggs & Robinson (1975) dead-oil viscosity, cP."""
-    t_f = max(t_f, 50.0)
+BR_T_MIN_F = 70.0                 # Beggs & Robinson was fitted from 70 to 295 °F
+
+
+def _beggs_robinson(api, t_f) -> float:
     x = 10 ** (3.0324 - 0.02023 * api) * t_f ** (-1.163)
     return max(0.1, 10 ** x - 1.0)
+
+
+def dead_oil_viscosity(api, t_f) -> float:
+    """Beggs & Robinson (1975) dead-oil viscosity, cP.
+
+    Inside its range (70–295 °F) this is the published correlation. Below 70 °F —
+    where a subsea line spends most of its length — the correlation's power law
+    diverges (a 35° API oil comes out near 900 cP at 4 °C, where real crudes of that
+    gravity sit in the tens of cP). There the viscosity is carried on with an
+    Arrhenius temperature dependence fitted to the correlation's own slope between
+    70 and 100 °F: it still rises steeply with cooling, but at a physical rate. The
+    result is capped at `MAX_OIL_VISCOSITY_CP`. For a waxy or heavy crude, a measured
+    viscosity at seabed temperature is the only number worth using.
+    """
+    if t_f >= BR_T_MIN_F:
+        return min(_beggs_robinson(api, t_f), MAX_OIL_VISCOSITY_CP)
+    mu70, mu100 = _beggs_robinson(api, BR_T_MIN_F), _beggs_robinson(api, 100.0)
+    t70_r, t100_r = BR_T_MIN_F + 459.67, 100.0 + 459.67
+    b = math.log(max(mu70, 1e-6) / max(mu100, 1e-6)) / (1.0 / t70_r - 1.0 / t100_r)
+    t_r = max(t_f, 14.0) + 459.67                      # nothing below −10 °C is a flowing line
+    return min(mu70 * math.exp(b * (1.0 / t_r - 1.0 / t70_r)), MAX_OIL_VISCOSITY_CP)
+
+
+def live_oil_viscosity(mu_dead_cp: float, rs_scf_stb: float) -> float:
+    """Beggs & Robinson live-oil (saturated) viscosity, cP: μ_o = A·μ_od^B.
+
+    Dissolved gas thins the oil, by a factor of three to ten at NCS solution GORs.
+    Using the dead-oil value in its place overstates the liquid viscosity, and with it
+    the friction gradient and the wellhead pressure the network asks for.
+    """
+    rs = max(rs_scf_stb, 0.0)
+    a = 10.715 * (rs + 100.0) ** -0.515
+    b = 5.44 * (rs + 150.0) ** -0.338
+    return max(0.05, a * max(mu_dead_cp, 1e-6) ** b)
 
 
 def live_oil_density(api, gas_sg, rs, bo) -> float:
@@ -139,6 +175,8 @@ class Fluid:
             raise ValueError("water cut must be in [0, 1)")
         if self.gor_scf_stb < 0:
             raise ValueError("GOR must be >= 0")
+        if self.sigma_dyn_cm <= 0:
+            raise ValueError("interfacial tension must be > 0 (it divides the velocity number)")
 
 
 def local_properties(fluid: Fluid, q_oil_stb_d: float, q_water_stb_d: float,
@@ -159,7 +197,8 @@ def local_properties(fluid: Fluid, q_oil_stb_d: float, q_water_stb_d: float,
     return dict(z=z, rs=rs, bo=bo,
                 rho_g=gas_density(p, t_f, fluid.gas_sg, z), mu_g=gas_viscosity_lee(p, t_f, fluid.gas_sg, z),
                 rho_l=rho_o * (1 - wf) + rho_w * wf,
-                mu_l=dead_oil_viscosity(fluid.api, t_f) * (1 - wf) + water_viscosity(t_f) * wf,
+                mu_l=(live_oil_viscosity(dead_oil_viscosity(fluid.api, t_f), rs) * (1 - wf)
+                      + water_viscosity(t_f) * wf),
                 q_gas_ft3_s=q_gas_ft3_s, q_liq_ft3_s=q_liq_ft3_s)
 
 
@@ -250,19 +289,29 @@ def beggs_brill(v_sl, v_sg, rho_l, rho_g, mu_l, mu_g, d_in, theta_deg, rel_rough
         pattern, h_l = "single-phase liquid", 1.0
     else:
         pattern = flow_pattern(lam, fr)
-        h0 = max(_horizontal_holdup(pattern, lam, fr), lam)
-        h0 = min(h0, 1.0)
-        if pattern == "distributed" and theta_deg >= 0:
-            c = 0.0
-        else:
-            key = "segregated" if pattern == "transition" else pattern
-            d_, e_, f_, g_ = DOWNHILL_DEFG if theta_deg < 0 else UPHILL_DEFG[key]
-            nlv = liquid_velocity_number(v_sl, rho_l, sigma)
-            arg = d_ * lam ** e_ * max(nlv, 1e-12) ** f_ * fr ** g_
-            c = max((1.0 - lam) * math.log(arg), 0.0) if arg > 0 else 0.0
+        nlv = liquid_velocity_number(v_sl, rho_l, sigma)
         s18 = math.sin(math.radians(1.8 * theta_deg))
-        b_ang = 1.0 + c * (s18 - s18 ** 3 / 3.0)
-        h_l = h0 * b_ang
+
+        def inclined(p_):
+            """Horizontal holdup for one pattern, corrected for inclination with that pattern's C."""
+            h0 = min(max(_horizontal_holdup(p_, lam, fr), lam), 1.0)
+            if p_ == "distributed" and theta_deg >= 0:
+                c = 0.0
+            else:
+                d_, e_, f_, g_ = DOWNHILL_DEFG if theta_deg < 0 else UPHILL_DEFG[p_]
+                arg = d_ * lam ** e_ * max(nlv, 1e-12) ** f_ * fr ** g_
+                c = max((1.0 - lam) * math.log(arg), 0.0) if arg > 0 else 0.0
+            return h0 * (1.0 + c * (s18 - s18 ** 3 / 3.0))
+
+        if pattern == "transition":
+            # the published method: incline the segregated and the intermittent holdup each with
+            # its own C, then interpolate between them across the band
+            l2 = 0.0009252 * lam ** -2.4684
+            l3 = 0.10 * lam ** -1.4516
+            a = min(max((l3 - fr) / (l3 - l2), 0.0), 1.0) if l3 != l2 else 0.5
+            h_l = a * inclined("segregated") + (1 - a) * inclined("intermittent")
+        else:
+            h_l = inclined(pattern)
         if payne and theta_deg != 0:
             h_l *= 0.924 if theta_deg > 0 else 0.685
         h_l = min(max(h_l, lam), 1.0)

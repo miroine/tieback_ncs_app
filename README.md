@@ -454,14 +454,39 @@ instead of an arithmetic failure.
 ## Production, economics and the optimiser
 **Production & economics** turns a layout into a profile and a value.
 
-* Give a reservoir its volumetrics (area, net thickness, NTG, porosity, Sw, Bo/Bg) and a drainage
-  strategy under *Reservoirs and well fluids*. The app suggests a recovery-factor range for that
-  strategy — solution-gas drive is not water injection — explains the number, and lets you take it or
-  enter your own. In-place volume and EUR follow.
-* The profile is plateau-then-decline per reservoir, from the wells assigned to it and their design
-  rates, capped by the host's liquid and gas capacity. It never produces more than the EUR, and it
-  says so when the cut-off rate or the horizon leaves some of it behind.
-* *How many wells?* takes the plateau you want, the rate a well delivers and the area to drain, and
+* **Profile = in place × recovery factor × drainage strategy.** In the Production tab, enter each
+  reservoir's STOIIP/GIIP (MSm³) — or leave it at 0 and let the volumetrics under *Reservoirs and well
+  fluids* supply it — and pick a drainage strategy. The strategy suggests a recovery factor (with the
+  reasoning) and sets the shape: a plateau at a yearly offtake of the EUR, held until a share of the EUR
+  is out, then an exponential decline that recovers the rest exactly. Leave RF, offtake or plateau share
+  at 0 for the strategy defaults, or type your own.
+
+  | Strategy | Plateau offtake (EUR/yr) | Plateau until |
+  |---|---|---|
+  | solution gas / depletion | 15 % | 25 % of EUR |
+  | gas cap expansion | 12 % | 35 % |
+  | natural water drive | 12 % | 40 % |
+  | water injection | 10 % | 45 % |
+  | gas injection / WAG | 10 % | 45 % |
+  | pressure depletion (gas) | 10 % | 55 % |
+  | water drive (gas) | 10 % | 45 % |
+
+  The plateau is capped by the wells' design rates (a tick box turns this off). A lower plateau does
+  not lose volume, it lasts longer. The table under the chart says, reservoir by reservoir, what set it.
+* **Fitted to the host's capacity.** The field total — calculated reservoirs and manual wells together —
+  is reshuffled so no year exceeds the host's liquid (oil + water) or gas capacity. What does not fit
+  is held back and produced in the next years with spare capacity, extending field life if needed.
+  All phases are held back in proportion, so GOR and water cut are unchanged. Capacity is shared across
+  reservoirs, not split in fixed shares, so none of it sits idle while volume waits. Only what is still
+  held back at the end of the horizon is lost, and the app says how much.
+* **Manual well profiles.** Any producer can carry its own yearly profile instead: oil/condensate,
+  gas (kSm³/d) and water (Sm³/d) as calendar-day averages. Type or paste it into the table, or load a
+  CSV. Gas or water left blank follow the fluid's GOR and water cut. Years below 1900 count from first
+  production (1 = first year) and move with the schedule, while calendar years stay put. The well is then
+  taken out of the calculated profile, and its reservoir's calculated stream keeps the EUR share of the
+  remaining wells. The app warns if the manual profiles take more than the reservoir's EUR. Wells
+  without a reservoir can be on a manual profile too.
+* *How many wells?* starts from the plateau the strategies ask for, takes the plateau you want, the rate a well delivers and the area to drain, and
   reports which of the two is binding.
 * Economics: oil and gas prices, fixed and variable OPEX, the host tariff, intervention days, the
   chemical bill (pre-filled from the MEG/methanol sizing), an abandonment provision and, optionally,

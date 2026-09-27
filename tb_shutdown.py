@@ -95,9 +95,14 @@ def inventory(layout, result, settings=None, wells=None) -> dict:
     import tb_flowassurance as tb_fa
     fas = settings or tb_fa.FASettings()
     w_in = wells if wells is not None else tb_fa.well_inputs(layout)
-    tot = sum(w.oil_sm3_d for w in w_in.values()) or 1.0
-    api = sum(w.api * w.oil_sm3_d for w in w_in.values()) / tot if w_in else 35.0
-    sg = sum(w.gas_sg * w.oil_sm3_d for w in w_in.values()) / tot if w_in else 0.7
+    flowing = sum(w.oil_sm3_d for w in w_in.values())
+    tot = flowing or 1.0
+    # with no rate entered a rate-weighted mean is 0, which is not a fluid: fall back on the plain
+    # mean, then on a typical NCS gas
+    api = (sum(w.api * w.oil_sm3_d for w in w_in.values()) / tot if flowing else
+           (sum(w.api for w in w_in.values()) / len(w_in) if w_in else 35.0)) or 35.0
+    sg = (sum(w.gas_sg * w.oil_sm3_d for w in w_in.values()) / tot if flowing else
+          (sum(w.gas_sg for w in w_in.values()) / len(w_in) if w_in else 0.7)) or 0.7
     water = sum(w.oil_sm3_d * w.water_cut / max(1 - w.water_cut, 1e-6) for w in w_in.values())
     wc = water / (tot + water) if w_in else 0.1
     vol = liq = pv = 0.0
@@ -105,7 +110,10 @@ def inventory(layout, result, settings=None, wells=None) -> dict:
     depth = 0.0
     cat = layout.catalog
     for eid, r in result.edges.items():
-        v = math.pi / 4 * (r.d_in * 0.0254) ** 2 * r.length_m
+        # a looped line is N identical lines: the solve marches one of them, but the
+        # inventory — and everything blowdown does with it — is all of them
+        n_par = max(1, int(getattr(r, "parallel_lines", 1) or 1))
+        v = math.pi / 4 * (r.d_in * 0.0254) ** 2 * r.length_m * n_par
         vol += v
         liq += min(r.liquid_inventory_m3, v)
         pv += v * (r.p_in_bara + r.p_out_bara) / 2
@@ -116,9 +124,14 @@ def inventory(layout, result, settings=None, wells=None) -> dict:
                 depth = max(depth, layout.nodes[nid].water_depth_m)
     if riser_vol and not depth:
         depth = fas.default_water_depth_m
-    cooldowns = [r.cooldown_h for r in result.edges.values() if not r.heated and not math.isinf(r.cooldown_h)]
+    # the cool-down that matters is the line's, as in the viability check: a short jumper cools
+    # faster than anything else and would otherwise set the number
+    cooldowns = [r.cooldown_h for eid_, r in result.edges.items()
+                 if not r.heated and not math.isinf(r.cooldown_h)
+                 and cat.get(layout.edges[eid_].item_id).category in ("flowline", "riser")]
     return dict(volume_m3=vol, liquid_m3=liq, gas_volume_m3=max(vol - liq, 0.05 * vol),
-                water_m3=liq * wc, settle_out_bara=pv / vol if vol else 0.0,
+                water_m3=liq * wc,
+                settle_out_bara=(getattr(result, "settle_out_bara", 0.0) or (pv / vol if vol else 0.0)),
                 riser_volume_m3=riser_vol, riser_holdup=(riser_liq / riser_vol) if riser_vol else 0.0,
                 riser_depth_m=depth, rho_liquid=_liquid_density(api, wc), gas_sg=sg, api=api, water_cut=wc,
                 cooldown_h=min(cooldowns) if cooldowns else math.inf,
@@ -179,8 +192,9 @@ def blowdown(inv: dict, s: Optional[ShutdownSettings] = None, steps: int = 200) 
             dm = v * m_gas / (R * t_k) * (p1 * 1e5 / z1 - p2 * 1e5 / z2)
             pm = (p1 + p2) / 2
             zm = mp.z_factor(pm * PSIA_PER_BAR, t_f, sg)
-            q = min(_mass_flow(pm, s.flare_back_pressure_bara, t_k, sg, area, s.discharge_coefficient,
-                               s.gas_k, zm), s.flare_max_kg_s)
+            # the gas has to push against the flare and the liquid standing in the riser
+            q = min(_mass_flow(pm, max(s.flare_back_pressure_bara, fl["floor_worst_bara"]), t_k, sg,
+                               area, s.discharge_coefficient, s.gas_k, zm), s.flare_max_kg_s)
             peak = max(peak, q)
             if q <= 0:
                 t_s = math.inf
@@ -219,12 +233,23 @@ def inhibitor_for_shutdown(inv: dict, inhibitor: str, s: ShutdownSettings, subco
         return dict(inhibitor=inhibitor, wt_pct=0.0, volume_m3=0.0, hours=0.0)
     wt = (ch.nielsen_bucklin_wt_pct(subcooling_c) if inhibitor == "Methanol"
           else ch.hammerschmidt_wt_pct(subcooling_c, "MEG"))
-    wt = min(wt, 85.0)
+    lean_pct = s.lean_meg_wt_pct if inhibitor == "MEG" else 100.0
+    required = wt
+    # A lean stream cannot bring the water above its own strength, and past ~85 wt % there is
+    # no hydrate problem left to size. The cap used to be applied silently, so a dose that
+    # could not work was reported as if it would: it is now returned as `short`.
+    wt = min(wt, 85.0, lean_pct - 1.0)
+    # the correlations' ranges: Hammerschmidt (MEG) is fitted to dilute solutions only;
+    # Nielsen-Bucklin (methanol) holds to about 88 wt %
+    valid_to = th.HAMMERSCHMIDT_LIMIT_WT["MEG"] if inhibitor == "MEG" else 88.0
     water_kg = inv["water_m3"] * RHO_WATER
-    pure_kg = water_kg * wt / (100.0 - wt)
-    lean = s.lean_meg_wt_pct / 100.0 if inhibitor == "MEG" else 1.0
-    vol = pure_kg / lean / ch.INHIBITOR_DENSITY[inhibitor]
-    return dict(inhibitor=inhibitor, wt_pct=wt, volume_m3=vol, hours=vol / s.inhibitor_injection_m3_h)
+    # L·lean = wt·(L + W) → L = W·wt/(lean − wt): the lean stream carries its own water into the
+    # line, so sizing pure inhibitor and then diluting it under-doses (by 8 % at 25 °C subcooling)
+    lean_kg = water_kg * wt / (lean_pct - wt)
+    vol = lean_kg / ch.INHIBITOR_DENSITY[inhibitor]       # pure-inhibitor density: within 1 % of the lean stream
+    return dict(inhibitor=inhibitor, wt_pct=wt, required_wt_pct=required, lean_wt_pct=lean_pct,
+                short=required > wt + 1e-9, correlation_valid=required <= valid_to,
+                volume_m3=vol, hours=vol / s.inhibitor_injection_m3_h)
 
 
 def planned_shutdown(inv: dict, s: Optional[ShutdownSettings] = None, inhibitor: str = "MEG",
@@ -253,7 +278,14 @@ def planned_shutdown(inv: dict, s: Optional[ShutdownSettings] = None, inhibitor:
                           detail=f"{inh['volume_m3']:.0f} m³ of {inhibitor} treats the {inv['water_m3']:.0f} m³ of "
                                  f"water in the line to {inh['wt_pct']:.0f} wt % ({subcool:.1f} °C subcooling at "
                                  f"{p_set:.0f} bara, incl. {s.hydrate_margin_c:.0f} °C margin), at "
-                                 f"{s.inhibitor_injection_m3_h:.1f} m³/h.", hours=inh["hours"]))
+                                 f"{s.inhibitor_injection_m3_h:.1f} m³/h."
+                                 + (f" NOT ENOUGH: the water needs {inh['required_wt_pct']:.0f} wt %, which a "
+                                    f"{inh['lean_wt_pct']:.0f} wt % lean stream cannot reach — displace or "
+                                    f"depressurise instead." if inh.get("short") else "")
+                                 + (f" {inhibitor} past {th.HAMMERSCHMIDT_LIMIT_WT['MEG']:.0f} wt % is outside "
+                                    f"Hammerschmidt's range: confirm the dose with a thermodynamic model."
+                                    if not inh.get("correlation_valid", True) and inhibitor == "MEG" else ""),
+                                 hours=inh["hours"]))
         if oil_line:
             disp_h = inv["volume_m3"] / s.displacement_rate_m3_h
             steps.append(dict(step=1, action="…or displace the line with dead oil / diesel",

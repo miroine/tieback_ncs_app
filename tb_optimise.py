@@ -58,7 +58,12 @@ class SearchSpec:
         out = [dict(wells=w, diameter_in=d, loop=l, boosting=b)
                for w, d, l, b in itertools.product(wells, dias, self.loop or [False],
                                                    self.boosting or [False])]
-        return out[: max(1, self.max_variants)]
+        if len(out) <= max(1, self.max_variants):
+            return out
+        # sample evenly rather than slicing: `product` varies wells outermost, so a plain cut
+        # always threw away the largest well counts and never said so
+        step = len(out) / float(self.max_variants)
+        return [out[min(int(i * step), len(out) - 1)] for i in range(self.max_variants)]
 
 
 # ───────────────────────────── building a variant ──────────────────────────
@@ -105,7 +110,10 @@ def add_loop(layout, edge_id: Optional[str] = None) -> Optional[str]:
     layout.add_edge(net.Edge(new, e.item_id, e.from_node, e.to_node, diameter_in=e.diameter_in,
                              route=[(la + 0.0015, lo) for la, lo in e.route], length_m=e.length_m,
                              phase=e.phase, label=f"{e.label or eid} (loop)",
-                             attrs={"from_optimiser": "loop"}))
+                             attrs={"from_optimiser": "loop", "parallel_of": eid}))
+    # the flow solve follows one line per path, so the pair is marked: it is then solved as one
+    # line carrying half the stream, which is what two parallel lines do
+    e.attrs["parallel_lines"] = int(e.attrs.get("parallel_lines", 1) or 1) + 1
     return new
 
 
@@ -127,7 +135,8 @@ def add_boosting(layout, edge_id: Optional[str] = None, item_id: str = BOOST_ITE
                              water_depth_m=un.water_depth_m, phase=un.phase,
                              attrs={"from_optimiser": "boosting"}))
     e.from_node = bid                                   # the main line now starts at the station
-    e.route = []
+    # keep the routed waypoints that still lie downstream of the station
+    e.route = list(e.route)
     jid = f"J_{bid}"
     layout.add_edge(net.Edge(jid, "jumper_rigid", up, bid, phase=un.phase,
                              attrs={"from_optimiser": "boosting"}))
@@ -262,19 +271,32 @@ def evaluate(layout, cost_settings=None, sched_settings=None, fa_settings=None,
                 v.oil_sm3_d = per_well_rate_sm3_d
                 tb_fa.set_well_inputs(layout, w, v)
         wells_in = tb_fa.well_inputs(layout)
+    achieved = None
     try:
-        res = tb_fa.solve(layout, fa_settings, wells_in)
+        # what the layout can actually flow, not what we wish it would: a line that is too small
+        # produces less, and that belongs in the profile and the NPV, not only in a warning
+        d = tb_fa.deliverable_rates(layout, fa_settings, wells_in)
+        res, achieved = d["result"], d["rates"]
+        row["rate_share"] = d["scale"]
         row["deliverable"] = all(w["deliverable"] for w in res.wells) if res.wells else None
         row["worst_margin_bar"] = min((w["margin_bar"] for w in res.wells), default=math.nan)
         margins = [r.min_hydrate_margin_c for r in res.edges.values() if not r.heated]
         row["hydrate_margin_c"] = min(margins) if margins else math.nan
         row["max_erosional"] = max((r.erosional_ratio for r in res.edges.values()), default=math.nan)
         row["capped"] = any("too small for" in f[2] for f in res.findings)
+        if d["note"]:
+            row["note"] = (row["note"] + " " + d["note"]).strip()
     except Exception as exc:  # noqa: BLE001
-        row.update(deliverable=None, worst_margin_bar=math.nan, hydrate_margin_c=math.nan,
-                   max_erosional=math.nan, capped=True)
+        row.update(rate_share=math.nan, deliverable=None, worst_margin_bar=math.nan,
+                   hydrate_margin_c=math.nan, max_erosional=math.nan, capped=True)
         row["note"] = (row["note"] + f" flow solve failed ({exc})").strip()
-    fp = pr.field_profile(layout, profile_settings, fa_settings)
+    # each variant comes on stream when its own schedule says: a booster's 30-month lead time
+    # delays first production, and valuing it on the base case's date overstated its NPV
+    ps = profile_settings or pr.ProfileSettings()
+    if row.get("first_production"):
+        import dataclasses as _dc
+        ps = _dc.replace(ps, first_production_year=int(row["first_production"][:4]))
+    fp = pr.field_profile(layout, ps, fa_settings, well_rates=achieved)
     row["plateau_sm3_d"] = sum(s["plateau_sm3_d"] for s in fp["streams"])
     row["recoverable_msm3_oe"] = fp["total_boe_sm3"] / 1e6
     row["field_life_years"] = (fp["last_year"] - fp["first_year"] + 1) if fp["years"] else 0
@@ -283,8 +305,12 @@ def evaluate(layout, cost_settings=None, sched_settings=None, fa_settings=None,
     row["breakeven_usd_bbl"] = cf.get("breakeven_oil_usd_bbl")
     row["capex_usd_boe"] = cf.get("capex_usd_boe")
     row["unit_cost_usd_boe"] = cf.get("unit_technical_cost_usd_boe")
-    row["feasible"] = bool(row["errors"] == 0 and row.get("deliverable") is not False
-                           and not row.get("capped"))
+    # "feasible" means it carries the design rate with no design error. A variant that only
+    # carries part of it is still costed and valued on what it does carry, so the table shows what
+    # accepting the smaller throughput would be worth — it just does not reach the front.
+    share = row.get("rate_share")
+    row["feasible"] = bool(row["errors"] == 0 and not row.get("capped")
+                           and (share is None or (share == share and share >= 0.98)))
     return row
 
 
@@ -346,6 +372,9 @@ def explain(row: dict, base: Optional[dict] = None) -> str:
         bits.append("boosting")
     txt = " · ".join(bits)
     txt += f" → CAPEX {row.get('capex_musd', float('nan')):,.0f} MUSD, NPV {row.get('npv_musd', float('nan')):,.0f} MUSD"
+    share = row.get("rate_share")
+    if share is not None and share == share and share < 0.999:
+        txt += f", carrying only {share:.0%} of the design rate"
     if row.get("breakeven_usd_bbl"):
         txt += f", break-even {row['breakeven_usd_bbl']:,.0f} USD/bbl"
     if base and base is not row:

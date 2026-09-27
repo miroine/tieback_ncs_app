@@ -101,6 +101,11 @@ def estimate(layout, settings: Optional[CostSettings] = None) -> dict:
         if piggy:
             days *= s.piggyback_install_frac      # laid with the carrier, not a separate campaign
         spread = cat.spreads[it.install_spread]
+        if piggy:
+            # strapped to a carrier: it is laid by the carrier's spread, at the carrier's rate
+            carrier = layout.edges.get(row.get("piggyback_on"))
+            if carrier is not None:
+                spread = cat.spreads.get(cat.get(carrier.item_id).install_spread, spread)
         inst = days * spread.day_rate_usd
         if days > 0 and not piggy:
             spreads_used.add((it.install_spread, row["phase"]))
@@ -115,7 +120,9 @@ def estimate(layout, settings: Optional[CostSettings] = None) -> dict:
                 proc, fab, eng, inst = proc * k, fab * k, eng * k, inst * k
             else:
                 proc = target
-        lines.append(dict(row, spread=it.install_spread, piggyback=piggy, quantity_basis=q, offshore_days=days,
+        # the spread that actually does the work — for a piggybacked line, the carrier's — so the
+        # Monte Carlo moves it with the right day-rate uncertainty
+        lines.append(dict(row, spread=spread.key, piggyback=piggy, quantity_basis=q, offshore_days=days,
                           procurement=proc, fabrication=fab, engineering=eng, installation=inst,
                           direct=proc + fab + eng + inst, overridden=overridden, factor=f))
 

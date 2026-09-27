@@ -103,6 +103,10 @@ class CatalogItem:
             raise ValueError(f"{self.item_id}: unknown cost_basis '{self.cost_basis}'")
         if self.category in EDGE_KINDS and self.cost_basis == "unit" and self.category != "jumper":
             raise ValueError(f"{self.item_id}: linear item must use per_m or per_inch_m basis")
+        if self.category in NODE_KINDS and self.cost_basis != "unit":
+            # a node has no length or diameter, so a per-metre rate would price it at zero
+            raise ValueError(f"{self.item_id}: point equipment must use the 'unit' cost basis, "
+                             f"not '{self.cost_basis}'")
         lo, ml, hi = self.uncertainty
         if not (0 < lo <= ml <= hi):
             raise ValueError(f"{self.item_id}: uncertainty must satisfy 0 < low <= ml <= high")
@@ -124,6 +128,19 @@ class VesselSpread:
     mob_demob_usd: float
     uncertainty: tuple = (0.85, 1.0, 1.4)
     lift_capacity_te: float = 0.0      # main-hook subsea lift limit (0 = not checked)
+
+    def __post_init__(self):
+        # the same checks an item gets: a negative rate or a reversed triangular range used
+        # to import cleanly and then either switch the simulation off or make cost negative
+        if not str(self.key).strip():
+            raise ValueError("a vessel spread needs a key")
+        for fname in ("day_rate_usd", "mob_demob_usd", "lift_capacity_te"):
+            if float(getattr(self, fname)) < 0:
+                raise ValueError(f"{self.key}: {fname} must be >= 0")
+        lo, ml, hi = self.uncertainty
+        if not (0 < lo <= ml <= hi):
+            raise ValueError(f"{self.key}: uncertainty must satisfy 0 < low <= most likely <= high")
+        self.uncertainty = tuple(float(x) for x in self.uncertainty)
 
 
 # ── Indicative defaults ──────────────────────────────────────────────────────

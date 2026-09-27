@@ -11,6 +11,7 @@ import dataclasses
 import datetime as dt
 import hashlib
 import io
+import itertools
 import json
 import math
 from pathlib import Path
@@ -53,7 +54,7 @@ import tb_tiein
 import tb_viability
 import tb_well
 
-APP_VERSION = "0.20.0"
+APP_VERSION = "0.21.1"
 PSI_PER_BAR = 14.503774          # shut-in pressure is entered in bar, stored in psi like the ratings
 HERE = Path(__file__).parent
 DEMO_FILE = HERE / "test_fixtures" / "demo_field_a_tieback.yaml"
@@ -257,7 +258,8 @@ REQUIRED_API = {
     "tb_report": ["build_report"],
     "tb_viability": ["viability"],
     "tb_shutdown": ["inventory", "blowdown", "planned_shutdown", "ShutdownSettings"],
-    "tb_production": ["field_profile", "suggest_recovery_factor", "wells_needed", "ProfileSettings"],
+    "tb_production": ["field_profile", "suggest_recovery_factor", "wells_needed", "ProfileSettings",
+                      "strategy_profile", "set_manual_profile", "drive_profile"],
     "tb_economics": ["cashflow", "tornado", "EconomicSettings", "summary_line"],
     "tb_optimise": ["search", "pareto", "SearchSpec", "build_variant", "explain"],
     "tb_theme": ["css", "footer_html", "DISCLAIMER", "AUTHOR", "plotly_layout"],
@@ -936,6 +938,9 @@ with st.sidebar:
     S.weather_factor = wf
     S.cost_settings.weather_factor = wf
     S.sched_settings.weather_factor = wf
+    # the schedule and the cost must agree on how much lay time a strapped line adds
+    if hasattr(S.sched_settings, "piggyback_install_frac"):
+        S.sched_settings.piggyback_install_frac = S.cost_settings.piggyback_install_frac
     cur = st.radio("Currency display", ["MUSD", "MNOK"], horizontal=True, index=["MUSD", "MNOK"].index(S.currency))
     S.currency = cur
     if cur == "MNOK":
@@ -1970,6 +1975,7 @@ with tab_layout:
                 "gas_sg": r.gas_sg, "water_cut": r.water_cut, "salinity_wt_pct": r.salinity_wt_pct,
                 "pres_bara": r.pres_bara, "tres_c": r.tres_c, "co2_mol_pct": r.co2_mol_pct,
                 "h2s_ppm": r.h2s_ppm, "mercury_ug_nm3": getattr(r, "mercury_ug_nm3", 0.0),
+                "in_place_msm3": float(getattr(r, "in_place_sm3", 0.0) or 0.0) / 1e6,
                 "area_km2": getattr(r, "area_km2", 0.0), "thickness_m": getattr(r, "thickness_m", 0.0),
                 "ntg": getattr(r, "ntg", 0.70), "porosity": getattr(r, "porosity", 0.22),
                 "water_saturation": getattr(r, "water_saturation", 0.25), "fvf": getattr(r, "fvf", 0.0),
@@ -1977,7 +1983,7 @@ with tab_layout:
                 "notes": r.notes} for r in res.values()]
                 or [], columns=["name", "fluid", "gor_sm3_sm3", "api", "gas_sg", "water_cut",
                                 "salinity_wt_pct", "pres_bara", "tres_c", "co2_mol_pct", "h2s_ppm",
-                                "mercury_ug_nm3", "area_km2", "thickness_m", "ntg", "porosity",
+                                "mercury_ug_nm3", "in_place_msm3", "area_km2", "thickness_m", "ntg", "porosity",
                                 "water_saturation", "fvf", "drive", "recovery_factor", "notes"])
             ac = st.columns([2, 2, 1])
             new_name = ac[0].text_input("New reservoir", "", key=f"newres_{REV}",
@@ -2009,8 +2015,12 @@ with tab_layout:
                         "co2_mol_pct": st.column_config.NumberColumn("CO₂ mol %", min_value=0.0, format="%.2f"),
                         "h2s_ppm": st.column_config.NumberColumn("H₂S ppm", min_value=0.0, format="%.0f"),
                         "mercury_ug_nm3": st.column_config.NumberColumn("Hg µg/Nm³", min_value=0.0, format="%.2f"),
+                        "in_place_msm3": st.column_config.NumberColumn(
+                            "In place (MSm³)", min_value=0.0, format="%.1f",
+                            help="STOIIP for oil, GIIP for gas, in million Sm³ (gas: 1 GSm³ = 1 000 MSm³). "
+                                 "Enter it directly, or leave 0 and fill in the volumetrics to the right."),
                         "area_km2": st.column_config.NumberColumn("Area (km²)", min_value=0.0, format="%.2f",
-                                                                  help="Volumetrics: 0 = not filled in"),
+                                                                  help="Volumetrics, only used when In place is 0"),
                         "thickness_m": st.column_config.NumberColumn("Net h (m)", min_value=0.0, format="%.1f"),
                         "ntg": st.column_config.NumberColumn("NTG", min_value=0.0, max_value=1.0, format="%.2f"),
                         "porosity": st.column_config.NumberColumn("φ", min_value=0.0, max_value=1.0, format="%.3f"),
@@ -2044,7 +2054,14 @@ with tab_layout:
                             # plain Python values: numpy scalars would not survive the project file
                             vals = {k: (v.item() if hasattr(v, "item") else v) for k, v in r.items()}
                             vals["notes"] = str(vals.get("notes") or "")
-                            tb_fluids.set_reservoir(LAY, tb_fluids.Reservoir(**vals))
+                            ip_ = vals.pop("in_place_msm3", 0.0)
+                            vals["in_place_sm3"] = float(ip_) * 1e6 if ip_ == ip_ and ip_ else 0.0
+                            # fields this table does not show (profile offtake etc.) are kept
+                            base_ = dict((LAY.reservoirs or {}).get(vals["name"], {}))
+                            base_.update(vals)
+                            known_ = {f_.name for f_ in dataclasses.fields(tb_fluids.Reservoir)}
+                            tb_fluids.set_reservoir(LAY, tb_fluids.Reservoir(
+                                **{k: v for k, v in base_.items() if k in known_}))
                     except (TypeError, ValueError) as exc:
                         st.error(f"Reservoirs not applied: {exc}")
                     else:
@@ -3226,50 +3243,80 @@ with tab_prod:
                    "reserves statement and not an investment case.")
         res_all = tb_fluids.reservoirs(LAY) if has_api("tb_fluids", "reservoirs") else {}
 
-        # ── recovery factor and volumes ──
-        st.markdown("#### Drainage strategy and recovery")
+        # ── in place, recovery factor and drainage strategy ──
+        st.markdown("#### In place, recovery and drainage strategy")
+        st.caption("The profile is in place × recovery factor, produced the way the drainage strategy "
+                   "produces it: a plateau at a yearly offtake of the reserves, held until a share of them "
+                   "is out, then a decline that recovers the rest. Leave recovery factor, offtake or "
+                   "plateau length at 0 to use the strategy's defaults.")
         if not res_all:
-            st.warning("No reservoirs yet. Add one under *Reservoirs and well fluids* below the map, give it "
-                       "an area, a thickness and a recovery factor, and assign the wells to it.")
+            st.warning("No reservoirs yet. Add one under *Reservoirs and well fluids* below the map and assign "
+                       "the wells to it — or give wells a manual profile further down.")
         else:
-            rf_rows = []
+            rf_rows, why_ = [], []
             for nm_, r_ in res_all.items():
                 e_ = tb_production.eur_sm3(r_)
+                dp_ = tb_production.drive_profile(r_)
                 sug = e_["suggestion"]
-                rf_rows.append(dict(reservoir=nm_, fluid=r_.fluid,
-                                    drive=getattr(r_, "drive", "") or sug["drive"],
-                                    area_km2=getattr(r_, "area_km2", 0.0),
-                                    thickness_m=getattr(r_, "thickness_m", 0.0),
-                                    in_place_msm3=e_["in_place_sm3"] / 1e6,
-                                    rf=e_["recovery_factor"], rf_source=e_["rf_source"],
-                                    rf_suggested=f"{sug['low']:.0%}–{sug['high']:.0%} (mid {sug['mid']:.0%})",
-                                    eur_msm3=e_["eur_sm3"] / 1e6))
-            st.dataframe(pd.DataFrame(rf_rows), hide_index=True, **STRETCH, column_config={
-                "reservoir": "Reservoir", "fluid": "Fluid", "drive": "Drainage strategy",
-                "area_km2": st.column_config.NumberColumn("Area (km²)", format="%.1f"),
-                "thickness_m": st.column_config.NumberColumn("Net thickness (m)", format="%.0f"),
-                "in_place_msm3": st.column_config.NumberColumn("In place (MSm³)", format="%.1f"),
-                "rf": st.column_config.NumberColumn("Recovery factor", format="%.2f"),
-                "rf_source": "From", "rf_suggested": "Suggested range",
-                "eur_msm3": st.column_config.NumberColumn("EUR (MSm³)", format="%.1f")})
-            rc_ = st.columns([2, 2, 1])
-            pick_r = rc_[0].selectbox("Reservoir", list(res_all), key=f"rf_res_{REV}")
-            r_obj = res_all[pick_r]
-            drive_opts = list(tb_production.DRIVES)
-            cur_drive = getattr(r_obj, "drive", "") or tb_production.default_drive(r_obj.fluid)
-            pick_d = rc_[1].selectbox("Drainage strategy", drive_opts,
-                                      index=drive_opts.index(cur_drive) if cur_drive in drive_opts else 0,
-                                      key=f"rf_drive_{REV}")
-            sug = tb_production.suggest_recovery_factor(r_obj.fluid, pick_d)
-            st.markdown(f'<div class="tb-note"><b>{pick_r} — suggested recovery factor '
-                        f'{sug["mid"]:.0%}</b> (range {sug["low"]:.0%}–{sug["high"]:.0%}). {sug["because"]}.</div>',
-                        unsafe_allow_html=True)
-            if rc_[2].button("Use this", key=f"rf_use_{REV}"):
-                record("recovery factor")
-                r_obj.drive, r_obj.recovery_factor = pick_d, round(sug["mid"], 3)
-                tb_fluids.set_reservoir(LAY, r_obj)
-                bump()
-                st.rerun()
+                rf_rows.append(dict(
+                    reservoir=nm_, fluid=r_.fluid, drive=dp_["drive"],
+                    in_place_msm3=e_["in_place_sm3"] / 1e6,
+                    rf=float(getattr(r_, "recovery_factor", 0.0) or 0.0),
+                    offtake_pct=float(getattr(r_, "plateau_offtake", 0.0) or 0.0) * 100,
+                    end_pct=float(getattr(r_, "plateau_end_frac", 0.0) or 0.0) * 100,
+                    rf_used=e_["recovery_factor"],
+                    used=(f"RF {e_['recovery_factor']:.0%} ({e_['rf_source']}), "
+                          f"offtake {dp_['offtake']:.0%}/yr, plateau to {dp_['end_frac']:.0%} of EUR"),
+                    rf_suggested=f"{sug['low']:.0%}–{sug['high']:.0%}",
+                    eur_msm3=e_["eur_sm3"] / 1e6))
+                why_.append(f"**{nm_}** — suggested {sug['mid']:.0%} ({sug['low']:.0%}–{sug['high']:.0%}): "
+                            f"{sug['because']}.")
+            rdf_ = pd.DataFrame(rf_rows)
+            red_ = st.data_editor(rdf_, hide_index=True, key=f"rf_edit_{REV}", **STRETCH,
+                                  disabled=["reservoir", "fluid", "rf_used", "used", "rf_suggested", "eur_msm3"],
+                                  column_order=["reservoir", "fluid", "in_place_msm3", "drive", "rf", "offtake_pct",
+                                                "end_pct", "rf_suggested", "eur_msm3", "used"],
+                                  column_config={
+                "reservoir": "Reservoir", "fluid": "Fluid",
+                "in_place_msm3": st.column_config.NumberColumn(
+                    "In place (MSm³)", min_value=0.0, format="%.1f",
+                    help="STOIIP for oil, GIIP for gas (1 GSm³ = 1 000 MSm³). Shows the volumetric value when "
+                         "nothing was entered; typing a number here overrides the volumetrics."),
+                "drive": st.column_config.SelectboxColumn("Drainage strategy", options=list(tb_production.DRIVES)),
+                "rf": st.column_config.NumberColumn("Recovery factor", min_value=0.0, max_value=0.95, format="%.2f",
+                                                    help="0 = the suggested one for this strategy"),
+                "offtake_pct": st.column_config.NumberColumn("Plateau offtake (%/yr of EUR)", min_value=0.0,
+                                                             max_value=50.0, format="%.1f",
+                                                             help="0 = the strategy default"),
+                "end_pct": st.column_config.NumberColumn("Plateau until (% of EUR)", min_value=0.0, max_value=90.0,
+                                                         format="%.0f", help="0 = the strategy default"),
+                "rf_suggested": "Suggested RF",
+                "eur_msm3": st.column_config.NumberColumn("EUR (MSm³)", format="%.1f"),
+                "used": st.column_config.TextColumn("Used in the profile", width="large")})
+            if st.button("Apply recovery and strategy", key=f"rf_apply_{REV}"):
+                try:
+                    record("recovery and strategy")
+                    for row_ in red_.to_dict("records"):
+                        r_ = res_all[row_["reservoir"]]
+                        vol_ = tb_production.volumetric_in_place_sm3(r_)
+                        ip_ = float(row_["in_place_msm3"] or 0.0) * 1e6
+                        # a number left at the volumetric value stays volumetric
+                        r_.in_place_sm3 = 0.0 if (vol_ > 0 and abs(ip_ - vol_) < max(0.05e6, vol_ * 1e-3)) else ip_
+                        r_.drive = str(row_["drive"] or "")
+                        r_.recovery_factor = float(row_["rf"] or 0.0)
+                        r_.plateau_offtake = float(row_["offtake_pct"] or 0.0) / 100
+                        r_.plateau_end_frac = float(row_["end_pct"] or 0.0) / 100
+                        tb_fluids.set_reservoir(LAY, r_)
+                except (TypeError, ValueError, KeyError) as exc:
+                    st.error(f"Not applied: {exc}")
+                else:
+                    bump()
+                    st.rerun()
+            with st.expander("Why these recovery factors?"):
+                st.markdown("\n\n".join(why_))
+                st.caption("Strategy defaults — offtake of the EUR per year on plateau / share of the EUR "
+                           "produced before decline: " + "; ".join(
+                               f"{d_}: {o_:.0%} / {e_:.0%}" for d_, (o_, e_) in tb_production.DRIVE_PROFILE.items()))
 
         # ── profile settings ──
         st.markdown("#### Production profile")
@@ -3282,40 +3329,82 @@ with tab_prod:
         pc_ = st.columns(5)
         p_year = pc_[0].number_input("First production (year)", 2020, 2070, int(first_year), 1,
                                      key=f"p_year_{REV}", help="From the schedule unless you change it")
-        p_plateau = pc_[1].number_input("Plateau (years)", 0.0, 20.0, 3.0, 0.5, key=f"p_plat_{REV}")
-        p_decl = pc_[2].number_input("Decline (fraction/yr)", 0.01, 0.6, 0.15, 0.01, key=f"p_decl_{REV}")
-        p_b = pc_[3].number_input("Hyperbolic b", 0.0, 1.2, 0.0, 0.1, key=f"p_b_{REV}",
-                                  help="0 = exponential decline; 0.3–0.7 is typical for oil")
-        p_up = pc_[4].number_input("Uptime", 0.5, 1.0, 0.92, 0.01, key=f"p_up_{REV}")
-        ps_ = tb_production.ProfileSettings(first_production_year=int(p_year), plateau_years=float(p_plateau),
-                                            decline_fraction_per_year=float(p_decl), hyperbolic_b=float(p_b),
-                                            uptime=float(p_up))
+        p_up = pc_[1].number_input("Uptime", 0.5, 1.0, 0.92, 0.01, key=f"p_up_{REV}")
+        p_ramp = pc_[2].number_input("Ramp-up (years)", 0.0, 3.0, 0.5, 0.25, key=f"p_ramp_{REV}")
+        p_cut = pc_[3].number_input("Economic cut-off (Sm³/d)", 0.0, 5000.0, 40.0, 10.0, key=f"p_cut_{REV}",
+                                    help="Field liquid rate below which a reservoir stops")
+        p_wells = pc_[4].checkbox("Cap at the wells' rates", True, key=f"p_wcap_{REV}",
+                                  help="The plateau can never exceed what the wells deliver (their design "
+                                       "rates). Untick to see the reservoir's own plateau, as if you had "
+                                       "enough wells.")
+        ps_ = tb_production.ProfileSettings(first_production_year=int(p_year), uptime=float(p_up),
+                                            ramp_up_years=float(p_ramp), economic_cutoff_sm3_d=float(p_cut),
+                                            limit_by_wells=bool(p_wells))
         S.profile_settings = ps_
         fp_ = tb_production.field_profile(LAY, ps_, S.fa_settings)
         if not fp_["years"]:
             st.warning(fp_["note"] or "No profile yet.")
         else:
+            calc_ = [s_ for s_ in fp_["streams"] if s_["kind"] == "calculated"]
+            eur_total = sum(s_.get("eur_calc_sm3", 0.0) for s_ in calc_)
+            recov_liq = sum(s_["profile"]["recovered_sm3"] for s_ in calc_)
             k_ = st.columns(5)
-            k_[0].metric("Recoverable", f"{fp_['total_boe_sm3'] / 1e6:,.1f} MSm³ o.e.",
-                         help=f"{fp_['total_boe_sm3'] * tb_economics.BBL_PER_SM3 / 1e6:,.1f} million boe")
-            k_[1].metric("Plateau", f"{sum(s_['plateau_sm3_d'] for s_ in fp_['streams']):,.0f} Sm³/d")
+            k_[0].metric("Produced in the profile", f"{fp_['total_boe_sm3'] / 1e6:,.1f} MSm³ o.e.",
+                         help=f"{fp_['total_boe_sm3'] * tb_economics.BBL_PER_SM3 / 1e6:,.1f} million boe, "
+                              f"inside the {int(ps_.max_years)}-year horizon and above the cut-off rate.")
+            k_[1].metric("Peak liquid", f"{max((y['oil_sm3_d'] for y in fp_['years']), default=0.0):,.0f} Sm³/d",
+                         help="Oil or condensate, after any capacity limit")
             k_[2].metric("First production", str(fp_["first_year"]))
             k_[3].metric("Field life", f"{fp_['last_year'] - fp_['first_year'] + 1} years")
-            k_[4].metric("Reservoirs", len(fp_["streams"]))
+            k_[4].metric("Manual wells", len(fp_["manual_wells"]))
+            if calc_:
+                st.dataframe(pd.DataFrame([dict(
+                    Reservoir=s_["reservoir"], Wells=", ".join(s_["wells"]) or "—",
+                    **{"Manual wells": ", ".join(s_["manual_wells"]) or "—"},
+                    **{"EUR in profile (MSm³ liquid)": s_["eur_calc_sm3"] / 1e6,
+                       "Plateau (Sm³/d)": s_["profile"]["plateau_sm3_d"],
+                       "Strategy wants (Sm³/d)": s_["profile"].get("reservoir_rate_sm3_d", 0.0),
+                       "Set by": s_["profile"].get("limited_by", ""),
+                       "Plateau years": s_["profile"].get("plateau_years", 0)}) for s_ in calc_]),
+                    hide_index=True, **STRETCH, column_config={
+                        "EUR in profile (MSm³ liquid)": st.column_config.NumberColumn(format="%.2f"),
+                        "Plateau (Sm³/d)": st.column_config.NumberColumn(format="%.0f"),
+                        "Strategy wants (Sm³/d)": st.column_config.NumberColumn(format="%.0f")})
             if fp_["unassigned_reservoirs"]:
-                st.caption("Wells with no reservoir are not in the profile: "
+                st.caption("Wells with no reservoir and no manual profile are not in the profile: "
                            + ", ".join(fp_["unassigned_reservoirs"]))
-            if fp_["capped_years"]:
-                st.warning(f"Host capacity caps the rate in {len(fp_['capped_years'])} year(s) "
-                           f"({fp_['capped_years'][0]}–{fp_['capped_years'][-1]}): the profile is flattened "
-                           f"to what the host can take.")
+            for s_ in calc_:
+                if s_["profile"].get("limited_by") == "wells":
+                    st.info(f"**{s_['reservoir']}** — {s_['profile']['note']}")
+            for msg_ in fp_.get("fluid_mismatch", []) + fp_.get("over_eur", []):
+                st.warning(msg_)
+            if fp_.get("capped_years"):
+                cy_ = fp_["capped_years"]
+                st.info(f"**Host capacity binds in {len(cy_)} year(s)** ({cy_[0]}–{cy_[-1]}). "
+                        f"{fp_.get('reshuffled_boe_sm3', 0.0) / 1e6:,.2f} MSm³ o.e. is held back and produced "
+                        f"in later years with spare capacity — the field stays full for longer"
+                        + (f" and runs {fp_['extended_years']} year(s) beyond the wells' own profile"
+                           if fp_.get("extended_years") else "")
+                        + ". Every phase is held back in proportion, so the GOR and water cut are unchanged.")
+            if fp_.get("deferred_boe_sm3", 0.0) > 1.0:
+                st.warning(f"{fp_['deferred_boe_sm3'] / 1e6:,.2f} MSm³ o.e. is still held back at the end of the "
+                           f"{int(ps_.max_years)}-year horizon and is not in the profile — the host capacity is "
+                           f"too small for this development inside the field life.")
+            if eur_total > 0 and recov_liq < eur_total * 0.995:
+                st.caption(f"The calculated profile produces {recov_liq / eur_total:.0%} of its EUR inside "
+                           f"{int(ps_.max_years)} years; the rest sits below the cut-off or beyond the horizon.")
             pdf_ = pd.DataFrame(fp_["years"])
             fig = go.Figure()
             fig.add_trace(go.Bar(x=pdf_["year"], y=pdf_["oil_sm3_d"], name="Oil / condensate (Sm³/d)",
                                  marker_color=EQ["navy"]))
+            fig.add_trace(go.Bar(x=pdf_["year"], y=pdf_["water_sm3_d"], name="Water (Sm³/d)",
+                                 marker_color=EQ["slate"], opacity=0.55))
             fig.add_trace(go.Scatter(x=pdf_["year"], y=pdf_["gas_msm3_d"], name="Gas (MSm³/d)", yaxis="y2",
                                      mode="lines+markers", line=dict(color=EQ["torch"], width=3)))
-            fig.update_layout(yaxis=dict(title="Sm³/d"),
+            if S.fa_settings.host_liquid_capacity_sm3_d:
+                fig.add_hline(y=S.fa_settings.host_liquid_capacity_sm3_d, line_dash="dash", line_color=EQ["torch"],
+                              annotation_text="host liquid capacity")
+            fig.update_layout(barmode="stack", yaxis=dict(title="Sm³/d"),
                               yaxis2=dict(title="MSm³/d", overlaying="y", side="right", showgrid=False))
             st.plotly_chart(eq_layout(fig, 340, title="Field production profile"), **STRETCH)
             with st.expander("Profile year by year"):
@@ -3323,11 +3412,69 @@ with tab_prod:
                     "year": "Year",
                     "oil_sm3_d": st.column_config.NumberColumn("Oil (Sm³/d)", format="%.0f"),
                     "gas_msm3_d": st.column_config.NumberColumn("Gas (MSm³/d)", format="%.2f"),
+                    "water_sm3_d": st.column_config.NumberColumn("Water (Sm³/d)", format="%.0f"),
                     "oil_sm3": st.column_config.NumberColumn("Oil (Sm³/yr)", format="%.0f"),
                     "gas_sm3": st.column_config.NumberColumn("Gas (Sm³/yr)", format="%.0f"),
-                    "boe_sm3": st.column_config.NumberColumn("Sm³ o.e./yr", format="%.0f")})
+                    "water_sm3": st.column_config.NumberColumn("Water (Sm³/yr)", format="%.0f"),
+                    "boe_sm3": st.column_config.NumberColumn("Sm³ o.e./yr", format="%.0f"),
+                    "held_back_boe_sm3": st.column_config.NumberColumn("Held back at year end (Sm³ o.e.)",
+                                                                       format="%.0f")})
+                st.caption("Daily rates are rates while producing (the yearly volume over uptime days).")
                 st.download_button("Production profile (CSV)", pdf_.to_csv(index=False),
                                    "tieback_production_profile.csv")
+
+        # ── manual well profiles ──
+        prod_ids_ = [w_ for w_ in LAY.nodes if LAY.kind(w_) == "well" and not tb_fluids.is_injector(LAY, w_)]
+        with st.expander(f"Manual well profiles ({len(fp_['manual_wells'])} in use)",
+                         expanded=bool(fp_["manual_wells"])):
+            st.caption("Give a well its own profile — from a simulation run or a partner forecast — in place of "
+                       "its share of the calculated one. Rates are calendar-day averages for the year (uptime "
+                       "already in them). Leave gas or water blank to follow the fluid's GOR and water cut. "
+                       "Years below 1900 count from first production (1 = first year) and move with it.")
+            if not prod_ids_:
+                st.info("No producing wells in the layout.")
+            else:
+                mw_ = st.selectbox("Well", prod_ids_, key=f"mw_pick_{REV}",
+                                   format_func=lambda w_: f"{LAY.nodes[w_].attrs.get('label') or w_}"
+                                   + ("  (manual)" if w_ in fp_["manual_wells"] else ""))
+                a_ = LAY.nodes[mw_].attrs
+                cur_ = a_.get("manual_profile") or []
+                up_ = st.file_uploader("Load from CSV (year, oil, gas kSm³/d, water)", type=["csv", "txt"],
+                                       key=f"mw_csv_{REV}_{mw_}")
+                if up_ is not None:
+                    try:
+                        cur_ = tb_production.read_profile_csv(up_.getvalue().decode("utf-8", "replace"))
+                        st.caption(f"{len(cur_)} year(s) read from {up_.name} — check them, then save.")
+                    except (ValueError, KeyError, IndexError) as exc:
+                        st.error(f"Could not read the file: {exc}")
+                mdf_ = pd.DataFrame(cur_ or [dict(year=1, oil_sm3_d=None, gas_ksm3_d=None, water_sm3_d=None)],
+                                    columns=list(tb_production.MANUAL_COLUMNS))
+                med_ = st.data_editor(mdf_, num_rows="dynamic", hide_index=True, key=f"mw_ed_{REV}_{mw_}",
+                                      **STRETCH, column_config={
+                    "year": st.column_config.NumberColumn("Year", min_value=1, max_value=2100, step=1, format="%d"),
+                    "oil_sm3_d": st.column_config.NumberColumn("Oil / condensate (Sm³/d)", min_value=0.0, format="%.1f"),
+                    "gas_ksm3_d": st.column_config.NumberColumn("Gas (kSm³/d)", min_value=0.0, format="%.1f"),
+                    "water_sm3_d": st.column_config.NumberColumn("Water (Sm³/d)", min_value=0.0, format="%.1f")})
+                mb_ = st.columns([2, 1, 1])
+                use_ = mb_[0].checkbox("Use this manual profile for the well", a_.get("profile_mode") == "manual",
+                                       key=f"mw_use_{REV}_{mw_}")
+                if mb_[1].button("Save well profile", key=f"mw_save_{REV}", type="primary"):
+                    try:
+                        record("manual well profile")
+                        rows_ = tb_production.set_manual_profile(LAY, mw_, med_.to_dict("records"), use=use_)
+                    except (TypeError, ValueError) as exc:
+                        st.error(f"Not saved: {exc}")
+                    else:
+                        if use_ and not rows_:
+                            st.warning("No rows with a rate — the well stays on the calculated profile.")
+                        bump()
+                        st.rerun()
+                if mb_[2].button("Clear well profile", key=f"mw_clear_{REV}", disabled=not cur_):
+                    record("clear manual profile")
+                    a_.pop("manual_profile", None)
+                    a_["profile_mode"] = "calculated"
+                    bump()
+                    st.rerun()
 
         # ── how many wells ──
         st.markdown("#### How many wells?")
@@ -3337,9 +3484,13 @@ with tab_prod:
         w_in_ = tb_fa.well_inputs(LAY)
         mean_rate = (sum(w_in_[w_].oil_sm3_d for w_ in prod_wells if w_ in w_in_) / len(prod_wells)
                      if prod_wells else 1000.0)
+        strat_q_ = sum(s_["profile"].get("reservoir_rate_sm3_d", 0.0) for s_ in fp_["streams"]
+                       if s_["kind"] == "calculated")
         tgt = wn_[0].number_input("Plateau wanted (Sm³/d)", 0.0, 200000.0,
-                                  float(sum(w_in_[w_].oil_sm3_d for w_ in prod_wells if w_ in w_in_) or 4000.0),
-                                  100.0, key=f"wn_t_{REV}")
+                                  float(round(strat_q_) or sum(w_in_[w_].oil_sm3_d for w_ in prod_wells
+                                                               if w_ in w_in_) or 4000.0),
+                                  100.0, key=f"wn_t_{REV}",
+                                  help="Defaults to the plateau the drainage strategies ask for")
         per_w = wn_[1].number_input("Rate per well (Sm³/d)", 1.0, 20000.0, float(max(mean_rate, 1.0)), 50.0,
                                     key=f"wn_r_{REV}")
         area_t = sum(float(getattr(r_, "area_km2", 0.0) or 0.0) for r_ in res_all.values())
@@ -3472,7 +3623,10 @@ with tab_opt:
         d_hi = o1[3].number_input("Line ID to (in)", 2.0, 36.0, float(min(36.0, float(base_dia) + 4.0)), 1.0,
                                   key=f"o_dhi_{REV}")
         o2 = st.columns(4)
-        try_loop = o2[0].checkbox("Try a looped line", True, key=f"o_loop_{REV}")
+        try_loop = o2[0].checkbox("Try a looped line", True, key=f"o_loop_{REV}",
+                                  help="A second line between the same ends. The solve treats the pair as "
+                                       "two parallel lines — each carries half the stream, so the pressure "
+                                       "drop and the velocity fall — and costs both.")
         try_boost = o2[1].checkbox("Try boosting", True, key=f"o_boost_{REV}",
                                    help=f"A station adds {S.fa_settings.boost_dp_bar:,.0f} bar "
                                         f"(Flow assurance settings) and its cost from the catalogue"
@@ -3489,8 +3643,14 @@ with tab_opt:
             diameters_in=[float(x) for x in np.arange(d_lo, d_hi + 1e-9, d_step)],
             loop=[False, True] if try_loop else [False],
             boosting=[False, True] if try_boost else [False])
+        n_full = len(list(itertools.product(spec_.well_counts or [base_wells],
+                                            spec_.diameters_in or [base_dia],
+                                            spec_.loop or [False], spec_.boosting or [False])))
         n_var = len(spec_.combinations(base_wells, base_dia))
         st.caption(f"{n_var} variant(s) to evaluate.")
+        if n_full > n_var:
+            st.caption(f"{n_full} combinations asked for; {n_var} are sampled evenly across the range "
+                       f"(the cap is tb_optimise.SearchSpec.max_variants).")
         if st.button("Run the search", type="primary", key=f"o_run_{REV}"):
             bar = st.progress(0.0, "Starting…")
             with st.spinner("Costing, scheduling, solving and valuing each variant…"):
@@ -3524,6 +3684,7 @@ with tab_opt:
                                    "CAPEX (USD/boe)": r_.get("capex_usd_boe"),
                                    "Recoverable (MSm³ o.e.)": r_.get("recoverable_msm3_oe"),
                                    "Plateau (Sm³/d)": r_.get("plateau_sm3_d"),
+                                   "Design rate carried": r_.get("rate_share"),
                                    "Hydrate margin (°C)": r_.get("hydrate_margin_c"),
                                    "First production": r_.get("first_production"),
                                    "Errors": r_.get("errors"), "Note": r_.get("note")} for r_ in rows_o])
@@ -3531,6 +3692,9 @@ with tab_opt:
                 c_: st.column_config.NumberColumn(format="%.1f") for c_ in
                 ("CAPEX (MUSD)", "NPV (MUSD)", "Break-even (USD/bbl)", "CAPEX (USD/boe)",
                  "Recoverable (MSm³ o.e.)", "Plateau (Sm³/d)", "Hydrate margin (°C)")})
+            st.caption("Every variant is valued on the rate it can actually carry: a line too small for "
+                       "the design rate produces less, and its NPV says so. *Works* means it carries the "
+                       "full design rate with no design error.")
             st.download_button("Search results (CSV)", odf_.to_csv(index=False), "tieback_optimiser.csv")
             par = tb_optimise.pareto(rows_o)
             if par:

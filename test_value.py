@@ -59,14 +59,20 @@ def profile_conserves_volume():
     assert sum(r["volume_sm3"] for r in p["years"]) == p["recovered_sm3"]
     plateau_rows = [r for r in p["years"] if r["on_plateau"]]
     assert len(plateau_rows) == 3 and all(abs(r["rate_sm3_d"] - 3000) < 1e-6 for r in plateau_rows[1:])
+    assert abs(plateau_rows[0]["rate_sm3_d"] - 3000 * 0.75) < 1e-6, "the first year is the ramp"
+    assert all(abs(r["volume_sm3"] - r["rate_sm3_d"] * pr.DAYS_PER_YEAR * 0.92) < 1.0 for r in p["years"]), \
+        "every row's volume must be its own rate over the year"
     assert p["years"][-1]["rate_sm3_d"] < p["years"][3]["rate_sm3_d"], "it must decline"
     return True
 S.check("plateau then decline recovers the EUR and no more", profile_conserves_volume)
 def capacity_caps_the_plateau():
+    free = pr.profile(10e6, 5000.0)
     p = pr.profile(10e6, 5000.0, capacity_sm3_d=2000.0)
-    assert p["capped_by_capacity"] and p["plateau_sm3_d"] == 2000.0
+    assert p["capped_by_capacity"] and p["plateau_sm3_d"] == 2000.0 and p["potential_sm3_d"] == 5000.0
     assert max(r["rate_sm3_d"] for r in p["years"]) <= 2000.0 + 1e-9
-    return "capacity" in p["note"]
+    assert p["plateau_years"] > free["plateau_years"], "a cap stretches the plateau"
+    assert p["recovered_sm3"] >= free["recovered_sm3"] * 0.98, "and does not lose the volume"
+    return "Capacity holds the rate" in p["note"]
 S.check("a capacity limit flattens the plateau and says so", capacity_caps_the_plateau)
 S.check("no EUR gives no profile", lambda: pr.profile(0, 1000)["years"] == [])
 S.raises("an impossible uptime is refused", ValueError, lambda: pr.ProfileSettings(uptime=1.5))
@@ -88,20 +94,55 @@ def field_profile_groups_by_reservoir():
     return True
 S.check("the field profile is built per reservoir from the wells assigned to it",
         field_profile_groups_by_reservoir)
-def host_capacity_caps_the_field():
+def host_capacity_holds_the_plateau_instead_of_losing_volume():
+    """A bottleneck must stretch the plateau, not delete barrels."""
     import tb_flowassurance as tb_fa
     lay = demo()
+    ps = pr.ProfileSettings(max_years=60)       # room for the stretched plateau inside the horizon
+    free = pr.field_profile(lay, ps)
     fas = tb_fa.FASettings(host_liquid_capacity_sm3_d=1500.0)
-    fp = pr.field_profile(lay, fa_settings=fas)
-    assert fp["capped_years"], "the host limit must bite"
-    return all(y["oil_sm3_d"] <= 1500.0 + 1e-6 for y in fp["years"])
-S.check("the host's liquid capacity caps the field profile", host_capacity_caps_the_field)
+    capped = pr.field_profile(lay, ps, fa_settings=fas)
+    assert all(y["oil_sm3_d"] <= 1500.0 + 1e-6 for y in capped["years"]), "the cap must bite"
+    assert capped["capped_years"] and capped["reshuffled_boe_sm3"] > 0
+    at_cap = sum(1 for y in capped["years"] if y["oil_sm3_d"] + y["water_sm3_d"] >= 1500.0 * 0.999)
+    free_plateau = sum(1 for y in free["years"] if y["oil_sm3_d"] >= free["years"][1]["oil_sm3_d"] * 0.999)
+    assert at_cap > free_plateau, ("the plateau must last longer", at_cap, free_plateau)
+    assert capped["deferred_boe_sm3"] < 1.0, "nothing should be lost"
+    assert abs(capped["total_boe_sm3"] - free["total_boe_sm3"]) / free["total_boe_sm3"] < 1e-6
+    return True
+S.check("the host's capacity holds the plateau longer rather than deleting volume",
+        host_capacity_holds_the_plateau_instead_of_losing_volume)
+
+
+def a_gas_reservoir_is_drained_as_gas():
+    """The report: a gas EUR was drained at a condensate rate, so volumetrics changed nothing."""
+    lay = demo()
+    import tb_fluids as tf
+    r = tf.new_reservoir("Brent", "gas condensate")     # the reservoir the demo wells are on
+    r.area_km2, r.thickness_m, r.recovery_factor = 12.0, 30.0, 0.70
+    tf.set_reservoir(lay, r)
+    fp = pr.field_profile(lay)
+    st = fp["streams"][0]
+    assert abs(fp["total_gas_sm3"] / st["eur_sm3"] - 1.0) < 0.02, \
+        (fp["total_gas_sm3"], st["eur_sm3"])          # the gas produced is the gas EUR
+    assert abs(st["eur_liquid_sm3"] * st["gor_sm3_sm3"] - st["eur_sm3"]) < 1.0
+    # and the recovery factor now changes the answer
+    got = []
+    for rf in (0.2, 0.8):
+        r.recovery_factor = rf
+        tf.set_reservoir(lay, r)
+        got.append(pr.field_profile(lay)["total_gas_sm3"])
+    assert got[1] > got[0] * 2.5, got
+    return True
+S.check("a gas reservoir's EUR is gas, and the recovery factor moves it", a_gas_reservoir_is_drained_as_gas)
 def wells_needed():
     r = pr.wells_needed(4000, 1000, area_km2=30, drainage_area_km2=3)
     assert r["wells"] == 10 and r["binding"] == "drainage area"
     r2 = pr.wells_needed(4000, 500, area_km2=3, drainage_area_km2=3)
-    assert r2["binding"] == "rate" and r2["wells"] == 9      # 4000 / (500 × 0.92)
-    return True
+    assert r2["binding"] == "rate" and r2["wells"] == 8      # 4000 / 500, rates as flowing rates
+    assert pr.wells_needed(4000, 1000, area_km2=12, drainage_area_km2=3)["binding"] == "both"
+    # the same convention as the profile: four 1 000 Sm³/d wells hold a 4 000 Sm³/d plateau
+    return pr.wells_needed(4000, 1000)["wells"] == 4
 S.check("well count takes the larger of rate and drainage, and says which binds", wells_needed)
 S.raises("a zero rate per well is refused", ValueError, lambda: pr.wells_needed(1000, 0))
 
@@ -119,13 +160,47 @@ def cashflow_arithmetic():
     return True
 S.check("cash flow is revenue less cost, and NPV at 0 % is their sum", cashflow_arithmetic)
 def discounting():
+    """Mid-year discounting, to match the mid-year rates the profile is built on."""
     prod = [dict(year=2031, oil_sm3=1000.0, gas_sm3=0.0, boe_sm3=1000.0)]
     s = ec.EconomicSettings(discount_rate=0.1, opex_fixed_musd_yr=0.0, opex_var_usd_boe=0.0,
                             tariff_usd_boe=0.0, intervention_days_yr=0.0, abandonment_frac_of_capex=0.0)
     a = ec.cashflow(prod, {2030: 0.0}, s)
-    disc = [r for r in a["years"] if r["year"] == 2031][0]
-    return abs(disc["discount_factor"] - 1 / 1.1) < 1e-9
-S.check("a year later is discounted one year", discounting)
+    by_year = {r["year"]: r["discount_factor"] for r in a["years"]}
+    assert abs(by_year[2030] - 1 / 1.1 ** 0.5) < 1e-9, by_year[2030]
+    assert abs(by_year[2031] - 1 / 1.1 ** 1.5) < 1e-9, by_year[2031]
+    return True
+S.check("cash flow is discounted from the middle of each year", discounting)
+
+
+def irr_survives_an_abandonment_tail_and_year_gaps():
+    """The report: IRR was None on every case with an abandonment provision."""
+    prod = [dict(year=2030 + i, oil_sm3=500_000.0, gas_sm3=0.0, boe_sm3=500_000.0) for i in range(10)]
+    cap = {2027: 400e6, 2028: 400e6}
+    with_ab = ec.cashflow(prod, cap, ec.EconomicSettings(abandonment_frac_of_capex=0.12))
+    no_ab = ec.cashflow(prod, cap, ec.EconomicSettings(abandonment_frac_of_capex=0.0))
+    assert with_ab["irr"] is not None and no_ab["irr"] is not None, (with_ab["irr"], no_ab["irr"])
+    assert 0 < with_ab["irr"] < no_ab["irr"], (with_ab["irr"], no_ab["irr"])
+    # years are years, not list positions: a 20-year gap is a 20-year discount
+    assert abs(ec.irr([-300e6, 900e6], years=[2020, 2040]) - 0.0565) < 0.002
+    assert abs(ec.irr([-300e6, 900e6], years=[2020, 2021]) - 2.0) < 0.01
+    return ec.irr([1.0, 2.0]) is None and ec.irr([]) is None
+S.check("IRR copes with an abandonment tail and uses real years", irr_survives_an_abandonment_tail_and_year_gaps)
+
+
+def tax_shelters_the_investment():
+    """The report: tax with no loss carry-forward charged 168 % of lifetime profit."""
+    prod = [dict(year=2030 + i, oil_sm3=500_000.0, gas_sm3=0.0, boe_sm3=500_000.0) for i in range(10)]
+    cap = {2027: 400e6, 2028: 400e6}
+    taxed = ec.cashflow(prod, cap, ec.EconomicSettings(apply_tax=True))
+    tax = sum(r["tax_usd"] for r in taxed["years"])
+    profit = sum(r["net_usd"] + r["tax_usd"] for r in taxed["years"])
+    assert 0 < tax < profit, (tax, profit)             # never more than the profit itself
+    eff = tax / profit
+    assert 0.6 <= eff <= 0.80, eff                     # close to the headline rate, not above it
+    assert all(r["tax_usd"] == 0.0 for r in taxed["years"] if r["capex_usd"] > 0), "no tax in a CAPEX year"
+    return True
+S.check("petroleum tax carries its losses forward, so it never exceeds the profit",
+        tax_shelters_the_investment)
 def measures():
     lay = demo()
     est = tb_cost.estimate(lay)

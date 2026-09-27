@@ -44,8 +44,9 @@ INHIBITOR_DENSITY = {"Methanol": 792.0, "MEG": 1113.0}
 INHIBITOR_COST_USD_TE = {"Methanol": 450.0, "MEG": 1500.0}
 
 # Hammerschmidt is fitted to dilute solutions. Beyond these concentrations it
-# overstates the depression and a thermodynamic model is required.
-HAMMERSCHMIDT_LIMIT_WT = {"Methanol": 25.0, "MEG": 30.0}
+# overstates the depression and a thermodynamic model is required. One table, in
+# tb_thermal, so the flow-assurance margin and the inhibitor sizing agree.
+HAMMERSCHMIDT_LIMIT_WT = dict(th.HAMMERSCHMIDT_LIMIT_WT)
 
 
 # ─────────────────────────── hydrate inhibition ────────────────────────────
@@ -102,12 +103,15 @@ def inhibitor_duty(inhibitor: str, subcooling_c: float, water_rate_sm3_d: float,
                    regenerated: bool = False, regeneration_recovery: float = 0.95) -> InhibitorDuty:
     """Continuous-injection duty for one inhibitor.
 
-    `loss_fraction` is inhibitor leaving with the gas and condensate rather than
-    the water — real for methanol (volatile, and it partitions into condensate),
-    small for MEG. It cannot be derived here: it comes from a flash with a
-    thermodynamic package, so it is an input with an indicative default.
+    `loss_fraction` is the share of the **injected** inhibitor that leaves with the
+    gas and condensate rather than staying in the water — real for methanol
+    (volatile, and it partitions into condensate), small for MEG. It cannot be
+    derived here: it comes from a flash with a thermodynamic package, so it is an
+    input with an indicative default.
 
-    `regenerated` credits a regeneration unit: only the make-up is bought.
+    `regenerated` credits a regeneration unit: only the make-up is bought. What
+    leaves with the gas never reaches the regenerator, so the regeneration loss
+    applies to the aqueous stream alone.
     """
     if inhibitor not in INHIBITOR_MW:
         raise ValueError(f"unknown inhibitor '{inhibitor}'")
@@ -115,18 +119,25 @@ def inhibitor_duty(inhibitor: str, subcooling_c: float, water_rate_sm3_d: float,
         raise ValueError("water rate must be >= 0")
     w = hammerschmidt_wt_pct(subcooling_c, inhibitor)
     lean = float(lean_wt_pct) if lean_wt_pct > 0 else (80.0 if inhibitor == "MEG" else 100.0)
-    lean = min(max(lean, w + 1e-6), 100.0)
+    lean = min(lean, 100.0)
+    if w >= lean:
+        # no volume of a lean stream weaker than the requirement can reach it: say so rather than
+        # quietly strengthening the stream the caller asked for
+        raise ValueError(f"{subcooling_c:.0f} °C needs {w:.0f} wt % {inhibitor} in the water, which a "
+                         f"{lean:.0f} wt % lean stream cannot reach — regenerate to a higher strength, "
+                         f"or reduce the subcooling")
     water_te_d = water_rate_sm3_d * 1.02      # produced water ≈ 1020 kg/m³
 
     # inhibitor / (inhibitor + all water) = w/100 with a lean stream of strength c:
     #   L·c / (L + W) = w/100   →   L = W·w / (lean − w)
-    if w >= lean:
-        aqueous = float("inf")
-    else:
-        aqueous = water_te_d * w / (lean - w)
-    losses = aqueous * max(0.0, loss_fraction)
-    total = aqueous + losses
-    make_up = total * (1 - regeneration_recovery) + losses if regenerated else total
+    aqueous = water_te_d * w / (lean - w)
+    # the aqueous requirement must survive the losses, so the injected total is what is needed
+    # divided by the share that stays in the water — a 25 % loss means a quarter of what is
+    # injected, not a quarter added on top
+    f_loss = min(max(float(loss_fraction), 0.0), 0.95)
+    total = aqueous / (1.0 - f_loss) if math.isfinite(aqueous) else aqueous
+    losses = total - aqueous
+    make_up = (losses + aqueous * (1 - regeneration_recovery)) if regenerated else total
     density = INHIBITOR_DENSITY[inhibitor]
     unit_cost = INHIBITOR_COST_USD_TE[inhibitor] if cost_usd_te is None else float(cost_usd_te)
     annual = make_up * 365.0 * uptime
@@ -526,16 +537,17 @@ def screen(fluid, inputs: ChemistryInputs, min_temp_c: float, arrival_temp_c: fl
             "inversion point"))
 
     # ── corrosion ──
-    if inputs.co2_mol_pct is None and inputs.h2s_ppm is None:
+    if inputs.co2_mol_pct is None:
         rows.append(_row(
-            "Internal corrosion", UNKNOWN, "no CO₂ / H₂S analysis",
+            "Internal corrosion", UNKNOWN, "no CO₂ analysis"
+            + (f" (H₂S {inputs.h2s_ppm:.0f} ppm entered)" if inputs.h2s_ppm is not None else ""),
             "CO₂ partial pressure with free water decides whether carbon steel is viable at "
             "all, and the answer changes the flowline material — one of the largest single "
             "cost lines in the concept.",
             "Get the gas composition early: material selection cannot wait for FEED.",
             "CO₂ and H₂S content, water chemistry and pH, de Waard-Milliams or NORSOK M-506 rate"))
     else:
-        co2 = inputs.co2_mol_pct or 0.0
+        co2 = inputs.co2_mol_pct
         h2s = inputs.h2s_ppm or 0.0
         cra = "cra" in inputs.material.lower() or "clad" in inputs.material.lower()
         if cra:
@@ -556,7 +568,14 @@ def screen(fluid, inputs: ChemistryInputs, min_temp_c: float, arrival_temp_c: fl
                          mitigation,
                          "NORSOK M-506 rate at the design conditions; inhibitor availability "
                          "assumption; water wetting along the profile"))
-        if h2s > 0:
+        if inputs.h2s_ppm is None:
+            rows.append(_row(
+                "Sour service", UNKNOWN, "no H₂S analysis",
+                "H₂S brings sulphide stress cracking, and the limits in NACE MR0175 / ISO 15156 "
+                "govern every wetted component, not just the pipe.",
+                "Measure it: the answer decides the material qualification for the whole system.",
+                "H₂S content, and a souring forecast if seawater injection is planned"))
+        elif h2s > 0:
             rows.append(_row(
                 "Sour service", HIGH if h2s >= 100 else MEDIUM, f"{h2s:.0f} ppm H₂S",
                 "H₂S brings sulphide stress cracking, and the limits in NACE MR0175 / ISO 15156 "

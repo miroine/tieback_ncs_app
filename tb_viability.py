@@ -90,14 +90,16 @@ def viability(layout, cost_settings: Optional[tb_cost.CostSettings] = None,
     else:
         bad = [w for w in res.wells if not w["deliverable"]]
         worst = min((w["margin_bar"] for w in res.wells), default=float("nan"))
-        out.append(_c("Flow assurance", "Wells deliver at design rate", PASS if not bad else FAIL,
-                      f"tightest margin {worst:.0f} bar", "> 0 bar",
+        out.append(_c("Flow assurance", "Wells deliver at design rate",
+                      (PASS if not bad else FAIL) if res.wells else NA,
+                      f"tightest margin {worst:.0f} bar" if res.wells else "no producing wells", "> 0 bar",
                       "Bigger line, boosting, or a closer host: " + ", ".join(w["well"] for w in bad[:4])
                       if bad else ""))
         margins = [r.min_hydrate_margin_c for r in res.edges.values() if not r.heated]
         m_now = min(margins) if margins else float("nan")
         out.append(_c("Flow assurance", "Hydrate margin at design rate",
-                      PASS if m_now >= 3 else (ATTENTION if m_now >= 0 else FAIL),
+                      NA if m_now != m_now else
+                      (PASS if m_now >= 3 else (ATTENTION if m_now >= 0 else FAIL)),
                       f"{m_now:.1f} °C", "≥ 3 °C",
                       "Insulate, inhibit continuously, or heat the line" if m_now < 3 else ""))
         try:
@@ -135,10 +137,13 @@ def viability(layout, cost_settings: Optional[tb_cost.CostSettings] = None,
                       ", ".join(slug) or "none", "none",
                       "Check riser stability, or plan gas lift / topside control" if slug else ""))
         spans = sum(len(r.free_spans) for r in res.edges.values())
+        screened = [r for r in res.edges.values() if r.uses_seabed_profile]
         out.append(_c("Installation", "Free spans screened",
-                      PASS if spans == 0 else ATTENTION,
-                      f"{spans} candidate spans", "0 unmitigated",
-                      "Survey the route and plan span supports" if spans else ""))
+                      NA if not screened else (PASS if spans == 0 else ATTENTION),
+                      f"{spans} candidate spans on {len(screened)} line(s)" if screened
+                      else "no seabed profile stored", "0 unmitigated",
+                      "Fetch the seabed profiles (sidebar) — nothing was screened" if not screened
+                      else ("Survey the route and plan span supports" if spans else "")))
 
     # ── 3. Schedule ──
     try:
@@ -155,27 +160,43 @@ def viability(layout, cost_settings: Optional[tb_cost.CostSettings] = None,
                       f"{len(tight)} campaigns under 30 days float", "≥ 30 days",
                       "A slip pushes these to the next season: "
                       + ", ".join(a.name for a in tight[:3]) if tight else ""))
-        long_lead = max((a.duration_days for a in schedule.activities.values()
-                         if a.group == "Procurement"), default=0) / 30.44
-        out.append(_c("Schedule", "Long-lead items ordered in time", PASS if long_lead else NA,
-                      f"longest lead {long_lead:.0f} months", "within the plan",
-                      "Confirm the award date covers the longest lead item"))
+        # the host tie-in's engineering and prefabrication is the usual long lead on a
+        # tie-back, and it is in the "Host" group, not "Procurement"
+        procs = [a for a in schedule.activities.values() if a.group in ("Procurement", "Host")]
+        late = [a for a in procs if a.total_float_days < 30]
+        longest = max((a.duration_days for a in procs), default=0) / tb_schedule.DAYS_PER_MONTH
+        out.append(_c("Schedule", "Long-lead items ordered in time",
+                      NA if not procs else (PASS if not late else ATTENTION),
+                      f"longest lead {longest:.0f} months, {len(late)} item(s) with under 30 days float"
+                      if procs else "nothing to procure", "≥ 30 days float",
+                      "These decide first production — award early or find a shorter-lead supplier: "
+                      + ", ".join(a.name for a in sorted(late, key=lambda x: x.total_float_days)[:3])
+                      if late else ""))
     except ValueError as exc:
         out.append(_c("Schedule", "Schedule builds end to end", FAIL, str(exc)[:80], "",
                       "Split the campaign or widen the weather window"))
 
     # ── 4. Cost ──
+    # the estimate and the simulation are judged separately: a simulation that cannot run
+    # used to be reported as a second, failing "Estimate produced" row and flipped the verdict
     try:
         est = tb_cost.estimate(layout, cost)
         out.append(_c("Cost", "Estimate produced", PASS,
                       f"{est['total_usd'] / 1e6:,.0f} MUSD incl. contingency", "", ""))
+    except Exception as exc:  # noqa: BLE001
+        out.append(_c("Cost", "Estimate produced", FAIL, str(exc)[:80], "",
+                      "Fix the catalogue or the layout before reading any cost"))
+        return out
+    try:
         mc = tb_cost.monte_carlo(layout, cost, n=1500, seed=11)
         spread = (mc["P90"] - mc["P10"]) / max(mc["P50"], 1e-9)
         out.append(_c("Cost", "Cost uncertainty band", PASS if spread < 0.6 else ATTENTION,
                       f"P10–P90 spread {spread:.0%} of P50", "< 60 %",
                       "Tighten the item ranges or get quotes for the big items" if spread >= 0.6 else ""))
     except Exception as exc:  # noqa: BLE001
-        out.append(_c("Cost", "Estimate produced", FAIL, str(exc)[:80], "", ""))
+        out.append(_c("Cost", "Cost uncertainty band", NA, str(exc)[:80], "< 60 %",
+                      "The simulation could not run — check the uncertainty ranges in the catalogue "
+                      "(low ≤ most likely ≤ high) and the vessel spreads"))
     return out
 
 
