@@ -1,0 +1,73 @@
+# Radix configuration for TieBack Studio (https://www.radix.equinor.com/radix-config)
+# metadata.name must be exactly the application name you register in the Radix console.
+apiVersion: radix.equinor.com/v1
+kind: RadixApplication
+metadata:
+  name: tieback-studio
+spec:
+  build:
+    useBuildCache: true
+  environments:
+    - name: dev
+      build:
+        from: main          # every push to main builds and deploys to dev
+    - name: prod            # no build.from: promote a tested dev deployment in the console
+  components:
+    - name: web
+      src: .
+      dockerfileName: Dockerfile
+      ports:
+        - name: http
+          port: 8501
+      publicPort: http
+      runtime:
+        architecture: amd64
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "1Gi"
+        limits:
+          memory: "3Gi"       # the optimiser and Monte Carlo are the heavy parts
+      healthChecks:
+        startupProbe:
+          tcpSocket:
+            port: 8501
+        readinessProbe:
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+          httpGet:
+            port: 8501
+            path: /_stcore/health
+        livenessProbe:
+          periodSeconds: 60
+          timeoutSeconds: 5
+          failureThreshold: 3
+          httpGet:
+            port: 8501
+            path: /_stcore/health
+      variables:
+        TIEBACK_SHARE_DIR: /app/data/shared_designs
+      # Sign-in with Equinor Entra ID (recommended for internal hosting). Register an app in Entra ID,
+      # put its client ID here, add the redirect URI https://<web-url>/oauth2/callback, and set the
+      # client secret for the component in the Radix console (Secrets). Radix generates the cookie secret.
+      # authentication:
+      #   oauth2:
+      #     clientId: 00000000-0000-0000-0000-000000000000
+      #     scope: openid profile email offline_access
+      #     setXAuthRequestHeaders: true
+      #     sessionStoreType: systemManaged
+      environmentConfig:
+        - environment: dev
+          replicas: 1
+        - environment: prod
+          replicas: 1         # keep 1: Streamlit sessions live in the pod's memory
+          # Keep shared design links across redeploys: mount an Azure blob container here.
+          # volumeMounts:
+          #   - name: shared-designs
+          #     path: /app/data/shared_designs
+          #     blobFuse2:
+          #       protocol: fuse2
+          #       container: tieback-shared-designs
+          #       cacheMode: Block

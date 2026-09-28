@@ -612,6 +612,7 @@ def solve(layout, settings: Optional[FASettings] = None, wells: Optional[Dict[st
         req = node_p[w] / BARA_TO_PSIA
         ok = req <= wf.max_whp_bara
         well_rows.append(dict(well=w, label=layout.nodes[w].label or w, oil_sm3_d=wf.oil_sm3_d,
+                              gas_msm3_d=wf.oil_sm3_d * wf.gor_sm3_sm3 / 1e6,
                               required_whp_bara=req, available_whp_bara=wf.max_whp_bara,
                               margin_bar=wf.max_whp_bara - req, deliverable=ok))
         if not ok:
@@ -782,6 +783,7 @@ def rate_sensitivity(layout, settings: Optional[FASettings] = None, wells: Optio
         rows.append(dict(
             fraction=f,
             oil_sm3_d=sum(w.oil_sm3_d for w in scale_rates(wells, f).values()),
+            gas_msm3_d=sum(w.oil_sm3_d * w.gor_sm3_sm3 for w in scale_rates(wells, f).values()) / 1e6,
             arrival_t_c=host.get("arrival_t_c", math.nan),
             max_required_whp_bara=max((w["required_whp_bara"] for w in res.wells), default=math.nan),
             min_hydrate_margin_c=min((r.min_hydrate_margin_c for r in res.edges.values() if not r.heated),

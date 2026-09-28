@@ -218,7 +218,7 @@ def drive_profile(res) -> dict:
 # ───────────────────────────── number of wells ─────────────────────────────
 
 def wells_needed(plateau_sm3_d: float, well_rate_sm3_d: float, area_km2: float = 0.0,
-                 drainage_area_km2: float = 4.0, uptime: float = 1.0) -> dict:
+                 drainage_area_km2: float = 4.0, uptime: float = 1.0, unit: str = "Sm³/d") -> dict:
     """How many wells the plateau needs, and whether drainage or rate is binding.
 
     Both rates are instantaneous (Sm³/d while flowing), the same convention the
@@ -237,8 +237,8 @@ def wells_needed(plateau_sm3_d: float, well_rate_sm3_d: float, area_km2: float =
     binding = ("both" if by_area and by_rate == by_area else
                ("rate" if by_rate > by_area else "drainage area"))
     return dict(wells=n, by_rate=by_rate, by_drainage=by_area, binding=binding,
-                note=(f"{by_rate} well(s) to hold {plateau_sm3_d:,.0f} Sm³/d at "
-                      f"{well_rate_sm3_d:,.0f} Sm³/d each"
+                note=(f"{by_rate} well(s) to hold {plateau_sm3_d:,.{2 if 'MSm' in unit else 0}f} {unit} at "
+                      f"{well_rate_sm3_d:,.{2 if 'MSm' in unit else 0}f} {unit} each"
                       + (f" at {uptime:.0%} uptime" if uptime < 0.999 else "")
                       + (f"; {by_area} to drain {area_km2:.1f} km² at {drainage_area_km2:.1f} km² per well"
                          if by_area else "")))
@@ -254,7 +254,8 @@ class ProfileSettings:
     decline_fraction_per_year: float = 0.15     # exponential decline after plateau
     hyperbolic_b: float = 0.0                   # 0 = exponential; 0.3–0.7 is typical for oil
     uptime: float = 0.92
-    economic_cutoff_sm3_d: float = 40.0         # field rate below which production stops
+    economic_cutoff_sm3_d: float = 40.0         # oil rate below which an oil reservoir stops
+    economic_cutoff_gas_msm3_d: float = 0.05    # gas rate below which a gas reservoir stops
     max_years: int = 30
     ramp_up_years: float = 0.5                  # first year at a fraction of plateau
     limit_by_wells: bool = True                 # the plateau can never exceed the wells' design rates
@@ -331,7 +332,8 @@ def profile(eur: float, plateau_rate_sm3_d: float, s: Optional[ProfileSettings] 
 
 
 def strategy_profile(eur: float, offtake: float, end_frac: float, s: Optional[ProfileSettings] = None,
-                     well_potential_sm3_d: float = 0.0, capacity_sm3_d: float = 0.0) -> dict:
+                     well_potential_sm3_d: float = 0.0, capacity_sm3_d: float = 0.0,
+                     cutoff_sm3_d: Optional[float] = None) -> dict:
     """The simple profile: in place × recovery factor, produced the way the strategy produces it.
 
     * plateau rate  q = offtake · EUR / (365.25 · uptime)   — capped by the wells and the host
@@ -340,9 +342,13 @@ def strategy_profile(eur: float, offtake: float, end_frac: float, s: Optional[Pr
       k = q_year / (EUR − N_plateau), so the tail holds the rest of the volume and nothing more
 
     A lower plateau (fewer wells, a bottleneck) does not lose volume: it stays on plateau longer.
-    The first `ramp_up_years` ramp linearly from zero.
+    The first `ramp_up_years` ramp linearly from zero. Units are the main phase's (oil or gas
+    Sm³); `cutoff_sm3_d` is in the same unit and defaults to the oil cut-off.
     """
+    cutoff = s.economic_cutoff_sm3_d if (s is not None and cutoff_sm3_d is None) else cutoff_sm3_d
     s = s or ProfileSettings()
+    if cutoff is None:
+        cutoff = s.economic_cutoff_sm3_d
     empty = dict(years=[], eur_sm3=max(eur, 0.0), recovered_sm3=0.0, plateau_sm3_d=0.0,
                  capped_by_capacity=False, field_life_years=0, plateau_years=0, potential_sm3_d=0.0,
                  reservoir_rate_sm3_d=0.0, limited_by="", note="no EUR or no rate")
@@ -377,7 +383,7 @@ def strategy_profile(eur: float, offtake: float, end_frac: float, s: Optional[Pr
         cum = min(cum, eur)
         vol = cum - start
         rate = vol / (DAYS_PER_YEAR * s.uptime)
-        if rate < s.economic_cutoff_sm3_d or vol <= 0:
+        if rate < cutoff or vol <= 0:
             cum = start
             break
         rows.append(dict(year=s.first_production_year + i, rate_sm3_d=rate, volume_sm3=vol,
@@ -600,13 +606,20 @@ def field_profile(layout, settings: Optional[ProfileSettings] = None, fa_setting
                 mismatch.append(f"{rname}: the wells carry a GOR of {well_gor:,.0f} Sm³/Sm³, the reservoir "
                                 f"{gor:,.0f} — apply the reservoir to its wells so the profile and the "
                                 f"flow solve describe the same fluid")
-        # streams are carried as liquid (oil, or condensate for gas), the gas rebuilt from the GOR
+        # Each stream is profiled in its MAIN phase: an oil reservoir in oil, a gas or condensate
+        # reservoir in gas — its EUR is gas, its wells' potential is their gas rate, and the
+        # condensate follows from the CGR. (It used to be profiled in condensate, so a gas field's
+        # plateau, well cap and cut-off were all condensate numbers.)
         eur_liquid = e["eur_sm3"] if fam == "oil" else (e["eur_sm3"] / gor if gor > 0 else 0.0)
         share_calc = len(calc_wells) / len(wells) if wells else 0.0
         dp = drive_profile(r)
+        if fam == "oil":
+            potential = sum(rates.get(w, 0.0) for w in calc_wells)
+        else:
+            potential = sum(rates.get(w, 0.0) * (w_in[w].gor_sm3_sm3 if w in w_in else gor) for w in calc_wells)
         plans.append(dict(r=r, rname=rname, wells=wells, calc_wells=calc_wells, e=e, fam=fam, gor=gor, wc=wc,
-                          eur_liquid=eur_liquid, eur_calc=eur_liquid * share_calc, share_calc=share_calc,
-                          dp=dp, potential=sum(rates.get(w, 0.0) for w in calc_wells)))
+                          eur_liquid=eur_liquid, eur_main=e["eur_sm3"], eur_calc=e["eur_sm3"] * share_calc,
+                          share_calc=share_calc, dp=dp, potential=potential))
     # Host capacity is applied once, to the field total (fit_to_capacity below): shares fixed per
     # reservoir would leave one reservoir's spare capacity idle while another is held back.
     for pl in plans:
@@ -616,12 +629,14 @@ def field_profile(layout, settings: Optional[ProfileSettings] = None, fa_setting
         cap_liquid = 0.0
         if pl["eur_calc"] > 0:
             p = strategy_profile(pl["eur_calc"], pl["dp"]["offtake"], pl["dp"]["end_frac"], s,
-                                 well_potential_sm3_d=pl["potential"])
+                                 well_potential_sm3_d=pl["potential"],
+                                 cutoff_sm3_d=(s.economic_cutoff_sm3_d if pl["fam"] == "oil"
+                                               else s.economic_cutoff_gas_msm3_d * 1e6))
         streams.append(dict(pl["e"], reservoir=rname, kind="calculated", wells=pl["calc_wells"],
-                            manual_wells=[w for w in pl["wells"] if w in manual],
+                            manual_wells=[w for w in pl["wells"] if w in manual], phase=pl["fam"],
                             fluid=getattr(pl["r"], "fluid", ""), gor_sm3_sm3=gor, water_cut=wc,
                             plateau_sm3_d=p["plateau_sm3_d"], eur_liquid_sm3=pl["eur_liquid"],
-                            eur_calc_sm3=pl["eur_calc"], drive=pl["dp"]["drive"],
+                            eur_calc_sm3=pl["eur_calc"], eur_main_sm3=pl["eur_main"], drive=pl["dp"]["drive"],
                             offtake=pl["dp"]["offtake"], end_frac=pl["dp"]["end_frac"],
                             host_capacity_sm3_d=cap_liquid, profile=p))
     # manual wells: their own rows, converted to the same yearly shape
@@ -635,7 +650,10 @@ def field_profile(layout, settings: Optional[ProfileSettings] = None, fa_setting
         yrows, cum = [], 0.0
         for row in rows:
             year = row["year"] if row["year"] >= 1900 else s.first_production_year + row["year"] - 1
-            oil_d = row["oil_sm3_d"] or 0.0
+            if row["oil_sm3_d"] is None and row["gas_ksm3_d"] is not None:
+                oil_d = row["gas_ksm3_d"] * 1e3 / gor if gor > 0 else 0.0     # a gas well entered by gas
+            else:
+                oil_d = row["oil_sm3_d"] or 0.0
             gas_d = row["gas_ksm3_d"] * 1e3 if row["gas_ksm3_d"] is not None else oil_d * gor
             wat_d = row["water_sm3_d"] if row["water_sm3_d"] is not None else oil_d * wc / (1.0 - wc)
             vol = oil_d * DAYS_PER_YEAR
@@ -643,7 +661,10 @@ def field_profile(layout, settings: Optional[ProfileSettings] = None, fa_setting
             yrows.append(dict(year=year, rate_sm3_d=vol / (DAYS_PER_YEAR * s.uptime), volume_sm3=vol,
                               cumulative_sm3=cum, gas_sm3=gas_d * DAYS_PER_YEAR,
                               water_sm3=wat_d * DAYS_PER_YEAR, on_plateau=False))
+        m_phase = (tb_fluids.reservoir_main_phase(r) if r else
+                   (tb_fluids.well_main_phase(layout, wid, wi) if wi else "oil"))
         streams.append(dict(reservoir=rname or "(no reservoir)", kind="manual", wells=[wid], manual_wells=[wid],
+                            phase=m_phase,
                             fluid=getattr(r, "fluid", "") if r else "", gor_sm3_sm3=gor, water_cut=wc,
                             eur_sm3=0.0, eur_liquid_sm3=0.0, in_place_sm3=0.0, recovery_factor=0.0,
                             plateau_sm3_d=max((y["rate_sm3_d"] for y in yrows), default=0.0),
@@ -651,12 +672,20 @@ def field_profile(layout, settings: Optional[ProfileSettings] = None, fa_setting
                                          plateau_years=0, limited_by="manual", note="manual profile")))
     # a reservoir must not give more than its EUR, however it is split between manual and calculated
     for pl in plans:
-        got = sum(st_["profile"]["recovered_sm3"] for st_ in streams
-                  if st_["reservoir"] == pl["rname"])
-        if pl["eur_liquid"] > 0 and got > pl["eur_liquid"] * 1.02:
-            over_eur.append(f"{pl['rname']}: the profiles produce {got / 1e6:,.2f} MSm³ of liquid against an EUR of "
-                            f"{pl['eur_liquid'] / 1e6:,.2f} MSm³ — the manual well profiles take more than "
-                            f"their share")
+        got = 0.0
+        for st_ in streams:
+            if st_["reservoir"] != pl["rname"]:
+                continue
+            if st_["kind"] == "calculated":
+                got += st_["profile"]["recovered_sm3"]                     # already in the main phase
+            else:
+                got += sum((r_["gas_sm3"] if pl["fam"] == "gas" else r_["volume_sm3"])
+                           for r_ in st_["profile"]["years"])
+        if pl["eur_main"] > 0 and got > pl["eur_main"] * 1.02:
+            unit_, div_, _ = tb_fluids.IN_PLACE_UNIT[pl["fam"]]
+            over_eur.append(f"{pl['rname']}: the profiles produce {got / div_:,.2f} {unit_} of "
+                            f"{tb_fluids.RATE_NAME[pl['fam']]} against an EUR of {pl['eur_main'] / div_:,.2f} "
+                            f"{unit_} — the manual well profiles take more than their share")
     years: Dict[int, dict] = {}
     for st_ in streams:
         gor, wc_ = st_["gor_sm3_sm3"], st_["water_cut"]
@@ -665,6 +694,18 @@ def field_profile(layout, settings: Optional[ProfileSettings] = None, fa_setting
                                                    water_sm3_d=0.0, oil_sm3=0.0, gas_sm3=0.0,
                                                    water_sm3=0.0, boe_sm3=0.0))
             per_day = DAYS_PER_YEAR * s.uptime
+            if st_["kind"] == "calculated" and st_.get("phase") == "gas":
+                # a gas stream: the row is gas, the condensate comes with it at the CGR
+                gas = row["volume_sm3"]
+                oil_vol = gas / gor if gor > 0 else 0.0
+                wat = oil_vol * wc_ / (1.0 - wc_)
+                y["oil_sm3_d"] += oil_vol / per_day
+                y["oil_sm3"] += oil_vol
+                y["gas_sm3"] += gas
+                y["gas_msm3_d"] += gas / per_day / 1e6
+                y["water_sm3"] += wat
+                y["water_sm3_d"] += wat / per_day
+                continue
             gas = row["gas_sm3"] if "gas_sm3" in row else row["volume_sm3"] * gor
             wat = row["water_sm3"] if "water_sm3" in row else row["volume_sm3"] * wc_ / (1.0 - wc_)
             y["oil_sm3_d"] += row["rate_sm3_d"]
@@ -684,8 +725,17 @@ def field_profile(layout, settings: Optional[ProfileSettings] = None, fa_setting
     capped_years, deferred = fit["capped_years"], fit["lost_boe_sm3"]
     rows = sorted(years.values(), key=lambda d: d["year"])
     has_calc = any(st_["kind"] == "calculated" and st_["profile"]["years"] for st_ in streams)
+    boe_by = {"oil": 0.0, "gas": 0.0}
+    for st_ in streams:
+        for r_ in st_["profile"]["years"]:
+            if st_["kind"] == "calculated" and st_.get("phase") == "gas":
+                boe_by["gas"] += r_["volume_sm3"] / 1000.0
+            else:
+                boe_by[st_.get("phase", "oil")] += r_["volume_sm3"] + r_.get("gas_sm3", 0.0) / 1000.0
+    main_phase = ("gas" if boe_by["gas"] > boe_by["oil"] else "oil") if (boe_by["gas"] or boe_by["oil"]) \
+        else tb_fluids.layout_main_phase(layout, w_in)
     return dict(streams=streams, years=rows, unassigned_reservoirs=sorted(set(unassigned)),
-                manual_wells=sorted(manual),
+                manual_wells=sorted(manual), main_phase=main_phase,
                 total_oil_sm3=sum(r["oil_sm3"] for r in rows),
                 total_gas_sm3=sum(r["gas_sm3"] for r in rows),
                 total_water_sm3=sum(r["water_sm3"] for r in rows),

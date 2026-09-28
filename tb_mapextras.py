@@ -417,3 +417,114 @@ def bbox_around_point(lat: float, lon: float, radius_km: float):
     km_lon = max((111412.84 * math.cos(p) - 93.5 * math.cos(3 * p)) / 1000.0, 0.5)
     dlat, dlon = radius_km / km_lat, radius_km / km_lon
     return (lon - dlon, max(lat - dlat, -90.0), lon + dlon, min(lat + dlat, 90.0))
+
+
+# ───────────────────────────── overlay styling ─────────────────────────────
+# Imported layers carry a style the user can change: one fill colour, or a colour per value of
+# an attribute; outline colour, fill opacity and line width. The map component reads
+# fc["fill_mode"], fc["fill_color"], fc["outline_color"], fc["fill_opacity"], fc["weight"] and,
+# per feature, properties["_fill"].
+
+STYLE_PALETTE = ["#007079", "#EB0037", "#4A6B82", "#7D4EBF", "#B08D57", "#C4561B", "#0BBE00",
+                 "#FF7D98", "#243746", "#9DBA00", "#FFB000", "#6E9BC3"]
+_HEX = re.compile(r"^#(?:[0-9a-fA-F]{3}){1,2}$")
+
+
+def valid_hex(c) -> bool:
+    return bool(_HEX.match(str(c or "").strip()))
+
+
+def overlay_properties(fc: dict, sample: int = 500) -> List[str]:
+    """Attribute names on the layer's features (internal "_" keys left out), most common first."""
+    count: Dict[str, int] = {}
+    for f in (fc.get("features") or [])[:sample]:
+        for k in (f.get("properties") or {}):
+            if not str(k).startswith("_"):
+                count[k] = count.get(k, 0) + 1
+    return sorted(count, key=lambda k: (-count[k], str(k)))
+
+
+def property_values(fc: dict, key: str, limit: int = 30) -> List[str]:
+    """Distinct values of one attribute, most common first, as text."""
+    count: Dict[str, int] = {}
+    for f in fc.get("features") or []:
+        v = (f.get("properties") or {}).get(key)
+        s = "" if v is None else str(v)
+        count[s] = count.get(s, 0) + 1
+    return sorted(count, key=lambda v: (-count[v], v))[:limit]
+
+
+def default_category_colours(values: List[str], existing: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    existing = existing or {}
+    return {v: (existing[v] if valid_hex(existing.get(v)) else STYLE_PALETTE[i % len(STYLE_PALETTE)])
+            for i, v in enumerate(values)}
+
+
+def style_overlay(fc: dict, fill_color: Optional[str] = None, outline_color: Optional[str] = None,
+                  fill_opacity: Optional[float] = None, weight: Optional[float] = None,
+                  by: Optional[str] = None, colours: Optional[Dict[str, str]] = None,
+                  other_color: str = "#BFBFBF") -> dict:
+    """Restyle an overlay in place and give it a new rev so the map redraws it.
+
+    `by` colours each feature by that attribute's value using `colours` (value → hex); values not
+    listed get `other_color`. Without `by`, every feature takes `fill_color`. The layer's own
+    per-feature colours (a Sodir layer's `_fill`) are kept aside and come back with
+    reset_overlay_style().
+    """
+    for c in (fill_color, outline_color):
+        if c is not None and not valid_hex(c):
+            raise ValueError(f"'{c}' is not a colour — use #RRGGBB")
+    if fill_opacity is not None and not 0 <= float(fill_opacity) <= 1:
+        raise ValueError("fill opacity must be between 0 and 1")
+    if weight is not None and not 0 <= float(weight) <= 20:
+        raise ValueError("line width must be between 0 and 20")
+    feats = fc.get("features") or []
+    for f in feats:                                   # keep the layer's own colours once
+        p = f.setdefault("properties", {})
+        if "_fill0" not in p:
+            p["_fill0"] = p.get("_fill")
+    if by:
+        cols = {str(k): v for k, v in (colours or {}).items()}
+        bad = [v for v in cols.values() if not valid_hex(v)]
+        if bad:
+            raise ValueError(f"'{bad[0]}' is not a colour — use #RRGGBB")
+        for f in feats:
+            p = f["properties"]
+            v = p.get(by)
+            p["_fill"] = cols.get("" if v is None else str(v), other_color)
+        fc["fill_mode"], fc["fill_by"], fc["fill_colours"] = "by", by, cols
+    else:
+        for f in feats:
+            f["properties"]["_fill"] = f["properties"].get("_fill0")
+        fc["fill_mode"] = "single" if fill_color else ""
+        fc.pop("fill_by", None)
+        fc.pop("fill_colours", None)
+    if fill_color:
+        fc["fill_color"] = fill_color
+    for k, v in (("outline_color", outline_color), ("fill_opacity", fill_opacity), ("weight", weight)):
+        if v is not None:
+            fc[k] = float(v) if k != "outline_color" else v
+    _restyle_rev(fc)
+    return fc
+
+
+def reset_overlay_style(fc: dict) -> dict:
+    """Back to how the layer arrived."""
+    for f in fc.get("features") or []:
+        p = f.get("properties") or {}
+        if "_fill0" in p:
+            p["_fill"] = p.pop("_fill0")
+            if p["_fill"] is None:
+                p.pop("_fill")
+    for k in ("fill_mode", "fill_by", "fill_colours", "fill_color", "outline_color", "fill_opacity"):
+        fc.pop(k, None)
+    _restyle_rev(fc)
+    return fc
+
+
+def _restyle_rev(fc: dict):
+    import hashlib, json
+    base = fc.setdefault("base_rev", fc.get("rev") or fc.get("title") or "layer")
+    key = json.dumps({k: fc.get(k) for k in ("fill_mode", "fill_by", "fill_colours", "fill_color",
+                                              "outline_color", "fill_opacity", "weight")}, sort_keys=True)
+    fc["rev"] = f"{base}:{hashlib.md5(key.encode()).hexdigest()[:8]}"

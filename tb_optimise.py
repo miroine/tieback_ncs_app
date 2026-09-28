@@ -34,6 +34,7 @@ from typing import Dict, List, Optional
 import tb_cost
 import tb_economics as ec
 import tb_flowassurance as tb_fa
+import tb_fluids
 import tb_network as net
 import tb_production as pr
 import tb_schedule
@@ -245,8 +246,13 @@ def build_variant(base_layout, option: dict, rates: Optional[Dict[str, float]] =
 # ──────────────────────────────── evaluation ───────────────────────────────
 
 def evaluate(layout, cost_settings=None, sched_settings=None, fa_settings=None,
-             profile_settings=None, econ_settings=None, per_well_rate_sm3_d: float = 0.0) -> dict:
-    """Cost, schedule, flow assurance, production and NPV for one layout."""
+             profile_settings=None, econ_settings=None, per_well_rate_sm3_d: float = 0.0,
+             rate_phase: str = "oil") -> dict:
+    """Cost, schedule, flow assurance, production and NPV for one layout.
+
+    `per_well_rate_sm3_d` is in the field's main phase: oil Sm³/d, or gas MSm³/d when
+    `rate_phase` is "gas" (each well's condensate then follows from its own GOR).
+    """
     row = dict(wells=len(producers(layout)), errors=0, warnings=0, note="")
     findings = layout.validate()
     row["errors"] = sum(f.severity == "error" for f in findings)
@@ -268,7 +274,8 @@ def evaluate(layout, cost_settings=None, sched_settings=None, fa_settings=None,
     if per_well_rate_sm3_d > 0:
         for w, v in wells_in.items():
             if layout.kind(w) == "well":
-                v.oil_sm3_d = per_well_rate_sm3_d
+                v.oil_sm3_d = tb_fluids.liquid_from_main(rate_phase, per_well_rate_sm3_d,
+                                                         max(v.gor_sm3_sm3, 1.0))
                 tb_fa.set_well_inputs(layout, w, v)
         wells_in = tb_fa.well_inputs(layout)
     achieved = None
@@ -297,7 +304,11 @@ def evaluate(layout, cost_settings=None, sched_settings=None, fa_settings=None,
         import dataclasses as _dc
         ps = _dc.replace(ps, first_production_year=int(row["first_production"][:4]))
     fp = pr.field_profile(layout, ps, fa_settings, well_rates=achieved)
-    row["plateau_sm3_d"] = sum(s["plateau_sm3_d"] for s in fp["streams"])
+    main = fp.get("main_phase", "oil")
+    row["main_phase"] = main
+    # plateau in the main phase: oil Sm³/d, or gas MSm³/d
+    row["plateau_sm3_d"] = sum(s["plateau_sm3_d"] for s in fp["streams"] if s.get("phase", "oil") == main
+                               and s["kind"] == "calculated") / (1e6 if main == "gas" else 1.0)
     row["recoverable_msm3_oe"] = fp["total_boe_sm3"] / 1e6
     row["field_life_years"] = (fp["last_year"] - fp["first_year"] + 1) if fp["years"] else 0
     cf = ec.cashflow(fp["years"], annual, econ_settings)
@@ -316,16 +327,18 @@ def evaluate(layout, cost_settings=None, sched_settings=None, fa_settings=None,
 
 def search(base_layout, spec: SearchSpec, cost_settings=None, sched_settings=None, fa_settings=None,
            profile_settings=None, econ_settings=None, per_well_rate_sm3_d: float = 0.0,
-           progress=None) -> List[dict]:
+           progress=None, rate_phase: Optional[str] = None) -> List[dict]:
     """Every combination in the spec, evaluated and ranked by NPV (then by CAPEX)."""
     base_wells = len(producers(base_layout))
     dias = [e.diameter_in for e in base_layout.edges.values()
             if base_layout.catalog.get(e.item_id).category == "flowline" and e.diameter_in]
     base_dia = max(dias) if dias else 10.0
+    w_in = tb_fa.well_inputs(base_layout)
+    rate_phase = rate_phase or tb_fluids.layout_main_phase(base_layout, w_in)
     if per_well_rate_sm3_d <= 0:
-        w_in = tb_fa.well_inputs(base_layout)
         ps = producers(base_layout)
-        per_well_rate_sm3_d = (sum(w_in[w].oil_sm3_d for w in ps if w in w_in) / len(ps)) if ps else 0.0
+        per_well_rate_sm3_d = (sum(tb_fluids.main_rate(w_in[w], rate_phase) for w in ps if w in w_in) / len(ps)
+                               if ps else 0.0)
     combos = spec.combinations(base_wells, base_dia)
     rows = []
     for i, opt in enumerate(combos):
@@ -334,7 +347,7 @@ def search(base_layout, spec: SearchSpec, cost_settings=None, sched_settings=Non
         try:
             lay, label = build_variant(base_layout, opt)
             row = evaluate(lay, cost_settings, sched_settings, fa_settings, profile_settings,
-                           econ_settings, per_well_rate_sm3_d)
+                           econ_settings, per_well_rate_sm3_d, rate_phase)
         except Exception as exc:  # noqa: BLE001 — one impossible variant must not stop the search
             rows.append(dict(opt, label="failed", note=str(exc)[:120], capex_musd=math.nan,
                              npv_musd=math.nan, errors=1))

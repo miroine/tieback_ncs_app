@@ -1,0 +1,19 @@
+# keep the image to what the app needs at run time
+.git
+.github
+__pycache__
+**/__pycache__
+**/*.pyc
+.shared_designs
+.streamlit/secrets.toml
+ui_test
+test_*.py
+run_tests.py
+_harness.py
+tb_map_component/**/*.test.js
+tb_map_component/node_modules
+docs
+tools
+*.zip
+Dockerfile
+.dockerignore

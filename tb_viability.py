@@ -90,9 +90,15 @@ def viability(layout, cost_settings: Optional[tb_cost.CostSettings] = None,
     else:
         bad = [w for w in res.wells if not w["deliverable"]]
         worst = min((w["margin_bar"] for w in res.wells), default=float("nan"))
+        # the design rate in the field's main phase — a gas-condensate field is judged on its gas
+        import tb_fluids
+        w_in_ = tb_fa.well_inputs(layout)
+        main_ = tb_fluids.layout_main_phase(layout, w_in_)
+        q_main = sum(tb_fluids.main_rate(v, main_) for v in w_in_.values())
+        q_txt = tb_fluids.fmt_rate(main_, q_main)
         out.append(_c("Flow assurance", "Wells deliver at design rate",
                       (PASS if not bad else FAIL) if res.wells else NA,
-                      f"tightest margin {worst:.0f} bar" if res.wells else "no producing wells", "> 0 bar",
+                      f"{q_txt}; tightest margin {worst:.0f} bar" if res.wells else "no producing wells", "> 0 bar",
                       "Bigger line, boosting, or a closer host: " + ", ".join(w["well"] for w in bad[:4])
                       if bad else ""))
         margins = [r.min_hydrate_margin_c for r in res.edges.values() if not r.heated]
@@ -107,7 +113,8 @@ def viability(layout, cost_settings: Optional[tb_cost.CostSettings] = None,
             m_td = td["min_hydrate_margin_c"]
             out.append(_c("Flow assurance", "Hydrate margin at turndown",
                           PASS if m_td >= 3 else (ATTENTION if m_td >= 0 else FAIL),
-                          f"{m_td:.1f} °C at {turndown_fraction:.0%} rate", "≥ 3 °C",
+                          f"{m_td:.1f} °C at {turndown_fraction:.0%} rate "
+                          f"({tb_fluids.fmt_rate(main_, q_main * turndown_fraction)})", "≥ 3 °C",
                           "Check the minimum rate the field can be run at" if m_td < 3 else ""))
         except Exception:  # noqa: BLE001
             out.append(_c("Flow assurance", "Hydrate margin at turndown", NA, "", "≥ 3 °C", ""))
@@ -126,11 +133,13 @@ def viability(layout, cost_settings: Optional[tb_cost.CostSettings] = None,
                       "Increase the line size on the limiting section" if ero > 1 else ""))
         cap_fail = [f for f in res.findings if f[0] == "error" and "capacity" in f[2].lower()]
         host0 = next(iter(res.host.values())) if res.host else {}
+        liq_ = f"{host0.get('liquid_sm3_d', float('nan')):,.0f} Sm³/d liquid"
+        gas_ = f"{host0.get('gas_msm3_d', float('nan')):.2f} MSm³/d gas"
+        cap_l = f"{fas.host_liquid_capacity_sm3_d:,.0f} Sm³/d liquid"
+        cap_g = f"{fas.host_gas_capacity_msm3_d:.1f} MSm³/d gas"
         out.append(_c("Flow assurance", "Host capacity", PASS if not cap_fail else FAIL,
-                      f"{host0.get('liquid_sm3_d', float('nan')):,.0f} Sm³/d liquid, "
-                      f"{host0.get('gas_msm3_d', float('nan')):.2f} MSm³/d gas",
-                      f"{fas.host_liquid_capacity_sm3_d:,.0f} Sm³/d, "
-                      f"{fas.host_gas_capacity_msm3_d:.1f} MSm³/d",
+                      f"{gas_}, {liq_}" if main_ == "gas" else f"{liq_}, {gas_}",
+                      f"{cap_g}, {cap_l}" if main_ == "gas" else f"{cap_l}, {cap_g}",
                       "Confirm spare capacity and the tariff with the host operator"))
         slug = [r.edge_id for r in res.edges.values() if r.slug_risk]
         out.append(_c("Flow assurance", "No severe slugging flagged", PASS if not slug else ATTENTION,

@@ -54,7 +54,7 @@ import tb_tiein
 import tb_viability
 import tb_well
 
-APP_VERSION = "0.21.1"
+APP_VERSION = "0.23.0"
 PSI_PER_BAR = 14.503774          # shut-in pressure is entered in bar, stored in psi like the ratings
 HERE = Path(__file__).parent
 DEMO_FILE = HERE / "test_fixtures" / "demo_field_a_tieback.yaml"
@@ -240,11 +240,11 @@ REQUIRED_API = {
     "tb_bathymetry": ["diagnose", "diagnosis_message", "depth_profile", "fetch_route_profiles"],
     "tb_cases": ["concept_overlay", "color_for", "snapshot", "restore"],
     "tb_chemistry": ["screen", "recommend_inhibitor", "ChemistryInputs", "InhibitorCase", "contaminants"],
-    "tb_mapextras": ["make_sketch", "classify_url", "make_bookmark", "sketches", "describe",
+    "tb_mapextras": ["style_overlay", "make_sketch", "classify_url", "make_bookmark", "sketches", "describe",
                      "region_view", "layer_centre", "bbox_around_point"],
     "tb_share": ["encode", "decode", "build_payload", "restore_payload", "LocalStore",
                  "protect", "unprotect", "generate_code", "is_protected"],
-    "tb_fluids": ["well_fluid", "reservoirs", "set_well_fluid", "assign_reservoir",
+    "tb_fluids": ["layout_main_phase", "well_main_phase", "main_rate", "liquid_from_main", "well_fluid", "reservoirs", "set_well_fluid", "assign_reservoir",
                   "apply_reservoir_to_wells", "fluid_table", "gas_well_rates"],
     "tb_grid": ["read_grid", "image_overlay", "contour_features", "sniff"],
     "tb_import": ["as_upload_list", "read_uploads", "read_shapefile_parts"],
@@ -460,7 +460,10 @@ def _share_store():
     if token:
         import requests as _rq
         return tb_share.GistStore(token, _rq.Session())
-    return tb_share.LocalStore(HERE / ".shared_designs")
+    # TIEBACK_SHARE_DIR points the store at a persistent volume in a container (Radix blob mount);
+    # without it, shared designs live next to the app, as on Streamlit Cloud
+    import os as _os
+    return tb_share.LocalStore(Path(_os.environ.get("TIEBACK_SHARE_DIR") or (HERE / ".shared_designs")))
 
 
 def _apply_shared(got: dict, key: str, protected: bool = False):
@@ -810,7 +813,23 @@ with st.sidebar:
             elif not nearby:
                 st.caption("No host within 150 km of this point.")
 
+        def _fill_site_depths(lay):
+            """The template's depths belonged to its drawing site; sample the real seabed here."""
+            try:
+                got_ = tb_bathymetry.fill_node_depths(lay, _session(), only_blank=True)
+            except Exception:  # noqa: BLE001 — offline is fine: depths stay blank and are flagged
+                got_ = {}
+            ok_ = sum(1 for v in got_.values() if v is not None)
+            return (f"; water depth from EMODnet on {ok_} of {len(got_)} elements" if ok_ else
+                    "; water depths left blank (EMODnet not reached) — fill them in the sidebar")
+
         def _template_layout():
+            lay, how_ = _template_layout_placed()
+            if field_pt is not None:
+                how_ += _fill_site_depths(lay)
+            return lay, how_
+
+        def _template_layout_placed():
             lay = tb_network.Layout.from_dict(yaml.safe_load((tpl_dir / pick).read_text()),
                                               tb_catalog.Catalog())
             if field_pt is None:
@@ -1040,7 +1059,12 @@ with st.sidebar:
     st.subheader("Bathymetry")
     st.caption("EMODnet DTM (~115 m grid, depths to LAT). Switch the bathymetry and depth-contour "
                "overlays on in the map's layer control, top right.")
-    blank_only = st.checkbox("Only nodes with no depth", True)
+    fill_mode = st.radio("Water depths to fill", ["All except the ones I typed", "Only empty ones", "All"],
+                         key="depth_fill_mode", horizontal=False,
+                         help="Depths you typed in the element editor or the bulk table are marked as yours "
+                              "and kept by the first option. Template and old survey depths are replaced.")
+    blank_only = fill_mode == "Only empty ones"
+    keep_manual = fill_mode == "All except the ones I typed"
     if st.button("Fetch seabed profiles along routes"):
         with st.spinner("Sampling the seabed along each line…"):
             try:
@@ -1060,13 +1084,20 @@ with st.sidebar:
     if st.button("Fill water depths from EMODnet"):
         with st.spinner("Sampling the EMODnet DTM…"):
             try:
-                got = tb_bathymetry.fill_node_depths(LAY, _session(), only_blank=blank_only)
+                try:
+                    got = tb_bathymetry.fill_node_depths(LAY, _session(), only_blank=blank_only,
+                                                         keep_manual=keep_manual)
+                except TypeError:                       # an older tb_bathymetry still in memory
+                    got = tb_bathymetry.fill_node_depths(LAY, _session(), only_blank=blank_only)
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Depth lookup failed: {exc}")
             else:
                 ok = sum(1 for v in got.values() if v is not None)
                 if ok:
                     st.success(f"Set depth on {ok} of {len(got)} nodes")
+                elif not got:
+                    st.info("Nothing to fill — every subsea element already has a depth you typed, or "
+                            "you chose *Only empty ones*. Pick *All* to overwrite them.")
                     bump()
                     st.rerun()
                 else:
@@ -1181,7 +1212,11 @@ with st.sidebar:
         entry["convention"] = conv
         gb = st.columns(3)
         if gb[0].button("Set element depths"):
-            got = tb_grid.fill_node_depths(LAY, grid, only_blank=False, convention=conv)
+            try:
+                got = tb_grid.fill_node_depths(LAY, grid, only_blank=False, convention=conv,
+                                               keep_manual=S.get("depth_fill_mode", "") == "All except the ones I typed")
+            except TypeError:
+                got = tb_grid.fill_node_depths(LAY, grid, only_blank=False, convention=conv)
             hit = sum(1 for v in got.values() if v is not None)
             bump()
             st.success(f"Water depth set on {hit} of {len(got)} elements from {grid.name}")
@@ -1208,6 +1243,61 @@ with st.sidebar:
             S.user_overlays = [o for o in S.user_overlays if o["title"] != drop]
             st.rerun()
         pts_layer = next((o for o in S.user_overlays if o["title"] == drop), None)
+        if pts_layer is not None and has_api("tb_mapextras", "style_overlay", "overlay_properties"):
+            with st.expander(f"Colours of {drop}"):
+                lay_ = pts_layer
+                modes_ = ["One colour", "By attribute", "As imported"]
+                cur_mode = {"single": 0, "by": 1}.get(lay_.get("fill_mode", ""), 2)
+                mode_ = st.radio("Fill", modes_, index=cur_mode, horizontal=True, key=f"sty_mode_{drop}")
+                props_ = tb_mapextras.overlay_properties(lay_)
+                sc_ = st.columns(3)
+                outline_ = sc_[0].color_picker("Outline", lay_.get("outline_color") or "#828282",
+                                               key=f"sty_out_{drop}")
+                opac_ = sc_[1].slider("Fill opacity", 0.0, 1.0, float(lay_.get("fill_opacity", 0.45) or 0.0),
+                                      0.05, key=f"sty_op_{drop}")
+                width_ = sc_[2].number_input("Line width", 0.0, 10.0, float(lay_.get("weight", 1.5) or 0.0), 0.5,
+                                             key=f"sty_w_{drop}")
+                fill_, by_, cols_ = None, None, None
+                if mode_ == "One colour":
+                    fill_ = st.color_picker("Fill colour", lay_.get("fill_color") or lay_.get("color") or "#4A6B82",
+                                            key=f"sty_fill_{drop}")
+                elif mode_ == "By attribute":
+                    if not props_:
+                        st.caption("This layer's features have no attributes to colour by.")
+                    else:
+                        by_ = st.selectbox("Attribute", props_,
+                                           index=props_.index(lay_["fill_by"]) if lay_.get("fill_by") in props_ else 0,
+                                           key=f"sty_by_{drop}")
+                        vals_ = tb_mapextras.property_values(lay_, by_)
+                        start_ = tb_mapextras.default_category_colours(
+                            vals_, lay_.get("fill_colours") if lay_.get("fill_by") == by_ else None)
+                        st.caption(f"{len(vals_)} value(s) shown (the 30 most common); anything else is grey. "
+                                   f"Colours as #RRGGBB — copy them from any colour picker.")
+                        cdf_ = st.data_editor(pd.DataFrame([dict(value=v or "(blank)", colour=c) for v, c in start_.items()]),
+                                              hide_index=True, key=f"sty_tab_{drop}_{by_}", **STRETCH, column_config={
+                                                  "value": st.column_config.TextColumn("Value", disabled=True),
+                                                  "colour": st.column_config.TextColumn("Colour (#RRGGBB)")})
+                        cols_ = {("" if r["value"] == "(blank)" else r["value"]): str(r["colour"]).strip()
+                                 for r in cdf_.to_dict("records")}
+                bs_ = st.columns(2)
+                if bs_[0].button("Apply colours", key=f"sty_apply_{drop}", type="primary"):
+                    try:
+                        if mode_ == "As imported":
+                            tb_mapextras.reset_overlay_style(lay_)
+                            tb_mapextras.style_overlay(lay_, outline_color=outline_, fill_opacity=opac_, weight=width_)
+                        else:
+                            tb_mapextras.style_overlay(lay_, fill_color=fill_, outline_color=outline_,
+                                                       fill_opacity=opac_, weight=width_, by=by_, colours=cols_)
+                    except ValueError as exc:
+                        st.error(str(exc))
+                    else:
+                        st.rerun()
+                if bs_[1].button("Reset to imported", key=f"sty_reset_{drop}"):
+                    tb_mapextras.reset_overlay_style(lay_)
+                    for k_ in ("outline_color", "fill_opacity", "weight"):
+                        lay_.pop(k_, None)
+                    tb_mapextras._restyle_rev(lay_)
+                    st.rerun()
         n_pts = len(tb_import.point_features(pts_layer)) if pts_layer else 0
         if n_pts:
             node_items = [i for i in CAT.items.values() if i.category in tb_catalog.NODE_KINDS]
@@ -1594,6 +1684,8 @@ with tab_layout:
                 if utm_vals:
                     lat, lon = tb_geo.utm_to_geo(utm_vals[0], utm_vals[1], int(utm_vals[2]), "N", LAY.settings.datum)
                 record("edit node")
+                if abs(float(depth) - float(node.water_depth_m)) > 1e-9:
+                    node.attrs["depth_source"] = "manual"      # yours: the depth fill keeps it
                 node.label, node.item_id, node.water_depth_m = label, item_id, depth
                 node.attrs["heading_deg"] = float(heading)
                 LAY.set_tags(sel, node_tags.split(","))
@@ -1695,7 +1787,8 @@ with tab_layout:
         pk = S.map_state["picked"]
         cc[0].caption(f"Picked point {pk[0]:.5f}°N, {pk[1]:.5f}°E — place a template here from the sidebar, "
                       f"or move the whole layout to it.")
-        if cc[1].button("Move layout here"):
+        if cc[1].button("Move layout here", help="Water depths and seabed profiles belonged to the old "
+                                                  "site: they are cleared — fill them again in the sidebar"):
             LAY.place_at(float(pk[0]), float(pk[1]))
             bump()
             S.fit_token += 1
@@ -1907,14 +2000,17 @@ with tab_layout:
 
     with st.expander("All equipment (bulk edit)"):
         node_rows = [dict(id=n.node_id, label=n.label, item_id=n.item_id, lat=n.lat, lon=n.lon,
-                          water_depth_m=n.water_depth_m, sitp_bar=round(n.sitp_psi / PSI_PER_BAR, 1),
-                          hipps=n.hipps, phase=n.phase)
+                          water_depth_m=n.water_depth_m, depth_from=n.attrs.get("depth_source", "") or
+                          ("" if n.water_depth_m > 0 else "—"),
+                          sitp_bar=round(n.sitp_psi / PSI_PER_BAR, 1), hipps=n.hipps, phase=n.phase)
                      for n in LAY.nodes.values()]
         ndf = pd.DataFrame(node_rows, columns=["id", "label", "item_id", "lat", "lon", "water_depth_m",
-                                               "sitp_bar", "hipps", "phase"])
+                                               "depth_from", "sitp_bar", "hipps", "phase"])
         node_ids = [i.item_id for i in CAT.items.values() if i.category in tb_catalog.NODE_KINDS]
         ned = st.data_editor(ndf, hide_index=True, key=f"nodes_ed_{REV}", **STRETCH, column_config={
             "id": st.column_config.TextColumn(disabled=True),
+            "depth_from": st.column_config.TextColumn("depth from", disabled=True,
+                                                      help="manual = typed by you; emodnet / grid / host = filled"),
             "item_id": st.column_config.SelectboxColumn("item", options=node_ids, required=True),
             "lat": st.column_config.NumberColumn(format="%.6f"), "lon": st.column_config.NumberColumn(format="%.6f"),
             "sitp_bar": st.column_config.NumberColumn("SITP (bara)", min_value=0.0, format="%.0f"),
@@ -1939,7 +2035,12 @@ with tab_layout:
                     if new_cat != CAT.get(nd.item_id).category:
                         raise ValueError(f"{r['id']}: cannot change equipment category ({new_cat})")
                     nd.label, nd.item_id = str(r["label"] or r["id"]), r["item_id"]
-                    nd.water_depth_m = float(r["water_depth_m"] or 0)
+                    new_d = float(r["water_depth_m"] or 0)
+                    if abs(new_d - float(nd.water_depth_m)) > 1e-9:
+                        nd.attrs["depth_source"] = "manual" if new_d > 0 else ""
+                        if not new_d:
+                            nd.attrs.pop("depth_source", None)
+                    nd.water_depth_m = new_d
                     nd.sitp_psi = float(r["sitp_bar"] or 0) * PSI_PER_BAR
                     nd.hipps, nd.phase = bool(r["hipps"]), int(r["phase"] or 1)
                     LAY.move_node(r["id"], float(r["lat"]), float(r["lon"]))
@@ -1975,7 +2076,8 @@ with tab_layout:
                 "gas_sg": r.gas_sg, "water_cut": r.water_cut, "salinity_wt_pct": r.salinity_wt_pct,
                 "pres_bara": r.pres_bara, "tres_c": r.tres_c, "co2_mol_pct": r.co2_mol_pct,
                 "h2s_ppm": r.h2s_ppm, "mercury_ug_nm3": getattr(r, "mercury_ug_nm3", 0.0),
-                "in_place_msm3": float(getattr(r, "in_place_sm3", 0.0) or 0.0) / 1e6,
+                "in_place_main": float(getattr(r, "in_place_sm3", 0.0) or 0.0)
+                / tb_fluids.IN_PLACE_UNIT[tb_fluids.reservoir_main_phase(r)][1],
                 "area_km2": getattr(r, "area_km2", 0.0), "thickness_m": getattr(r, "thickness_m", 0.0),
                 "ntg": getattr(r, "ntg", 0.70), "porosity": getattr(r, "porosity", 0.22),
                 "water_saturation": getattr(r, "water_saturation", 0.25), "fvf": getattr(r, "fvf", 0.0),
@@ -1983,7 +2085,7 @@ with tab_layout:
                 "notes": r.notes} for r in res.values()]
                 or [], columns=["name", "fluid", "gor_sm3_sm3", "api", "gas_sg", "water_cut",
                                 "salinity_wt_pct", "pres_bara", "tres_c", "co2_mol_pct", "h2s_ppm",
-                                "mercury_ug_nm3", "in_place_msm3", "area_km2", "thickness_m", "ntg", "porosity",
+                                "mercury_ug_nm3", "in_place_main", "area_km2", "thickness_m", "ntg", "porosity",
                                 "water_saturation", "fvf", "drive", "recovery_factor", "notes"])
             ac = st.columns([2, 2, 1])
             new_name = ac[0].text_input("New reservoir", "", key=f"newres_{REV}",
@@ -2015,10 +2117,11 @@ with tab_layout:
                         "co2_mol_pct": st.column_config.NumberColumn("CO₂ mol %", min_value=0.0, format="%.2f"),
                         "h2s_ppm": st.column_config.NumberColumn("H₂S ppm", min_value=0.0, format="%.0f"),
                         "mercury_ug_nm3": st.column_config.NumberColumn("Hg µg/Nm³", min_value=0.0, format="%.2f"),
-                        "in_place_msm3": st.column_config.NumberColumn(
-                            "In place (MSm³)", min_value=0.0, format="%.1f",
-                            help="STOIIP for oil, GIIP for gas, in million Sm³ (gas: 1 GSm³ = 1 000 MSm³). "
-                                 "Enter it directly, or leave 0 and fill in the volumetrics to the right."),
+                        "in_place_main": st.column_config.NumberColumn(
+                            "In place: oil MSm³ · gas GSm³", min_value=0.0, format="%.2f",
+                            help="The main phase's volume in place: STOIIP in MSm³ for an oil reservoir, GIIP "
+                                 "in GSm³ (10⁹ Sm³) for gas, condensate and wet gas. Enter it directly, or "
+                                 "leave 0 and fill in the volumetrics to the right."),
                         "area_km2": st.column_config.NumberColumn("Area (km²)", min_value=0.0, format="%.2f",
                                                                   help="Volumetrics, only used when In place is 0"),
                         "thickness_m": st.column_config.NumberColumn("Net h (m)", min_value=0.0, format="%.1f"),
@@ -2054,8 +2157,10 @@ with tab_layout:
                             # plain Python values: numpy scalars would not survive the project file
                             vals = {k: (v.item() if hasattr(v, "item") else v) for k, v in r.items()}
                             vals["notes"] = str(vals.get("notes") or "")
-                            ip_ = vals.pop("in_place_msm3", 0.0)
-                            vals["in_place_sm3"] = float(ip_) * 1e6 if ip_ == ip_ and ip_ else 0.0
+                            ip_ = vals.pop("in_place_main", 0.0)
+                            ph_ = "oil" if tb_fluids.RESERVOIR_TO_WELL.get(vals.get("fluid"), "oil") == "oil" else "gas"
+                            vals["in_place_sm3"] = (float(ip_) * tb_fluids.IN_PLACE_UNIT[ph_][1]
+                                                    if ip_ == ip_ and ip_ else 0.0)
                             # fields this table does not show (profile offtake etc.) are kept
                             base_ = dict((LAY.reservoirs or {}).get(vals["name"], {}))
                             base_.update(vals)
@@ -2555,18 +2660,25 @@ with tab_fa:
             id=w, label=LAY.nodes[w].label or w,
             fluid=(tb_fluids.well_fluid(LAY, w)[0] if has_fl and tb_fluids.is_assigned(tb_fluids.well_fluid(LAY, w)[1])
                    else "not assigned"),
-            gas_msm3_d=round(v.oil_sm3_d * v.gor_sm3_sm3 / 1e6, 3),
+            main=(tb_fluids.well_main_phase(LAY, w, v) if has_api("tb_fluids", "well_main_phase") else "oil"),
+            gas_msm3_d=v.oil_sm3_d * v.gor_sm3_sm3 / 1e6,
             **vars(v)) for w, v in wells_in.items()])
         n_inj = sum(1 for nid in LAY.nodes if LAY.kind(nid) == "well") - len(wells_in)
         if n_inj:
             st.caption(f"{n_inj} injector(s) left out — they are fed from the host and add nothing to "
                        f"the production network.")
+        st.caption("Each well is entered in its **main phase**: oil wells by oil rate, gas and condensate "
+                   "wells by gas rate — their condensate is worked out from the gas and the GOR when you "
+                   "apply. The other column is shown for reference.")
         wed = st.data_editor(wdf, hide_index=True, key=f"fa_wells_{REV}", **STRETCH,
-                             disabled=["id", "label", "fluid", "gas_msm3_d"], column_config={
+                             disabled=["id", "label", "fluid", "main"], column_config={
             "id": st.column_config.TextColumn(disabled=True), "label": st.column_config.TextColumn(disabled=True),
             "fluid": st.column_config.TextColumn("Main fluid", disabled=True),
-            "gas_msm3_d": st.column_config.NumberColumn("Gas MSm³/d", disabled=True, format="%.3f",
-                                                        help="Oil/condensate rate × GOR"),
+            "main": st.column_config.TextColumn("Entered by", help="oil = the oil rate is the input; "
+                                                               "gas = the gas rate is, condensate follows"),
+            "gas_msm3_d": st.column_config.NumberColumn("Gas MSm³/d", min_value=0.0, format="%.3f",
+                                                        help="The input for gas and condensate wells; "
+                                                             "for oil wells it is oil rate × GOR"),
             "oil_sm3_d": st.column_config.NumberColumn("Oil/cond. Sm³/d", min_value=0.0, format="%.0f"),
             "water_cut": st.column_config.NumberColumn("Water cut", min_value=0.0, max_value=0.99, format="%.2f"),
             "gor_sm3_sm3": st.column_config.NumberColumn("GOR Sm³/Sm³", min_value=0.0, format="%.0f"),
@@ -2579,6 +2691,10 @@ with tab_fa:
             try:
                 for r in wed.to_dict("records"):
                     vals = {k: float(r[k]) for k in tb_fa.WellFA.__dataclass_fields__}
+                    if r.get("main") == "gas":
+                        # a gas well is specified by its gas rate: the condensate follows from the GOR
+                        vals["oil_sm3_d"] = tb_fluids.liquid_from_main("gas", float(r["gas_msm3_d"] or 0.0),
+                                                                       vals["gor_sm3_sm3"])
                     tb_fa.set_well_inputs(LAY, r["id"], tb_fa.WellFA(**vals))
             except (ValueError, TypeError) as exc:
                 st.error(f"Well inputs not applied: {exc}")
@@ -2662,6 +2778,8 @@ with tab_fa:
 
         st.markdown("#### Wells")
         st.dataframe(pd.DataFrame(FA_RES.wells), hide_index=True, **STRETCH, column_config={
+            "oil_sm3_d": st.column_config.NumberColumn("Oil / condensate (Sm³/d)", format="%.0f"),
+            "gas_msm3_d": st.column_config.NumberColumn("Gas (MSm³/d)", format="%.3f")} | {
             c_: st.column_config.NumberColumn(format="%.1f") for c_ in
             ("required_whp_bara", "available_whp_bara", "margin_bar")})
 
@@ -2785,16 +2903,20 @@ with tab_fa:
         if td and td["sig"] == md5(LAY.to_dict(), vars(S.fa_settings), fr_txt):
             tdf = pd.DataFrame(td["rows"])
             st.dataframe(tdf, hide_index=True, **STRETCH, column_config={
+                "oil_sm3_d": st.column_config.NumberColumn("Oil / condensate (Sm³/d)", format="%.0f"),
+                "gas_msm3_d": st.column_config.NumberColumn("Gas (MSm³/d)", format="%.2f")} | {
                 c_: st.column_config.NumberColumn(format="%.1f") for c_ in
                 ("arrival_t_c", "max_required_whp_bara", "min_hydrate_margin_c", "min_cooldown_h",
                  "liquid_inventory_m3", "surge_vs_design_m3", "max_velocity_m_s")})
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=tdf["oil_sm3_d"], y=tdf["min_hydrate_margin_c"], mode="lines+markers",
+            mph_t = tb_fluids.layout_main_phase(LAY, wells_in) if has_api("tb_fluids", "layout_main_phase") else "oil"
+            x_t = "gas_msm3_d" if (mph_t == "gas" and "gas_msm3_d" in tdf) else "oil_sm3_d"
+            fig.add_trace(go.Scatter(x=tdf[x_t], y=tdf["min_hydrate_margin_c"], mode="lines+markers",
                                      name="Hydrate margin (°C)", line=dict(color=EQ["torch"], width=3)))
-            fig.add_trace(go.Scatter(x=tdf["oil_sm3_d"], y=tdf["arrival_t_c"], mode="lines+markers",
+            fig.add_trace(go.Scatter(x=tdf[x_t], y=tdf["arrival_t_c"], mode="lines+markers",
                                      name="Arrival temperature (°C)", line=dict(color=EQ["navy"], width=3)))
             fig.add_hline(y=0, line_dash="dash", line_color=EQ["slate"])
-            fig.update_xaxes(title="Field oil rate (Sm³/d)")
+            fig.update_xaxes(title="Field gas rate (MSm³/d)" if x_t == "gas_msm3_d" else "Field oil rate (Sm³/d)")
             fig.update_yaxes(title="°C")
             st.plotly_chart(eq_layout(fig, 300, title="Turndown: arrival temperature and hydrate margin"), **STRETCH)
             bad = tdf[tdf["min_hydrate_margin_c"] < 0]
@@ -2881,6 +3003,7 @@ with tab_fa:
                 liq = {w_: float(rates[w_]) / max(1.0 - wells_in[w_].water_cut, 0.05) for w_ in iprs}
                 info["table"] = [dict(
                     well=w_, rate_before_sm3_d=before[w_], rate_solved_sm3_d=float(rates[w_]),
+                    gas_solved_msm3_d=float(rates[w_]) * wells_in[w_].gor_sm3_sm3 / 1e6,
                     liquid_sm3_d=liq[w_],
                     bhp_bara=iprs[w_].bhp(liq[w_] * tb_fa.SM3_TO_STB) / tb_fa.BARA_TO_PSIA,
                     required_whp_bara=wres.get(w_, {}).get("required_whp_bara", float("nan")),
@@ -2907,8 +3030,9 @@ with tab_fa:
             if inf.get("table"):
                 st.dataframe(pd.DataFrame(inf["table"]), hide_index=True, **STRETCH, column_config={
                     "well": "Well",
-                    "rate_before_sm3_d": st.column_config.NumberColumn("Oil rate before (Sm³/d)", format="%.0f"),
-                    "rate_solved_sm3_d": st.column_config.NumberColumn("Solved oil rate (Sm³/d)", format="%.0f"),
+                    "rate_before_sm3_d": st.column_config.NumberColumn("Oil/cond. before (Sm³/d)", format="%.0f"),
+                    "rate_solved_sm3_d": st.column_config.NumberColumn("Solved oil/cond. (Sm³/d)", format="%.0f"),
+                    "gas_solved_msm3_d": st.column_config.NumberColumn("Solved gas (MSm³/d)", format="%.3f"),
                     "liquid_sm3_d": st.column_config.NumberColumn("Liquid rate (Sm³/d)", format="%.0f"),
                     "bhp_bara": st.column_config.NumberColumn("Flowing BHP (bara)", format="%.0f"),
                     "drawdown_bar": st.column_config.NumberColumn("Drawdown (bar)", format="%.0f"),
@@ -3258,9 +3382,14 @@ with tab_prod:
                 e_ = tb_production.eur_sm3(r_)
                 dp_ = tb_production.drive_profile(r_)
                 sug = e_["suggestion"]
+                ph_ = tb_fluids.reservoir_main_phase(r_)
+                u_, div_, what_ = tb_fluids.IN_PLACE_UNIT[ph_]
+                gor_ = float(r_.gor_sm3_sm3 or 0.0)
+                second_ = (e_["eur_sm3"] * gor_ / 1e9 if ph_ == "oil"
+                           else (e_["eur_sm3"] / gor_ / 1e6 if gor_ > 0 else 0.0))
                 rf_rows.append(dict(
-                    reservoir=nm_, fluid=r_.fluid, drive=dp_["drive"],
-                    in_place_msm3=e_["in_place_sm3"] / 1e6,
+                    reservoir=nm_, fluid=r_.fluid, drive=dp_["drive"], what=f"{what_} ({u_})",
+                    in_place_main=e_["in_place_sm3"] / div_,
                     rf=float(getattr(r_, "recovery_factor", 0.0) or 0.0),
                     offtake_pct=float(getattr(r_, "plateau_offtake", 0.0) or 0.0) * 100,
                     end_pct=float(getattr(r_, "plateau_end_frac", 0.0) or 0.0) * 100,
@@ -3268,20 +3397,25 @@ with tab_prod:
                     used=(f"RF {e_['recovery_factor']:.0%} ({e_['rf_source']}), "
                           f"offtake {dp_['offtake']:.0%}/yr, plateau to {dp_['end_frac']:.0%} of EUR"),
                     rf_suggested=f"{sug['low']:.0%}–{sug['high']:.0%}",
-                    eur_msm3=e_["eur_sm3"] / 1e6))
+                    eur_main=e_["eur_sm3"] / div_,
+                    eur_second=(f"{second_:,.2f} GSm³ associated gas" if ph_ == "oil"
+                                else f"{second_:,.2f} MSm³ condensate")))
                 why_.append(f"**{nm_}** — suggested {sug['mid']:.0%} ({sug['low']:.0%}–{sug['high']:.0%}): "
                             f"{sug['because']}.")
             rdf_ = pd.DataFrame(rf_rows)
             red_ = st.data_editor(rdf_, hide_index=True, key=f"rf_edit_{REV}", **STRETCH,
-                                  disabled=["reservoir", "fluid", "rf_used", "used", "rf_suggested", "eur_msm3"],
-                                  column_order=["reservoir", "fluid", "in_place_msm3", "drive", "rf", "offtake_pct",
-                                                "end_pct", "rf_suggested", "eur_msm3", "used"],
+                                  disabled=["reservoir", "fluid", "what", "rf_used", "used", "rf_suggested",
+                                            "eur_main", "eur_second"],
+                                  column_order=["reservoir", "fluid", "what", "in_place_main", "drive", "rf",
+                                                "offtake_pct", "end_pct", "rf_suggested", "eur_main", "eur_second",
+                                                "used"],
                                   column_config={
                 "reservoir": "Reservoir", "fluid": "Fluid",
-                "in_place_msm3": st.column_config.NumberColumn(
-                    "In place (MSm³)", min_value=0.0, format="%.1f",
-                    help="STOIIP for oil, GIIP for gas (1 GSm³ = 1 000 MSm³). Shows the volumetric value when "
-                         "nothing was entered; typing a number here overrides the volumetrics."),
+                "what": st.column_config.TextColumn("Main phase"),
+                "in_place_main": st.column_config.NumberColumn(
+                    "In place", min_value=0.0, format="%.2f",
+                    help="In the unit on the left: STOIIP in MSm³ for oil, GIIP in GSm³ for gas and condensate. "
+                         "Shows the volumetric value when nothing was entered; typing a number overrides it."),
                 "drive": st.column_config.SelectboxColumn("Drainage strategy", options=list(tb_production.DRIVES)),
                 "rf": st.column_config.NumberColumn("Recovery factor", min_value=0.0, max_value=0.95, format="%.2f",
                                                     help="0 = the suggested one for this strategy"),
@@ -3291,7 +3425,8 @@ with tab_prod:
                 "end_pct": st.column_config.NumberColumn("Plateau until (% of EUR)", min_value=0.0, max_value=90.0,
                                                          format="%.0f", help="0 = the strategy default"),
                 "rf_suggested": "Suggested RF",
-                "eur_msm3": st.column_config.NumberColumn("EUR (MSm³)", format="%.1f"),
+                "eur_main": st.column_config.NumberColumn("EUR (same unit)", format="%.2f"),
+                "eur_second": st.column_config.TextColumn("With it"),
                 "used": st.column_config.TextColumn("Used in the profile", width="large")})
             if st.button("Apply recovery and strategy", key=f"rf_apply_{REV}"):
                 try:
@@ -3299,9 +3434,10 @@ with tab_prod:
                     for row_ in red_.to_dict("records"):
                         r_ = res_all[row_["reservoir"]]
                         vol_ = tb_production.volumetric_in_place_sm3(r_)
-                        ip_ = float(row_["in_place_msm3"] or 0.0) * 1e6
+                        ip_ = float(row_["in_place_main"] or 0.0) * tb_fluids.IN_PLACE_UNIT[
+                            tb_fluids.reservoir_main_phase(r_)][1]
                         # a number left at the volumetric value stays volumetric
-                        r_.in_place_sm3 = 0.0 if (vol_ > 0 and abs(ip_ - vol_) < max(0.05e6, vol_ * 1e-3)) else ip_
+                        r_.in_place_sm3 = 0.0 if (vol_ > 0 and abs(ip_ - vol_) <= vol_ * 2e-3) else ip_
                         r_.drive = str(row_["drive"] or "")
                         r_.recovery_factor = float(row_["rf"] or 0.0)
                         r_.plateau_offtake = float(row_["offtake_pct"] or 0.0) / 100
@@ -3352,24 +3488,34 @@ with tab_prod:
             k_[0].metric("Produced in the profile", f"{fp_['total_boe_sm3'] / 1e6:,.1f} MSm³ o.e.",
                          help=f"{fp_['total_boe_sm3'] * tb_economics.BBL_PER_SM3 / 1e6:,.1f} million boe, "
                               f"inside the {int(ps_.max_years)}-year horizon and above the cut-off rate.")
-            k_[1].metric("Peak liquid", f"{max((y['oil_sm3_d'] for y in fp_['years']), default=0.0):,.0f} Sm³/d",
-                         help="Oil or condensate, after any capacity limit")
+            mph_ = fp_.get("main_phase", "oil")
+            if mph_ == "gas":
+                k_[1].metric("Peak gas", f"{max((y['gas_msm3_d'] for y in fp_['years']), default=0.0):,.2f} MSm³/d",
+                             help=f"Gas is the main phase. Condensate peaks at "
+                                  f"{max((y['oil_sm3_d'] for y in fp_['years']), default=0.0):,.0f} Sm³/d. "
+                                  f"After any capacity limit.")
+            else:
+                k_[1].metric("Peak oil", f"{max((y['oil_sm3_d'] for y in fp_['years']), default=0.0):,.0f} Sm³/d",
+                             help="Oil is the main phase; after any capacity limit")
             k_[2].metric("First production", str(fp_["first_year"]))
             k_[3].metric("Field life", f"{fp_['last_year'] - fp_['first_year'] + 1} years")
             k_[4].metric("Manual wells", len(fp_["manual_wells"]))
             if calc_:
+                def _q(ph, v):
+                    return tb_fluids.fmt_rate(ph, v / 1e6 if ph == "gas" else v)
+
+                def _v(ph, v):
+                    u_, d_, _w = tb_fluids.IN_PLACE_UNIT[ph]
+                    return f"{v / d_:,.2f} {u_} {tb_fluids.RATE_NAME[ph]}"
                 st.dataframe(pd.DataFrame([dict(
                     Reservoir=s_["reservoir"], Wells=", ".join(s_["wells"]) or "—",
                     **{"Manual wells": ", ".join(s_["manual_wells"]) or "—"},
-                    **{"EUR in profile (MSm³ liquid)": s_["eur_calc_sm3"] / 1e6,
-                       "Plateau (Sm³/d)": s_["profile"]["plateau_sm3_d"],
-                       "Strategy wants (Sm³/d)": s_["profile"].get("reservoir_rate_sm3_d", 0.0),
+                    **{"EUR in profile": _v(s_.get("phase", "oil"), s_["eur_calc_sm3"]),
+                       "Plateau": _q(s_.get("phase", "oil"), s_["profile"]["plateau_sm3_d"]),
+                       "Strategy wants": _q(s_.get("phase", "oil"), s_["profile"].get("reservoir_rate_sm3_d", 0.0)),
                        "Set by": s_["profile"].get("limited_by", ""),
                        "Plateau years": s_["profile"].get("plateau_years", 0)}) for s_ in calc_]),
-                    hide_index=True, **STRETCH, column_config={
-                        "EUR in profile (MSm³ liquid)": st.column_config.NumberColumn(format="%.2f"),
-                        "Plateau (Sm³/d)": st.column_config.NumberColumn(format="%.0f"),
-                        "Strategy wants (Sm³/d)": st.column_config.NumberColumn(format="%.0f")})
+                    hide_index=True, **STRETCH)
             if fp_["unassigned_reservoirs"]:
                 st.caption("Wells with no reservoir and no manual profile are not in the profile: "
                            + ", ".join(fp_["unassigned_reservoirs"]))
@@ -3395,22 +3541,35 @@ with tab_prod:
                            f"{int(ps_.max_years)} years; the rest sits below the cut-off or beyond the horizon.")
             pdf_ = pd.DataFrame(fp_["years"])
             fig = go.Figure()
-            fig.add_trace(go.Bar(x=pdf_["year"], y=pdf_["oil_sm3_d"], name="Oil / condensate (Sm³/d)",
-                                 marker_color=EQ["navy"]))
-            fig.add_trace(go.Bar(x=pdf_["year"], y=pdf_["water_sm3_d"], name="Water (Sm³/d)",
-                                 marker_color=EQ["slate"], opacity=0.55))
-            fig.add_trace(go.Scatter(x=pdf_["year"], y=pdf_["gas_msm3_d"], name="Gas (MSm³/d)", yaxis="y2",
-                                     mode="lines+markers", line=dict(color=EQ["torch"], width=3)))
-            if S.fa_settings.host_liquid_capacity_sm3_d:
-                fig.add_hline(y=S.fa_settings.host_liquid_capacity_sm3_d, line_dash="dash", line_color=EQ["torch"],
-                              annotation_text="host liquid capacity")
-            fig.update_layout(barmode="stack", yaxis=dict(title="Sm³/d"),
-                              yaxis2=dict(title="MSm³/d", overlaying="y", side="right", showgrid=False))
+            if mph_ == "gas":
+                # a gas field is read in gas: gas bars against the host's gas capacity, condensate on the side
+                fig.add_trace(go.Bar(x=pdf_["year"], y=pdf_["gas_msm3_d"], name="Gas (MSm³/d)",
+                                     marker_color=EQ["torch"]))
+                fig.add_trace(go.Scatter(x=pdf_["year"], y=pdf_["oil_sm3_d"], name="Condensate (Sm³/d)",
+                                         yaxis="y2", mode="lines+markers", line=dict(color=EQ["navy"], width=3)))
+                if S.fa_settings.host_gas_capacity_msm3_d:
+                    fig.add_hline(y=S.fa_settings.host_gas_capacity_msm3_d, line_dash="dash",
+                                  line_color=EQ["slate"], annotation_text="host gas capacity")
+                fig.update_layout(yaxis=dict(title="MSm³/d gas"),
+                                  yaxis2=dict(title="Sm³/d condensate", overlaying="y", side="right",
+                                              showgrid=False))
+            else:
+                fig.add_trace(go.Bar(x=pdf_["year"], y=pdf_["oil_sm3_d"], name="Oil (Sm³/d)",
+                                     marker_color=EQ["navy"]))
+                fig.add_trace(go.Bar(x=pdf_["year"], y=pdf_["water_sm3_d"], name="Water (Sm³/d)",
+                                     marker_color=EQ["slate"], opacity=0.55))
+                fig.add_trace(go.Scatter(x=pdf_["year"], y=pdf_["gas_msm3_d"], name="Gas (MSm³/d)", yaxis="y2",
+                                         mode="lines+markers", line=dict(color=EQ["torch"], width=3)))
+                if S.fa_settings.host_liquid_capacity_sm3_d:
+                    fig.add_hline(y=S.fa_settings.host_liquid_capacity_sm3_d, line_dash="dash",
+                                  line_color=EQ["torch"], annotation_text="host liquid capacity")
+                fig.update_layout(barmode="stack", yaxis=dict(title="Sm³/d"),
+                                  yaxis2=dict(title="MSm³/d", overlaying="y", side="right", showgrid=False))
             st.plotly_chart(eq_layout(fig, 340, title="Field production profile"), **STRETCH)
             with st.expander("Profile year by year"):
                 st.dataframe(pdf_, hide_index=True, **STRETCH, column_config={
                     "year": "Year",
-                    "oil_sm3_d": st.column_config.NumberColumn("Oil (Sm³/d)", format="%.0f"),
+                    "oil_sm3_d": st.column_config.NumberColumn("Oil / condensate (Sm³/d)", format="%.0f"),
                     "gas_msm3_d": st.column_config.NumberColumn("Gas (MSm³/d)", format="%.2f"),
                     "water_sm3_d": st.column_config.NumberColumn("Water (Sm³/d)", format="%.0f"),
                     "oil_sm3": st.column_config.NumberColumn("Oil (Sm³/yr)", format="%.0f"),
@@ -3429,7 +3588,9 @@ with tab_prod:
                          expanded=bool(fp_["manual_wells"])):
             st.caption("Give a well its own profile — from a simulation run or a partner forecast — in place of "
                        "its share of the calculated one. Rates are calendar-day averages for the year (uptime "
-                       "already in them). Leave gas or water blank to follow the fluid's GOR and water cut. "
+                       "already in them). For a gas or condensate well, enter the gas and leave the condensate "
+                       "blank: it follows from the CGR. Blank gas or water on an oil well follow its GOR and "
+                       "water cut. "
                        "Years below 1900 count from first production (1 = first year) and move with it.")
             if not prod_ids_:
                 st.info("No producing wells in the layout.")
@@ -3482,24 +3643,29 @@ with tab_prod:
         prod_wells = [w_ for w_ in LAY.nodes if LAY.kind(w_) == "well"
                       and not tb_fluids.is_injector(LAY, w_)]
         w_in_ = tb_fa.well_inputs(LAY)
-        mean_rate = (sum(w_in_[w_].oil_sm3_d for w_ in prod_wells if w_ in w_in_) / len(prod_wells)
-                     if prod_wells else 1000.0)
+        mph_w = fp_.get("main_phase") or tb_fluids.layout_main_phase(LAY, w_in_)
+        k_u = 1e6 if mph_w == "gas" else 1.0                       # engine Sm³/d → shown unit
+        unit_w = tb_fluids.RATE_UNIT[mph_w] + (" gas" if mph_w == "gas" else " oil")
+        mean_rate = (sum(tb_fluids.main_rate(w_in_[w_], mph_w) for w_ in prod_wells if w_ in w_in_)
+                     / len(prod_wells) if prod_wells else (1.5 if mph_w == "gas" else 1000.0))
         strat_q_ = sum(s_["profile"].get("reservoir_rate_sm3_d", 0.0) for s_ in fp_["streams"]
-                       if s_["kind"] == "calculated")
-        tgt = wn_[0].number_input("Plateau wanted (Sm³/d)", 0.0, 200000.0,
-                                  float(round(strat_q_) or sum(w_in_[w_].oil_sm3_d for w_ in prod_wells
-                                                               if w_ in w_in_) or 4000.0),
-                                  100.0, key=f"wn_t_{REV}",
+                       if s_["kind"] == "calculated" and s_.get("phase", "oil") == mph_w) / k_u
+        design_q_ = sum(tb_fluids.main_rate(w_in_[w_], mph_w) for w_ in prod_wells if w_ in w_in_)
+        tgt = wn_[0].number_input(f"Plateau wanted ({unit_w})", 0.0, 200000.0,
+                                  float(round(strat_q_ or design_q_ or (6.0 if mph_w == "gas" else 4000.0),
+                                              2 if mph_w == "gas" else 0)),
+                                  0.1 if mph_w == "gas" else 100.0, key=f"wn_t_{REV}_{mph_w}",
                                   help="Defaults to the plateau the drainage strategies ask for")
-        per_w = wn_[1].number_input("Rate per well (Sm³/d)", 1.0, 20000.0, float(max(mean_rate, 1.0)), 50.0,
-                                    key=f"wn_r_{REV}")
+        per_w = wn_[1].number_input(f"Rate per well ({unit_w})", 0.001 if mph_w == "gas" else 1.0,
+                                    20000.0, float(max(mean_rate, 0.001 if mph_w == "gas" else 1.0)),
+                                    0.1 if mph_w == "gas" else 50.0, key=f"wn_r_{REV}_{mph_w}")
         area_t = sum(float(getattr(r_, "area_km2", 0.0) or 0.0) for r_ in res_all.values())
         area_in = wn_[2].number_input("Area to drain (km²)", 0.0, 500.0, float(area_t), 0.5, key=f"wn_a_{REV}")
         drain = wn_[3].number_input("One well drains (km²)", 0.1, 50.0, 3.0, 0.5, key=f"wn_d_{REV}",
                                     help="2–4 km² is typical for good NCS sandstone; less in tight rock, "
                                          "more for a long horizontal well")
         need = tb_production.wells_needed(float(tgt), float(per_w), float(area_in), float(drain),
-                                          uptime=float(p_up))
+                                          uptime=float(p_up), unit=unit_w)
         st.markdown(f'<div class="tb-note"><b>{need["wells"]} producer(s)</b> — {need["binding"]} is binding. '
                     f'{need["note"]}. The layout has {len(prod_wells)}.</div>', unsafe_allow_html=True)
 
@@ -3633,10 +3799,17 @@ with tab_opt:
                                    if hasattr(S.fa_settings, "boost_dp_bar") else None)
         w_in_o = tb_fa.well_inputs(LAY)
         prods_o = [w_ for w_ in LAY.nodes if LAY.kind(w_) == "well" and not tb_fluids.is_injector(LAY, w_)]
-        mean_o = (sum(w_in_o[w_].oil_sm3_d for w_ in prods_o if w_ in w_in_o) / len(prods_o)) if prods_o else 1000.0
-        rate_o = o2[2].number_input("Rate per well (Sm³/d)", 1.0, 20000.0, float(max(mean_o, 1.0)), 50.0,
-                                    key=f"o_rate_{REV}", help="Every variant gives each well this rate, so "
-                                                              "the comparison is about the layout")
+        mph_o = tb_fluids.layout_main_phase(LAY, w_in_o)
+        mean_o = (sum(tb_fluids.main_rate(w_in_o[w_], mph_o) for w_ in prods_o if w_ in w_in_o) / len(prods_o)
+                  if prods_o else (1.5 if mph_o == "gas" else 1000.0))
+        rate_o = o2[2].number_input(f"Rate per well ({tb_fluids.RATE_UNIT[mph_o]} {tb_fluids.RATE_NAME[mph_o]})",
+                                    0.001 if mph_o == "gas" else 1.0, 20000.0,
+                                    float(max(mean_o, 0.001 if mph_o == "gas" else 1.0)),
+                                    0.1 if mph_o == "gas" else 50.0,
+                                    key=f"o_rate_{REV}_{mph_o}", help="Every variant gives each well this rate, so "
+                                                                       "the comparison is about the layout. In the "
+                                                                       "field's main phase; condensate or associated "
+                                                                       "gas follows from each well's GOR.")
         d_step = o2[3].number_input("Line step (in)", 1.0, 8.0, 2.0, 1.0, key=f"o_dstep_{REV}")
         spec_ = tb_optimise.SearchSpec(
             well_counts=list(range(int(w_lo), int(w_hi) + 1)),
@@ -3657,7 +3830,7 @@ with tab_opt:
                 rows_o = tb_optimise.search(
                     LAY, spec_, S.cost_settings, S.sched_settings, S.fa_settings,
                     S.get("profile_settings"), S.get("econ_settings"), float(rate_o),
-                    progress=lambda f_, msg: bar.progress(min(f_, 1.0), msg))
+                    progress=lambda f_, msg: bar.progress(min(f_, 1.0), msg), rate_phase=mph_o)
             bar.empty()
             S.opt_rows = rows_o
             S.opt_sig = md5(LAY.to_dict(), vars(S.cost_settings), float(rate_o), n_var)
@@ -3683,7 +3856,8 @@ with tab_opt:
                                    "Break-even (USD/bbl)": r_.get("breakeven_usd_bbl"),
                                    "CAPEX (USD/boe)": r_.get("capex_usd_boe"),
                                    "Recoverable (MSm³ o.e.)": r_.get("recoverable_msm3_oe"),
-                                   "Plateau (Sm³/d)": r_.get("plateau_sm3_d"),
+                                   f"Plateau ({tb_fluids.RATE_UNIT[mph_o]} {tb_fluids.RATE_NAME[mph_o]})":
+                                       r_.get("plateau_sm3_d"),
                                    "Design rate carried": r_.get("rate_share"),
                                    "Hydrate margin (°C)": r_.get("hydrate_margin_c"),
                                    "First production": r_.get("first_production"),
@@ -3691,7 +3865,9 @@ with tab_opt:
             st.dataframe(odf_, hide_index=True, **STRETCH, column_config={
                 c_: st.column_config.NumberColumn(format="%.1f") for c_ in
                 ("CAPEX (MUSD)", "NPV (MUSD)", "Break-even (USD/bbl)", "CAPEX (USD/boe)",
-                 "Recoverable (MSm³ o.e.)", "Plateau (Sm³/d)", "Hydrate margin (°C)")})
+                 "Recoverable (MSm³ o.e.)", "Hydrate margin (°C)")}
+                | {f"Plateau ({tb_fluids.RATE_UNIT[mph_o]} {tb_fluids.RATE_NAME[mph_o]})":
+                   st.column_config.NumberColumn(format="%.2f" if mph_o == "gas" else "%.0f")})
             st.caption("Every variant is valued on the rate it can actually carry: a line too small for "
                        "the design rate produces less, and its NPV says so. *Works* means it carries the "
                        "full design rate with no design error.")

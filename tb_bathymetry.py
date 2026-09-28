@@ -177,8 +177,12 @@ def free_spans(depths: List[float], dx_m: float, gap_m: float = 0.5,
     return spans
 
 
-def fill_node_depths(layout, session, only_blank: bool = True, timeout: float = 20.0) -> Dict[str, Optional[float]]:
+def fill_node_depths(layout, session, only_blank: bool = True, timeout: float = 20.0,
+                     keep_manual: bool = False) -> Dict[str, Optional[float]]:
     """Set water_depth_m on subsea nodes from the DTM. Hosts are left alone.
+
+    `only_blank` touches only nodes with no depth; `keep_manual` overwrites everything except
+    depths the user typed (attrs["depth_source"] == "manual").
 
     Returns {node_id: depth or None}; nodes that returned no data keep their old value.
     """
@@ -189,12 +193,15 @@ def fill_node_depths(layout, session, only_blank: bool = True, timeout: float = 
             continue
         if only_blank and n.water_depth_m > 0:
             continue
+        if keep_manual and n.water_depth_m > 0 and n.attrs.get("depth_source") == "manual":
+            continue
         lat, lon = tb_map.to_display(layout, n.lat, n.lon)     # EMODnet is WGS84
         targets.append((n.node_id, lat, lon))
     got = depths_at(targets, session, timeout)
     for nid, d in got.items():
         if d is not None:
             layout.nodes[nid].water_depth_m = round(d, 1)
+            layout.nodes[nid].attrs["depth_source"] = "emodnet"
     return got
 
 

@@ -121,6 +121,7 @@ def a_gas_reservoir_is_drained_as_gas():
     r = tf.new_reservoir("Brent", "gas condensate")     # the reservoir the demo wells are on
     r.area_km2, r.thickness_m, r.recovery_factor = 12.0, 30.0, 0.70
     tf.set_reservoir(lay, r)
+    tf.apply_reservoir_to_wells(lay)                    # gas wells on a gas reservoir
     fp = pr.field_profile(lay)
     st = fp["streams"][0]
     assert abs(fp["total_gas_sm3"] / st["eur_sm3"] - 1.0) < 0.02, \

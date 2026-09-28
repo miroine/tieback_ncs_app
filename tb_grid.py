@@ -714,7 +714,7 @@ def legend(vmin: float, vmax: float, ramp: str = "depth", steps: int = 6) -> Lis
 # ───────────────────────── grid as a depth source ──────────────────────────
 
 def fill_node_depths(layout, grid: Grid, only_blank: bool = True,
-                     convention: Optional[str] = None) -> Dict[str, Optional[float]]:
+                     convention: Optional[str] = None, keep_manual: bool = False) -> Dict[str, Optional[float]]:
     """Set water_depth_m on subsea nodes from the grid. Hosts are left alone.
 
     Mirrors tb_bathymetry.fill_node_depths so a loaded survey grid can stand in
@@ -728,11 +728,14 @@ def fill_node_depths(layout, grid: Grid, only_blank: bool = True,
             continue
         if only_blank and n.water_depth_m > 0:
             continue
+        if keep_manual and n.water_depth_m > 0 and n.attrs.get("depth_source") == "manual":
+            continue
         lat, lon = tb_map.to_display(layout, n.lat, n.lon)     # grids are georeferenced in WGS84 terms
         d = grid.depth_at(lat, lon, conv)
         out[n.node_id] = d
         if d is not None:
             n.water_depth_m = round(d, 1)
+            n.attrs["depth_source"] = "grid"
     return out
 
 

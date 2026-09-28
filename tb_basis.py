@@ -78,14 +78,34 @@ def design_basis(layout, cost_settings: Optional[tb_cost.CostSettings] = None,
         rows.append(_row("Reservoir and well stream", "Wells", "none", "missing",
                          "Add wells before the flow assurance results mean anything"))
     else:
+        import tb_fluids
+        main = tb_fluids.layout_main_phase(layout, win)
         total_oil = sum(w.oil_sm3_d for w in win.values())
-        rows.append(_row("Reservoir and well stream", "Design oil/condensate rate",
-                         f"{total_oil:,.0f} Sm³/d over {len(wells)} wells",
-                         "ok" if total_oil > 0 else "missing"))
-        gor = [w.gor_sm3_sm3 for w in win.values()]
-        rows.append(_row("Reservoir and well stream", "GOR",
-                         f"{min(gor):,.0f}–{max(gor):,.0f} Sm³/Sm³" if gor else "—",
-                         "default" if all(abs(g - 250.0) < 1e-9 for g in gor) else "ok"))
+        total_gas = sum(w.oil_sm3_d * w.gor_sm3_sm3 for w in win.values()) / 1e6
+        # everything is stated in the field's main phase: a gas-condensate field is designed for its
+        # gas rate, with the condensate that comes with it — not for a condensate rate
+        if main == "gas":
+            rows.append(_row("Reservoir and well stream", "Design gas rate",
+                             f"{total_gas:,.2f} MSm³/d over {len(wells)} wells "
+                             f"(condensate {total_oil:,.0f} Sm³/d)",
+                             "ok" if total_gas > 0 else "missing"))
+            gor = [w.gor_sm3_sm3 for w in win.values()]
+            cgr = [1e6 / g for g in gor if g > 0]
+            rows.append(_row("Reservoir and well stream", "Condensate-gas ratio (CGR)",
+                             f"{min(cgr):,.0f}–{max(cgr):,.0f} Sm³/MSm³ (GOR {min(gor):,.0f}–{max(gor):,.0f})"
+                             if cgr else "—",
+                             "default" if all(abs(g - 250.0) < 1e-9 for g in gor) else "ok",
+                             "GOR 250 is the oil-well default: set the gas wells' CGR" if
+                             all(abs(g - 250.0) < 1e-9 for g in gor) else ""))
+        else:
+            rows.append(_row("Reservoir and well stream", "Design oil rate",
+                             f"{total_oil:,.0f} Sm³/d over {len(wells)} wells "
+                             f"(associated gas {total_gas:,.2f} MSm³/d)",
+                             "ok" if total_oil > 0 else "missing"))
+            gor = [w.gor_sm3_sm3 for w in win.values()]
+            rows.append(_row("Reservoir and well stream", "GOR",
+                             f"{min(gor):,.0f}–{max(gor):,.0f} Sm³/Sm³" if gor else "—",
+                             "default" if all(abs(g - 250.0) < 1e-9 for g in gor) else "ok"))
         wc = [w.water_cut for w in win.values()]
         rows.append(_row("Reservoir and well stream", "Water cut",
                          f"{min(wc) * 100:.0f}–{max(wc) * 100:.0f} %" if wc else "—",
@@ -93,7 +113,7 @@ def design_basis(layout, cost_settings: Optional[tb_cost.CostSettings] = None,
                          "Late-life water cut drives hydrate and slugging risk"))
         api = [w.api for w in win.values()]
         dens = [141.5 / (a + 131.5) * 1000 for a in api]
-        rows.append(_row("Reservoir and well stream", "Oil density",
+        rows.append(_row("Reservoir and well stream", "Condensate density" if main == "gas" else "Oil density",
                          f"{min(dens):.0f}–{max(dens):.0f} kg/Sm³ ({min(api):.0f}–{max(api):.0f} °API)",
                          "default" if all(abs(a - 40.0) < 1e-9 for a in api) else "ok"))
         sg = [w.gas_sg for w in win.values()]

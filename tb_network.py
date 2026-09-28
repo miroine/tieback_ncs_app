@@ -167,6 +167,7 @@ class Layout:
             n.lat, n.lon = moved(n.lat, n.lon)
         for e in self.edges.values():
             e.route = [moved(la, lo) for la, lo in e.route]
+        self.forget_site_data()
 
     def host_side(self, host_id: str, radius_m: float = 1500.0) -> List[str]:
         """The host and the items sitting at it (riser base, host-end PLET…): they move with the host."""
@@ -223,6 +224,7 @@ class Layout:
         h0 = (self.nodes[hid].lat, self.nodes[hid].lon)
         move_s = mover(anchor_s, field_lat, field_lon) if anchor_s else None
         move_h = mover(h0, host_lat, host_lon)
+        self.forget_site_data()
         for n in subsea:
             nd = self.nodes[n]
             nd.lat, nd.lon = move_s(nd.lat, nd.lon)
@@ -248,7 +250,22 @@ class Layout:
             for n in near_host:
                 if n != hid and self.kind(n) != "host":
                     self.nodes[n].water_depth_m = float(host_depth_m)
+                    self.nodes[n].attrs["depth_source"] = "host"
         return {"host": hid, "moved": len(self.nodes), "stretched": stretched}
+
+    def forget_site_data(self):
+        """Drop what belonged to the old location: subsea water depths and stored seabed profiles.
+
+        A template or a moved layout carries the depths of wherever it was drawn; kept, they
+        looked like real data and "fill only empty depths" skipped them. A 0 depth is what the
+        checks and the depth fill treat as unknown. Hosts keep theirs (surface facilities).
+        """
+        for nid, n in self.nodes.items():
+            if self.kind(nid) != "host":
+                n.water_depth_m = 0.0
+                n.attrs.pop("depth_source", None)
+        for e in self.edges.values():
+            e.attrs.pop("seabed_profile", None)
 
     # ── template slots, tags, multi-element moves ──
     SLOT_ITEM = "slot_tiein"

@@ -269,10 +269,20 @@ def build_report(project_name: str, layout, cost_settings, sched_settings, fa_se
                 + (f", {s.inhibitor} at {s.inhibitor_wt_pct:.0f} wt % in the water phase" if s.inhibitor != "None" else "")
                 + (", Joule-Thomson cooling included" if s.include_jt else ", no Joule-Thomson cooling") + ".")
             if res.wells:
-                _table(doc, ["Well", "Oil (Sm³/d)", "WHP required (bara)", "Available (bara)", "Margin (bar)"],
-                       [[w["label"], _fmt(w["oil_sm3_d"], 0), _fmt(w["required_whp_bara"]),
-                         _fmt(w["available_whp_bara"]), _fmt(w["margin_bar"])] for w in res.wells],
-                       [1.2, 1.2, 1.5, 1.3, 1.0])
+                import tb_fluids
+                main_ = tb_fluids.layout_main_phase(layout)
+                if main_ == "gas":        # a gas field is reported in gas, condensate beside it
+                    _table(doc, ["Well", "Gas (MSm³/d)", "Condensate (Sm³/d)", "WHP required (bara)",
+                                 "Available (bara)", "Margin (bar)"],
+                           [[w["label"], _fmt(w.get("gas_msm3_d", float("nan")), 2), _fmt(w["oil_sm3_d"], 0),
+                             _fmt(w["required_whp_bara"]), _fmt(w["available_whp_bara"]), _fmt(w["margin_bar"])]
+                            for w in res.wells],
+                           [1.1, 1.0, 1.1, 1.3, 1.1, 0.9])
+                else:
+                    _table(doc, ["Well", "Oil (Sm³/d)", "WHP required (bara)", "Available (bara)", "Margin (bar)"],
+                           [[w["label"], _fmt(w["oil_sm3_d"], 0), _fmt(w["required_whp_bara"]),
+                             _fmt(w["available_whp_bara"]), _fmt(w["margin_bar"])] for w in res.wells],
+                           [1.2, 1.2, 1.5, 1.3, 1.0])
             rows = [[r.edge_id, f"{r.upstream}→{r.downstream}", _fmt(r.length_m, 0), f'{r.d_in:g}"',
                      _fmt(r.p_in_bara), _fmt(r.t_out_c), _fmt(r.min_hydrate_margin_c),
                      "—" if r.heated or math.isinf(r.cooldown_h) else _fmt(r.cooldown_h)]

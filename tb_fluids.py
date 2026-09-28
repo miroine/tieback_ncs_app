@@ -432,3 +432,73 @@ def field_type(layout) -> str:
     if (gas or cond) and not oil:
         return "gas-condensate development" if cond else "gas development"
     return "mixed oil and gas development"
+
+
+# ───────────────────────────── the main phase ─────────────────────────────
+# An oil field is specified, profiled, valued and reported in oil; a gas or gas-condensate
+# field in gas. The network model stays keyed on the liquid rate (WellFA.oil_sm3_d) — these
+# helpers convert at the edges so nobody has to think in condensate for a gas field.
+
+RATE_UNIT = {"oil": "Sm³/d", "gas": "MSm³/d"}
+RATE_NAME = {"oil": "oil", "gas": "gas"}
+SECONDARY_NAME = {"oil": "associated gas", "gas": "condensate"}
+IN_PLACE_UNIT = {"oil": ("MSm³", 1e6, "STOIIP"), "gas": ("GSm³", 1e9, "GIIP")}
+
+
+def reservoir_main_phase(res) -> str:
+    """'oil' or 'gas' for a reservoir."""
+    return "oil" if RESERVOIR_TO_WELL.get(getattr(res, "fluid", "black oil"), "oil") == "oil" else "gas"
+
+
+def well_main_phase(layout, well_id: str, wfa=None) -> str:
+    """'oil' or 'gas' for a producer: its stated or inherited fluid, else what its GOR says."""
+    fl, src = well_fluid(layout, well_id)
+    if is_assigned(src) and family(fl) in ("oil", "gas"):
+        return family(fl)
+    gor = getattr(wfa, "gor_sm3_sm3", None)
+    if gor is None:
+        return "oil"
+    return "oil" if RESERVOIR_TO_WELL[classify(gor)] == "oil" else "gas"
+
+
+def main_rate(wfa, phase: str) -> float:
+    """A well's design rate in its main phase: oil Sm³/d, or gas MSm³/d."""
+    if phase == "gas":
+        return wfa.oil_sm3_d * wfa.gor_sm3_sm3 / 1e6
+    return wfa.oil_sm3_d
+
+
+def liquid_from_main(phase: str, value: float, gor_sm3_sm3: float) -> float:
+    """The liquid (oil / condensate) rate the network model is keyed on, from a main-phase rate."""
+    if phase == "gas":
+        if gor_sm3_sm3 <= 0:
+            raise ValueError("a gas rate needs a GOR above 0 to give the condensate that comes with it")
+        return value * 1e6 / gor_sm3_sm3
+    return value
+
+
+def layout_main_phase(layout, wells=None) -> str:
+    """The field's main phase: whichever of oil-led and gas-led producers carries more oil equivalent.
+
+    Oil equivalent is oil + gas/1000 (NCS). Without producers, the reservoirs decide by
+    count; with neither, it is an oil field.
+    """
+    import tb_flowassurance as tb_fa
+    w_in = wells if wells is not None else tb_fa.well_inputs(layout)
+    boe = {"oil": 0.0, "gas": 0.0}
+    for wid, v in w_in.items():
+        if wid not in layout.nodes:
+            continue
+        ph = well_main_phase(layout, wid, v)
+        boe[ph] += v.oil_sm3_d + v.oil_sm3_d * v.gor_sm3_sm3 / 1000.0
+    if boe["oil"] or boe["gas"]:
+        return "gas" if boe["gas"] > boe["oil"] else "oil"
+    res = reservoirs(layout)
+    if res:
+        n_gas = sum(1 for r in res.values() if reservoir_main_phase(r) == "gas")
+        return "gas" if n_gas > len(res) - n_gas else "oil"
+    return "oil"
+
+
+def fmt_rate(phase: str, value: float) -> str:
+    return f"{value:,.2f} MSm³/d gas" if phase == "gas" else f"{value:,.0f} Sm³/d oil"

@@ -27,7 +27,7 @@ S.check("loaded cost library clears that item",
 S.check("pressures in bara", lambda: "bara" in by("Host arrival pressure")["value"]
         and "bara" in by("Shut-in tubing pressure")["value"])
 S.check("shut-in pressure converted from psi", lambda: "310" in by("Shut-in tubing pressure")["value"])
-S.check("rates in Sm³/d", lambda: "Sm³/d" in by("Design oil/condensate rate")["value"])
+S.check("rates in Sm³/d, in the main phase (oil for the demo)", lambda: "Sm³/d" in by("Design oil rate")["value"])
 S.check("line sizes in mm", lambda: "mm" in by("Line sizes")["value"] and "254" in by("Line sizes")["value"])
 S.check("roughness in mm", lambda: "mm" in by("Pipe roughness")["value"])
 S.check("oil density in kg/Sm³", lambda: "kg/Sm³" in by("Oil density")["value"])

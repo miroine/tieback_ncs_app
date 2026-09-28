@@ -286,6 +286,11 @@ parts — select `blocks.shp` together with its `.dbf` and `.prj` and they are m
 layer. A shapefile carries no coordinate system of its own, so without a `.prj` you must choose the
 source CRS (WGS84/ED50, geographic or UTM); nothing is guessed.
 
+**Colours of an imported layer** — pick the layer under *Imported layers* and open *Colours of …*:
+one fill colour for the whole layer, or a colour per value of an attribute (licence, operator, field
+name …) with each colour editable as `#RRGGBB`; outline colour, fill opacity and line width as well.
+*Reset to imported* brings back the file's own look. Lines take the fill colour as their line colour.
+
 Grid surfaces load from the same uploader. `.grd` says nothing about what is inside it, so the file is
 recognised by content, not extension: **Surfer** ASCII (`DSAA`), Surfer 6 (`DSBB`) and Surfer 7
 (`DSRB`), **IRAP classic ASCII** (`-996`), **ZMAP+** and **ESRI ASCII** (`ncols`/`nrows`). A grid is
@@ -303,6 +308,18 @@ profile that would quietly bias the checks, and the panel reports how much of th
 Two things the reader will not do: rotated grids are refused rather than drawn in the wrong place, and
 IRAP classic ASCII does not record which axis cycles fastest — if a surface comes out with its axes
 swapped, tick *Swap grid axes*.
+
+## Water depths
+
+A template carries the depths of the site it was drawn for. When you place it at a picked point (or
+move the whole layout), those depths and any stored seabed profiles are cleared, and the new site is
+sampled from EMODnet straight away. Elements at the host take the host's depth. If EMODnet cannot be
+reached, the depths stay blank and the design basis flags them.
+
+*Fill water depths from EMODnet* (and *Set element depths* from a survey grid) has three modes:
+**All except the ones I typed** (default), **Only empty ones** and **All**. A depth you type in the
+element editor or the bulk table is marked as yours, and the default mode keeps it. The bulk table
+shows where each depth came from (manual, emodnet, grid, host).
 
 ## Tie-in screening
 Load the Sodir facility layers, select a template or manifold, and screen it: every candidate host within
@@ -326,6 +343,39 @@ copied items at zero here, since they are costed in their own concept.
 
 If an NCS layer comes back empty the app now says so: a layout near the median line often has no
 Norwegian facility inside the default 40 km radius.
+
+## Hosting internally on Radix (Docker)
+
+The repository has what Radix needs at its root: `Dockerfile`, `.dockerignore` and `radixconfig.yaml`.
+
+* **Image** — `python:3.11-slim`, requirements installed first (cached), app copied in, runs as the
+  non-root user `1001` (Radix will not start a root container), Streamlit on port **8501**, headless,
+  usage statistics off. Tests, docs and tools stay out of the image; the demo fixture stays in.
+* **Health** — Radix probes `/_stcore/health`, Streamlit's own health endpoint.
+* **Shared designs** — saved to `TIEBACK_SHARE_DIR` (`/app/data/shared_designs` in the image). That
+  folder is wiped on every redeploy unless you mount an Azure blob container there (commented
+  `volumeMounts` block in `radixconfig.yaml`). Do not set `github_gist_token` internally: it would
+  put design data on public GitHub.
+* **One replica** — Streamlit keeps each session in the pod's memory; more replicas need sticky
+  sessions, which the app does not need at this scale.
+* **Sign-in** — uncomment the `authentication.oauth2` block with an Entra ID app's client ID, add the
+  redirect URI `https://<your web URL>/oauth2/callback` in Entra ID, and set the client secret in the
+  Radix console. Everyone then signs in with their Equinor account before seeing the app.
+* **Outbound access** — the server calls `factmaps.sodir.no` (NCS layers) and
+  `rest.emodnet-bathymetry.eu` / `ows.emodnet-bathymetry.eu` (seabed). Map tiles
+  (`services.arcgisonline.com`) are fetched by the user's browser. If your Radix environment restricts
+  egress, allow those hosts.
+
+Test the image locally before pushing:
+
+```bash
+docker build -t tieback-studio .
+docker run --rm -p 8501:8501 tieback-studio      # then open http://localhost:8501
+```
+
+Register the app in the Radix console (name `tieback-studio`, the same as `metadata.name`), point it
+at the repository, add the deploy key and webhook Radix shows you to the GitHub repo, then push to
+`main`: Radix builds the image and deploys to `dev`. Promote to `prod` from the console.
 
 ## Deploying — upload the whole folder
 `tieback_app.py` calls into the `tb_*.py` modules, so a partial upload leaves a current app calling a
@@ -450,6 +500,24 @@ the rate: the flow-assurance findings say so, the size sweep marks that size *to
 and its pressures are reported as a floor rather than a result. Correlations (Beggs & Brill, Brill &
 Beggs Z) are clamped to the range they were fitted over, so an extreme case gives a boundary value
 instead of an arithmetic failure.
+
+## Main phase: oil fields in oil, gas fields in gas
+
+Every field has a **main phase**: oil for black and volatile oil, gas for gas condensate, wet and dry
+gas. It is worked out from the producers (by oil equivalent) or, without wells, from the reservoirs.
+Everything a person reads or types uses it:
+
+| | Oil field | Gas / condensate field |
+|---|---|---|
+| In place | STOIIP, MSm³ | GIIP, GSm³ |
+| Well rate (entered) | oil Sm³/d | gas MSm³/d, condensate from the GOR/CGR |
+| Profile, plateau, cut-off | oil | gas (cut-off in MSm³/d) |
+| How many wells, optimiser rate | oil Sm³/d | gas MSm³/d |
+| Design basis | design oil rate, GOR | design gas rate, CGR, condensate density |
+| Viability, report | oil first | gas first; host gas capacity first |
+
+The network model is still keyed on the liquid rate internally; the conversion happens at the edges,
+so nobody has to think in condensate for a gas field.
 
 ## Production, economics and the optimiser
 **Production & economics** turns a layout into a profile and a value.
