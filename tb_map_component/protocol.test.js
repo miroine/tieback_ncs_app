@@ -168,6 +168,27 @@ check("Sodir overlay style uses per-feature colour and pattern", () => {
   return st(L._geo[L._geo.length - 1].fc.features[0]).fillColor === "#0BBE00"
     && st(L._geo[L._geo.length - 1].fc.features[1]).className === "hatch-oil_gas";
 });
+check("a user style overrides layer colours: one fill, outline, opacity and width", () => {
+  L._geo = [];
+  render({ payload, palette, rules, selected: null, height: 500, rev: "r4s", fit_token: 0,
+    overlays: [{ type: "FeatureCollection", geometry: "polygon", title: "Licences", color: "#888",
+      fill_mode: "single", fill_color: "#EB0037", outline_color: "#000000", fill_opacity: 0.2, weight: 3,
+      features: [{ type: "Feature", geometry: { type: "Polygon", coordinates: [[[2, 60], [2, 61], [3, 61], [2, 60]]] },
+        properties: { _fill: "#0BBE00" } }] }] });
+  const g = L._geo[L._geo.length - 1];
+  const st = g.o.style(g.fc.features[0]);
+  return st.fillColor === "#EB0037" && st.color === "#000000" && st.fillOpacity === 0.2 && st.weight === 3;
+});
+check("colour by attribute uses the per-feature fill the Python side wrote", () => {
+  L._geo = [];
+  render({ payload, palette, rules, selected: null, height: 500, rev: "r4b", fit_token: 0,
+    overlays: [{ type: "FeatureCollection", title: "Licences", color: "#888", fill_mode: "by", fill_opacity: 0,
+      features: [{ type: "Feature", geometry: { type: "Polygon", coordinates: [[[2, 60], [2, 61], [3, 61], [2, 60]]] },
+        properties: { _fill: "#007079" } }] }] });
+  const g = L._geo[L._geo.length - 1];
+  const st = g.o.style(g.fc.features[0]);
+  return st.fillColor === "#007079" && st.fillOpacity === 0;
+});
 check("map allows zooming past the Ocean basemap's native levels", () =>
   mapObj.opts.maxZoom === 19 && L._tiles.some((o) => o.maxNativeZoom === 13 && o.maxZoom === 19)
   && L._tiles.every((o) => !o.maxZoom || o.maxZoom >= 19));

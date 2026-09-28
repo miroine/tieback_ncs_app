@@ -140,11 +140,16 @@ S.check("all NCS discoveries load with Sodir HC-type colours", all_discoveries)
 def bathy_depths():
     run(press={"Load demo"})
     assert ss.layout.nodes["W1"].water_depth_m == 0.0
+    H.inputs = {"Water depths to fill": "Only empty ones"}
     run(press={"Fill water depths from EMODnet"})
+    H.inputs = {}
     assert ss.layout.nodes["W1"].water_depth_m == 137.0          # blank → sampled
-    assert ss.layout.nodes["TMPL_A"].water_depth_m == 150.0      # kept (only blank nodes)
+    assert ss.layout.nodes["TMPL_A"].water_depth_m == 150.0      # kept (only empty ones)
     assert ss.layout.nodes["HOST_A"].water_depth_m == 140.0      # host never sampled
-S.check("EMODnet depth fill populates blank subsea nodes only", bathy_depths)
+    run(press={"Fill water depths from EMODnet"})                # default: all but typed depths
+    assert ss.layout.nodes["TMPL_A"].water_depth_m == 137.0, "a depth nobody typed is replaced"
+    return ss.layout.nodes["HOST_A"].water_depth_m == 140.0
+S.check("EMODnet depth fill: 'only empty' keeps existing depths, the default replaces untyped ones", bathy_depths)
 def utility_line():
     import tb_network as tn
     lay = ss.layout
@@ -509,6 +514,41 @@ def template_at_picked_point():
     anchor = ss.layout.anchor(prefer=("template", "manifold", "well"))
     assert abs(anchor[0] - 65.4) < 1e-6 and abs(anchor[1] - 7.25) < 1e-6, anchor
 S.check("template lands on the point picked on the map", template_at_picked_point)
+def template_takes_the_seabed_at_the_point():
+    """The report: a template came in at 150 m and 'Fill water depths' would not overwrite it."""
+    run(press={"Load demo"})
+    run(event=ev(1, "pick", {"lat": 65.4, "lon": 7.25}, nonce="TPLDEPTH"))
+    run(press={"Load template"})
+    assert not errs(), errs()
+    sub = [k for k in ss.layout.nodes if ss.layout.kind(k) != "host"]
+    deps = {ss.layout.nodes[k].water_depth_m for k in sub}
+    assert deps == {137.0}, ("the stub seabed is 137 m everywhere", deps)
+    assert any("water depth from EMODnet" in str(m) for k, m in H.log), "the load note should say so"
+    # a depth you type is yours; the fill keeps it, and replaces the rest
+    k0, k1 = sub[0], sub[1]
+    ss.layout.nodes[k0].water_depth_m, ss.layout.nodes[k0].attrs["depth_source"] = 200.0, "manual"
+    ss.layout.nodes[k1].water_depth_m = 150.0
+    run(press={"Fill water depths from EMODnet"})
+    assert ss.layout.nodes[k0].water_depth_m == 200.0 and ss.layout.nodes[k1].water_depth_m == 137.0
+    return not errs()
+S.check("a template takes the seabed depth at its new site, and the fill overwrites all but typed depths",
+        template_takes_the_seabed_at_the_point)
+
+
+def restyle_imported_layer():
+    run(press={"Add layer to map"}, uploads={"layer_upload": stubs.UploadedFile("sat.kml", KML)})
+    lay_ = ss.user_overlays[0]            # the one the "Imported layers" picker shows first
+    r0 = lay_["rev"]
+    H.inputs = {"Fill": "One colour"}
+    run(press={"Apply colours"})
+    H.inputs = {}
+    assert not errs(), errs()
+    assert lay_.get("fill_mode") == "single" and lay_["rev"] != r0, lay_.get("fill_mode")
+    run(press={"Reset to imported"})
+    return "fill_mode" not in lay_ and not errs()
+S.check("an imported layer's colours can be changed and reset", restyle_imported_layer)
+
+
 def move_layout_to_picked():
     run(event=ev(91, "pick", {"lat": 62.0, "lon": 4.0}))
     run(press={"Move layout here"})
@@ -1428,6 +1468,32 @@ def simple_profile_and_manual_wells_in_the_tab():
     return True
 S.check("the Production tab edits in place, RF and strategy, and runs a manual well profile",
         simple_profile_and_manual_wells_in_the_tab)
+
+
+def gas_field_is_shown_in_gas():
+    """A gas-condensate field: GIIP in GSm³, rates, plateau and chart in gas; the design basis too."""
+    import tb_fluids as tf, tb_flowassurance as tfa
+    run(press={"Load demo"})
+    r = tf.new_reservoir("G", "gas condensate")
+    r.in_place_sm3 = 20e9
+    tf.set_reservoir(ss.layout, r)
+    ws = [w for w in ss.layout.nodes if ss.layout.kind(w) == "well"]
+    tf.assign_reservoir(ss.layout, ws, "G")
+    tf.apply_reservoir_to_wells(ss.layout)
+    run(press={"Apply recovery and strategy"})           # table shows 20 (GSm³) and writes back 20e9
+    assert not errs(), errs()
+    assert abs(tf.reservoirs(ss.layout)["G"].in_place_sm3 - 20e9) < 1.0, tf.reservoirs(ss.layout)["G"].in_place_sm3
+    run(press={"Apply reservoirs"})
+    assert abs(tf.reservoirs(ss.layout)["G"].in_place_sm3 - 20e9) < 1.0, "the reservoir editor must keep GSm³"
+    g0 = {w: tf.main_rate(tfa.well_inputs(ss.layout)[w], "gas") for w in ws}
+    run(press={"Apply well inputs"})                      # gas wells: the gas rate is the input
+    g1 = {w: tf.main_rate(tfa.well_inputs(ss.layout)[w], "gas") for w in ws}
+    assert all(abs(g0[w] - g1[w]) < 1e-3 for w in ws), (g0, g1)
+    assert any(k == "metric" and m == "Peak gas" for k, m in H.log), "no gas metric"
+    assert not any(k == "metric" and m == "Peak oil" for k, m in H.log)
+    assert any(k == "metric" and m == "NPV" for k, m in H.log)
+    return not errs()
+S.check("a gas-condensate field is entered, profiled and shown in gas", gas_field_is_shown_in_gas)
 
 
 def optimiser_tab_runs_and_saves():

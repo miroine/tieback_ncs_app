@@ -46,6 +46,22 @@ decision from you before they can start.
 | 16 | Sensitivity and tornado | Each input moved to its low and high value, ranked by how far NPV travels. |
 | — | Boosting in the hydraulics | A boosting or compression station now lifts the pressure in the solve (80 bar default, per-node override), so the optimiser can see what it buys — it used to cost money and change nothing. |
 
+## Done in v0.23.0 — main phase
+
+| Item | What it gives you |
+|---|---|
+| Gas fields profiled in gas | A gas-condensate reservoir's profile runs on its gas EUR and the wells' gas rates; condensate follows from the CGR. It used to run in condensate, so the plateau, well cap and cut-off were condensate numbers and the gas came from a GOR that could disagree with the wells. |
+| In place in the main phase | STOIIP in MSm³, GIIP in GSm³, in the reservoir editor and the Production tab. |
+| Rates in the main phase | Gas wells entered by gas rate; well count, optimiser rate, design basis, viability, turndown chart and report in gas for a gas field. |
+
+## Done in v0.22.0
+
+| Item | What it gives you |
+|---|---|
+| Template depths fixed | Placing a template or moving the layout clears the old site's depths and seabed profiles and samples EMODnet at the new site; elements at the host take its depth. |
+| Depth fill modes | All except typed (default), only empty, all. Typed depths are tracked as yours. |
+| Layer colours | Imported layers: one fill colour or colour by attribute, outline, opacity, line width, reset. |
+
 ## Done in v0.21.0 — simplified production profile
 
 | Item | What it gives you |

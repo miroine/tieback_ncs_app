@@ -782,16 +782,22 @@
         pane: pane,
         style: (f) => {
           const p = (f && f.properties) || {};
-          const fill = p._fill || color;
-          const st = { color: p._outline || "#828282", weight: fc.weight || (fc.geometry === "line" ? 2 : 1),
-                       fillColor: fill, fillOpacity: fc.geometry === "polygon" ? 0.55 : 0.12, opacity: 0.9 };
+          // a user style wins: one colour for the layer, or the per-feature colour it wrote
+          const fill = (fc.fill_mode === "single" && fc.fill_color) || p._fill || fc.fill_color || color;
+          const op = (fc.fill_opacity !== undefined && fc.fill_opacity !== null) ? fc.fill_opacity
+                     : (fc.geometry === "polygon" ? 0.55 : 0.12);
+          const st = { color: fc.outline_color || p._outline || "#828282",
+                       weight: (fc.weight !== undefined && fc.weight !== null) ? fc.weight : (fc.geometry === "line" ? 2 : 1),
+                       fillColor: fill, fillOpacity: op, opacity: 0.9 };
           if (fc.geometry === "line") { st.color = fill; st.fillOpacity = 0; }
           if (fc.dash) st.dashArray = fc.dash;
           if (p._pattern) st.className = "hatch-" + p._pattern;      // CSS fill: url(#...)
           return st;
         },
-        pointToLayer: (f, latlng) => L.circleMarker(latlng, { pane: pane, radius: radius, color: "#fff", weight: 1.5,
-          fillColor: ((f && f.properties) || {})._fill || color, fillOpacity: 0.95 }),
+        pointToLayer: (f, latlng) => L.circleMarker(latlng, { pane: pane, radius: radius,
+          color: fc.outline_color || "#fff", weight: 1.5,
+          fillColor: (fc.fill_mode === "single" && fc.fill_color) || ((f && f.properties) || {})._fill
+                     || fc.fill_color || color, fillOpacity: 0.95 }),
         onEachFeature: (f, lyr) => {
           const p = f.properties || {};
           const lab = p._label || p.name || p.NAME || "";
