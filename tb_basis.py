@@ -21,6 +21,7 @@ import tb_cost
 import tb_flowassurance as tb_fa
 import tb_map
 import tb_schedule
+import tb_thermal as th
 
 BARA_PER_PSI = 1.0 / 14.503774
 SM3_PER_STB = 0.158987
@@ -112,7 +113,7 @@ def design_basis(layout, cost_settings: Optional[tb_cost.CostSettings] = None,
                          "default" if all(abs(x - 0.10) < 1e-9 for x in wc) else "ok",
                          "Late-life water cut drives hydrate and slugging risk"))
         api = [w.api for w in win.values()]
-        dens = [141.5 / (a + 131.5) * 1000 for a in api]
+        dens = [141.5 / (a + 131.5) * th.RHO_STOCK_TANK_WATER_KG_M3 for a in api]
         rows.append(_row("Reservoir and well stream", "Condensate density" if main == "gas" else "Oil density",
                          f"{min(dens):.0f}–{max(dens):.0f} kg/Sm³ ({min(api):.0f}–{max(api):.0f} °API)",
                          "default" if all(abs(a - 40.0) < 1e-9 for a in api) else "ok"))

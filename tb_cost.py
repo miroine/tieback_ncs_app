@@ -188,7 +188,10 @@ def monte_carlo(layout, settings: Optional[CostSettings] = None, n: int = 5000, 
 
 
 def _month_index(d: dt.date, origin: dt.date) -> float:
-    return (d.year - origin.year) * 12 + (d.month - origin.month) + (d.day - 1) / 31.0
+    month_start = dt.date(d.year, d.month, 1)
+    next_month = dt.date(d.year + (d.month == 12), d.month % 12 + 1, 1)
+    month_fraction = (d - month_start).days / (next_month - month_start).days
+    return (d.year - origin.year) * 12 + (d.month - origin.month) + month_fraction
 
 
 def _spread(profile: np.ndarray, start: float, end: float, amount: float):

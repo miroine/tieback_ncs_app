@@ -1,8 +1,8 @@
 """Formula-consistency audit (v0.20.1): each check pins a fix, so it cannot quietly come back."""
-import sys, copy, math, yaml
+import sys, copy, math, types, unittest.mock, yaml
 import tb_network as n, tb_catalog as c, tb_flowassurance as fa, tb_multiphase as mp, tb_thermal as th
 import tb_shutdown as sd, tb_cost, tb_fluids as f, tb_production as pr, tb_economics as ec, tb_optimise as op
-import tb_schedule, tb_chemistry as ch
+import tb_schedule, tb_chemistry as ch, tb_basis
 from _harness import Suite
 S = Suite("test_audit")
 FIX = yaml.safe_load(open("test_fixtures/demo_field_a_tieback.yaml"))
@@ -152,11 +152,36 @@ def boosting_starts_later_and_is_valued_so():
     fp = pr.field_profile(v, pr.ProfileSettings(first_production_year=int(rows[True]["first_production"][:4])))
     return fp["first_year"] == int(rows[True]["first_production"][:4])
 S.check("a variant's production starts on its own first-production date", boosting_starts_later_and_is_valued_so)
+def missing_first_oil_milestone_is_not_feasible():
+    lay = demo()
+    result = types.SimpleNamespace(wells=[], edges={}, findings=[])
+    empty_profile = dict(years=[], streams=[], total_boe_sm3=0.0, first_year=2030, last_year=2030)
+    with unittest.mock.patch.object(tb_schedule, "build_from_layout",
+                                    return_value=(types.SimpleNamespace(activities={}), {})), \
+         unittest.mock.patch.object(fa, "deliverable_rates",
+                                    return_value=dict(result=result, rates={}, scale=1.0, note="")), \
+         unittest.mock.patch.object(pr, "field_profile", return_value=empty_profile):
+        row = op.evaluate(lay)
+    assert not row["feasible"] and math.isnan(row["npv_musd"])
+    return "no first-production milestone" in row["note"]
+S.check("a schedule without a first-oil milestone cannot produce a feasible or valued variant",
+        missing_first_oil_milestone_is_not_feasible)
 
 # ── cross-module agreement ──
 def cost_and_schedule_agree_on_piggyback():
     return tb_cost.CostSettings().piggyback_install_frac == tb_schedule.ScheduleSettings().piggyback_install_frac
 S.check("cost and schedule use the same piggyback share by default", cost_and_schedule_agree_on_piggyback)
+def stock_tank_oil_density_is_shared():
+    api = 40.0
+    rho = 141.5 / (api + 131.5) * th.RHO_STOCK_TANK_WATER_KG_M3
+    assert abs(th.stream_mass(1000, 0, 0, api, 0.7).oil_kg_s
+               - 1000 * 0.158987 * rho / 86400) < 1e-12
+    assert abs(sd._liquid_density(api, 0.0) - rho) < 1e-12
+    density_row = next(r for r in tb_basis.design_basis(demo())
+                       if r["item"] == "Oil density")
+    return density_row["value"].startswith(f"{round(rho):.0f}–")
+S.check("thermal, shutdown, and design-basis oil density use one reference-water density",
+        stock_tank_oil_density_is_shared)
 S.check("one Hammerschmidt limit table for flow assurance and chemistry",
         lambda: ch.HAMMERSCHMIDT_LIMIT_WT == th.HAMMERSCHMIDT_LIMIT_WT)
 S.check("1 000 Sm³ gas is 1 Sm³ o.e. in production and economics alike",

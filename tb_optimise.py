@@ -260,12 +260,16 @@ def evaluate(layout, cost_settings=None, sched_settings=None, fa_settings=None,
     est = tb_cost.estimate(layout, cost_settings)
     row["capex_musd"] = est["total_usd"] / 1e6
     annual = {}
+    schedule_valid = False
     try:
         sched, emap = tb_schedule.build_from_layout(layout, sched_settings)
         fo = sorted([a for a in sched.activities.values() if a.act_id.endswith("_FIRST_OIL")],
                     key=lambda a: a.es)
-        row["first_production"] = fo[0].es.isoformat() if fo else ""
+        if not fo:
+            raise ValueError("schedule has no first-production milestone")
+        row["first_production"] = fo[0].es.isoformat()
         annual = tb_cost.phase_costs(est, sched, emap, cost_settings)["annual"]
+        schedule_valid = True
     except Exception as exc:  # noqa: BLE001 — an unschedulable variant still has a cost
         row["first_production"] = ""
         row["note"] = f"not scheduled ({exc})"
@@ -311,16 +315,19 @@ def evaluate(layout, cost_settings=None, sched_settings=None, fa_settings=None,
                                and s["kind"] == "calculated") / (1e6 if main == "gas" else 1.0)
     row["recoverable_msm3_oe"] = fp["total_boe_sm3"] / 1e6
     row["field_life_years"] = (fp["last_year"] - fp["first_year"] + 1) if fp["years"] else 0
-    cf = ec.cashflow(fp["years"], annual, econ_settings)
-    row["npv_musd"] = cf["npv_usd"] / 1e6
-    row["breakeven_usd_bbl"] = cf.get("breakeven_oil_usd_bbl")
-    row["capex_usd_boe"] = cf.get("capex_usd_boe")
-    row["unit_cost_usd_boe"] = cf.get("unit_technical_cost_usd_boe")
+    if schedule_valid:
+        cf = ec.cashflow(fp["years"], annual, econ_settings)
+        row["npv_musd"] = cf["npv_usd"] / 1e6
+        row["breakeven_usd_bbl"] = cf.get("breakeven_oil_usd_bbl")
+        row["capex_usd_boe"] = cf.get("capex_usd_boe")
+        row["unit_cost_usd_boe"] = cf.get("unit_technical_cost_usd_boe")
+    else:
+        row.update(npv_musd=math.nan, breakeven_usd_bbl=None, capex_usd_boe=None, unit_cost_usd_boe=None)
     # "feasible" means it carries the design rate with no design error. A variant that only
     # carries part of it is still costed and valued on what it does carry, so the table shows what
     # accepting the smaller throughput would be worth — it just does not reach the front.
     share = row.get("rate_share")
-    row["feasible"] = bool(row["errors"] == 0 and not row.get("capped")
+    row["feasible"] = bool(schedule_valid and row["errors"] == 0 and not row.get("capped")
                            and (share is None or (share == share and share >= 0.98)))
     return row
 

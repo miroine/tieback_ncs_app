@@ -85,7 +85,7 @@ def hydrate_pressure_bara(t_c: float, gas_sg: float) -> float:
 # ─────────────────────────────── inventory ─────────────────────────────────
 
 def _liquid_density(api: float, water_cut: float) -> float:
-    rho_o = 141.5 / (api + 131.5) * 1000.0
+    rho_o = 141.5 / (api + 131.5) * th.RHO_STOCK_TANK_WATER_KG_M3
     wc = min(max(water_cut, 0.0), 1.0)
     return rho_o * (1 - wc) + RHO_WATER * wc
 
