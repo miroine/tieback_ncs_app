@@ -1,4 +1,4 @@
-import sys, copy, yaml, numpy as np
+import sys, copy, datetime as dt, yaml, numpy as np
 import tb_catalog as c, tb_network as n, tb_schedule as s, tb_cost as k
 from _harness import Suite
 S = Suite("test_cost")
@@ -74,6 +74,14 @@ def spread_fn():
     p = np.zeros(6); k._spread(p, 0.5, 2.5, 100.0)
     assert np.allclose(p, [25, 50, 25, 0, 0, 0])
 S.check("fractional-month spreading exact", spread_fn)
+def month_index_uses_calendar_month_lengths():
+    origin = dt.date(2024, 1, 1)
+    assert abs(k._month_index(dt.date(2024, 1, 31), origin) - 30 / 31) < 1e-12
+    assert k._month_index(dt.date(2024, 2, 1), origin) == 1.0
+    assert abs(k._month_index(dt.date(2024, 2, 15), origin) - (1 + 14 / 29)) < 1e-12
+    assert k._month_index(dt.date(2024, 3, 1), origin) == 2.0
+S.check("CAPEX month index uses actual month lengths, including leap February",
+        month_index_uses_calendar_month_lengths)
 def templates_cost_and_schedule():
     import pathlib, tb_schedule as sch
     for f in sorted(pathlib.Path("templates").glob("*.yaml")):

@@ -29,6 +29,7 @@ CP_GAS = 2300.0
 CP_WATER = 4180.0
 CP_STEEL = 480.0
 RHO_STEEL = 7850.0
+RHO_STOCK_TANK_WATER_KG_M3 = 999.0
 
 INHIBITORS = {"None": (0.0, 1.0), "Methanol": (2335.0, 32.04), "MEG": (2700.0, 62.07)}
 
@@ -86,7 +87,7 @@ class StreamMass:
 
 
 def stream_mass(q_oil_stb_d, q_water_stb_d, gor_scf_stb, api, gas_sg) -> StreamMass:
-    rho_o = 141.5 / (api + 131.5) * 999.0                     # kg/m³ stock tank
+    rho_o = 141.5 / (api + 131.5) * RHO_STOCK_TANK_WATER_KG_M3  # kg/m³ stock tank
     oil = q_oil_stb_d * 0.158987 * rho_o / 86400.0
     gas = q_oil_stb_d * gor_scf_stb * 0.0764 * 0.45359 * gas_sg / 86400.0
     water = q_water_stb_d * 0.158987 * 1025.0 / 86400.0
